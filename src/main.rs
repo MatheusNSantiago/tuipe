@@ -37,7 +37,7 @@ fn main() -> Result<()> {
         execute!(
             std::io::stdout(),
             EnableMouseCapture,
-            SetCursorStyle::SteadyBar
+            SetCursorStyle::BlinkingBar
         )?;
         let _mouse_guard = scopeguard::guard((), |_| {
             let mut stdout = std::io::stdout();

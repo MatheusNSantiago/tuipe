@@ -19,7 +19,7 @@ use crate::{
 };
 
 const MIN_PAGE_PADDING: u16 = 2;
-const WORD_GAP: usize = 2;
+const WORD_GAP: usize = 1;
 const CONFIG_MIN_WIDTH: u16 = 76;
 const CONFIG_QUOTE_WIDTH: u16 = 82;
 const CONFIG_CARD_GAP: u16 = 2;

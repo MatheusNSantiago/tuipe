@@ -14,7 +14,7 @@ expression: "render_engine_with_settings(100, 28, &engine, true)"
                      │  m time    m words    m quote                          │
                      │  v 15    v 30    v 60    v 120                         │
                      │                                                        │
-     olá  mundo  prát│  d normal    d expert    d master                      │
+     olá mundo prátic│  d normal    d expert    d master                      │
                      │  a adaptive                                            │
                      │                                                        │
                      │  l portuguese    l english                             │
