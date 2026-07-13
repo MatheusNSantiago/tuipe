@@ -1,0 +1,16 @@
+---
+source: src/ui.rs
+expression: rendered
+---
+
+
+  ⌨ tuipe
+
+              ╭───────────────────╮
+              │ ⚙  test settings  │
+       portuguese common · expert · adaptive
+
+  olá  mundo  prática
+
+
+      enter restart    esc settings    q quit

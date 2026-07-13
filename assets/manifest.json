@@ -1,0 +1,113 @@
+{
+  "monkeytype_revision": "781dcd9fe66fb4d8fb3f5e408d1b057a2054b9d5",
+  "entries": [
+    {
+      "kind": "word_pack",
+      "name": "portuguese/common",
+      "source": "frontend/static/languages/portuguese.json",
+      "sha256": "0d47605f8c084ef1c4c8b43c21a62f4515ed2d3e9717641614d0328b68256521"
+    },
+    {
+      "kind": "word_pack",
+      "name": "portuguese/1k",
+      "source": "frontend/static/languages/portuguese_1k.json",
+      "sha256": "bb540a10ca07a2aae207eae4e31ab55bd41130d3e19e0a0249cbe1b39d597622"
+    },
+    {
+      "kind": "word_pack",
+      "name": "portuguese/5k",
+      "source": "frontend/static/languages/portuguese_5k.json",
+      "sha256": "ae79741ac7f44c437918bb6713979fcb677903f9247a7a419687f83138b10350"
+    },
+    {
+      "kind": "word_pack",
+      "name": "english/common",
+      "source": "frontend/static/languages/english.json",
+      "sha256": "9eff3c4563d4409f4c18d6bd35963654570c72d688b4e01453eac916d614be1e"
+    },
+    {
+      "kind": "word_pack",
+      "name": "english/1k",
+      "source": "frontend/static/languages/english_1k.json",
+      "sha256": "43508d6d63920e87d97762ef775b7419e36f7f3496351be3ea76f8421e52757d"
+    },
+    {
+      "kind": "word_pack",
+      "name": "english/5k",
+      "source": "frontend/static/languages/english_5k.json",
+      "sha256": "d71fd5e0559e565337630a8f46a47db85d0fcae790ed6d2a878dcac137025ae3"
+    },
+    {
+      "kind": "quotes",
+      "name": "portuguese",
+      "source": "frontend/static/quotes/portuguese.json",
+      "sha256": "5f5850c8eefb20d4a3e3dd879288e63b177b6e9dd2186a3f2660ce84a2c00f8f"
+    },
+    {
+      "kind": "quotes",
+      "name": "english",
+      "source": "frontend/static/quotes/english.json",
+      "sha256": "cc6e0c557ebdbc2f946935978785e3670d8037cbd7f45ba2491ca5a20c725b54"
+    },
+    {
+      "kind": "theme",
+      "name": "arch",
+      "source": "frontend/src/ts/constants/themes.ts",
+      "sha256": "a2c084e6af14e32c2fb8abc866bfd1eb1da372f4454d1484a8b022b8bbe1aead"
+    },
+    {
+      "kind": "theme",
+      "name": "serika_dark",
+      "source": "frontend/src/ts/constants/themes.ts",
+      "sha256": "89c59c63d3063dbc75922c470243753b63780b47c77a6c1754357740f842a930"
+    },
+    {
+      "kind": "theme",
+      "name": "serika",
+      "source": "frontend/src/ts/constants/themes.ts",
+      "sha256": "63b55f1ee4353a0125428b5f720dc167fe3be323a3e1232c98d13609a3be202d"
+    },
+    {
+      "kind": "theme",
+      "name": "catppuccin",
+      "source": "frontend/src/ts/constants/themes.ts",
+      "sha256": "4a25b07eec7ed04784b63c1ae14d16af60c329b49e6edaa5f3fb333c20471ec2"
+    },
+    {
+      "kind": "theme",
+      "name": "dracula",
+      "source": "frontend/src/ts/constants/themes.ts",
+      "sha256": "eec2f20b05f8f1f7588635015a6a5bbbf372c437e434862959faecbf608acce7"
+    },
+    {
+      "kind": "theme",
+      "name": "nord",
+      "source": "frontend/src/ts/constants/themes.ts",
+      "sha256": "1323ef27c932c7fd4b3c3056482e91212fea61661be71b5b584613afaade7709"
+    },
+    {
+      "kind": "theme",
+      "name": "gruvbox_dark",
+      "source": "frontend/src/ts/constants/themes.ts",
+      "sha256": "985d092f224871acf1767711650c60c97bfe545637ffb8c3a2124dfce46eb203"
+    },
+    {
+      "kind": "theme",
+      "name": "rose_pine",
+      "source": "frontend/src/ts/constants/themes.ts",
+      "sha256": "6b381254e4355562b46fa8204d938321187a5f3b1d22a1a424148c5f4e67af0e"
+    },
+    {
+      "kind": "theme",
+      "name": "solarized_dark",
+      "source": "frontend/src/ts/constants/themes.ts",
+      "sha256": "f7ea60885c4b989ca8660c0accb2bd105a88d7433a2b44da0a5cd9dc8ab8e609"
+    },
+    {
+      "kind": "theme",
+      "name": "monokai",
+      "source": "frontend/src/ts/constants/themes.ts",
+      "sha256": "6e0a2a42312763de38fa3ef0709c3aba95e7c404a1cbbb7cdfa5afa083e8ca88"
+    }
+  ]
+}

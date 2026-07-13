@@ -1,0 +1,12 @@
+{
+  "bg": "#1f1d27",
+  "caret": "#f6c177",
+  "colorfulError": "#eb6f92",
+  "colorfulErrorExtra": "#ebbcba",
+  "error": "#eb6f92",
+  "errorExtra": "#ebbcba",
+  "main": "#9ccfd8",
+  "sub": "#c4a7e7",
+  "subAlt": "#282533",
+  "text": "#e0def4"
+}

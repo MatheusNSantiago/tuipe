@@ -1,0 +1,6 @@
+tuipe is an offline terminal typing trainer inspired by Monkeytype.
+
+The behavioral reference is Monkeytype commit
+781dcd9fe66fb4d8fb3f5e408d1b057a2054b9d5, licensed under GPL-3.0.
+The project carries no Monkeytype data until its deterministic importer has
+copied and recorded the provenance of each approved asset.
