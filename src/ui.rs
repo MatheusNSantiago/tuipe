@@ -1,5 +1,3 @@
-use std::time::{Duration, Instant};
-
 use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Layout, Rect},
@@ -36,56 +34,6 @@ const RESULT_CHART_HEIGHT: u16 = 12;
 const RESULT_PRIMARY_WIDTH: u16 = 10;
 const RESULT_AXIS_LABEL_WIDTH: u16 = 4;
 const CURVE_SAMPLES_PER_INTERVAL: u16 = 16;
-const CARET_ANIMATION_DURATION: Duration = Duration::from_millis(100);
-
-#[derive(Default)]
-pub struct SmoothCaret {
-    from: Option<(u16, u16)>,
-    target: Option<(u16, u16)>,
-    started_at: Option<Instant>,
-}
-
-impl SmoothCaret {
-    pub fn is_animating(&self, now: Instant) -> bool {
-        self.from != self.target
-            && self.started_at.is_some_and(|started_at| {
-                now.saturating_duration_since(started_at) < CARET_ANIMATION_DURATION
-            })
-    }
-
-    fn reset(&mut self) {
-        *self = Self::default();
-    }
-
-    fn retarget(&mut self, target: (u16, u16), now: Instant) {
-        if self.target == Some(target) {
-            return;
-        }
-        let current = self.position(now).or(self.target).unwrap_or(target);
-        self.from = Some(current);
-        self.target = Some(target);
-        self.started_at = (current != target).then_some(now);
-    }
-
-    fn progress(&self, now: Instant) -> f32 {
-        self.started_at
-            .map_or(1.0, |started_at| {
-                now.saturating_duration_since(started_at).as_secs_f32()
-                    / CARET_ANIMATION_DURATION.as_secs_f32()
-            })
-            .clamp(0.0, 1.0)
-    }
-
-    fn position(&self, now: Instant) -> Option<(u16, u16)> {
-        let from = self.from?;
-        let target = self.target?;
-        let progress = ease_in_out(self.progress(now));
-        Some((
-            lerp_cell(from.0, target.0, progress),
-            lerp_cell(from.1, target.1, progress),
-        ))
-    }
-}
 
 pub fn render(
     frame: &mut Frame,
@@ -93,8 +41,6 @@ pub fn render(
     theme: &Theme,
     settings_open: bool,
     theme_name: &str,
-    caret: &mut SmoothCaret,
-    now: Instant,
 ) {
     let viewport = frame.area();
     frame.render_widget(
@@ -142,11 +88,10 @@ pub fn render(
 
     match engine.status() {
         TestStatus::Completed { .. } | TestStatus::Failed { .. } => {
-            caret.reset();
             render_result(frame, result_area, engine, theme)
         }
         TestStatus::Ready | TestStatus::Running { .. } => {
-            render_test(frame, test_area, engine, theme, caret, now)
+            render_test(frame, test_area, engine, theme)
         }
     }
     if ready
@@ -426,14 +371,7 @@ fn render_card(frame: &mut Frame, area: Rect, line: Line<'static>, theme: &Theme
     frame.render_widget(Paragraph::new(line).alignment(Alignment::Center), text);
 }
 
-fn render_test(
-    frame: &mut Frame,
-    area: Rect,
-    engine: &TestEngine,
-    theme: &Theme,
-    caret: &mut SmoothCaret,
-    now: Instant,
-) {
+fn render_test(frame: &mut Frame, area: Rect, engine: &TestEngine, theme: &Theme) {
     let text_width = area.width;
     if text_width < 20 || area.height < 4 {
         frame.render_widget(
@@ -486,68 +424,11 @@ fn render_test(
 
     if let Some(cursor_col) = wrapped.get(active_line).and_then(|line| line.cursor_col) {
         let visible_line = active_line.saturating_sub(first_line) as u16;
-        let target = (
+        frame.set_cursor_position((
             area.x + cursor_col.min(area.width.saturating_sub(1)),
             first_word_y + visible_line * word_step,
-        );
-        render_smooth_caret(frame, caret, target, theme, now);
+        ));
     }
-}
-
-fn render_smooth_caret(
-    frame: &mut Frame,
-    caret: &mut SmoothCaret,
-    target: (u16, u16),
-    theme: &Theme,
-    now: Instant,
-) {
-    caret.retarget(target, now);
-    let progress = ease_in_out(caret.progress(now));
-    if caret.is_animating(now) {
-        if let Some(from) = caret.from {
-            blend_cell_foreground(frame, from, color(&theme.caret), 1.0 - progress);
-        }
-        blend_cell_foreground(frame, target, color(&theme.caret), progress);
-    }
-    frame.set_cursor_position(caret.position(now).unwrap_or(target));
-}
-
-fn blend_cell_foreground(frame: &mut Frame, position: (u16, u16), target: Color, amount: f32) {
-    if amount <= 0.0 || !frame.area().contains(position.into()) {
-        return;
-    }
-    let cell = &mut frame.buffer_mut()[position];
-    let style = cell.style();
-    let foreground = style.fg.unwrap_or(Color::Reset);
-    cell.set_style(style.fg(blend_color(foreground, target, amount)));
-}
-
-fn blend_color(from: Color, to: Color, amount: f32) -> Color {
-    let (Color::Rgb(from_r, from_g, from_b), Color::Rgb(to_r, to_g, to_b)) = (from, to) else {
-        return if amount >= 0.5 { to } else { from };
-    };
-    let channel = |from: u8, to: u8| {
-        (f32::from(from) + (f32::from(to) - f32::from(from)) * amount)
-            .round()
-            .clamp(0.0, 255.0) as u8
-    };
-    Color::Rgb(
-        channel(from_r, to_r),
-        channel(from_g, to_g),
-        channel(from_b, to_b),
-    )
-}
-
-fn ease_in_out(progress: f32) -> f32 {
-    if progress < 0.5 {
-        0.5 * (2.0 * progress).powf(1.25)
-    } else {
-        1.0 - 0.5 * (2.0 * (1.0 - progress)).powf(1.25)
-    }
-}
-
-fn lerp_cell(from: u16, to: u16, progress: f32) -> u16 {
-    (f32::from(from) + (f32::from(to) - f32::from(from)) * progress).round() as u16
 }
 
 const fn first_visible_line(active_line: usize) -> usize {
@@ -1234,19 +1115,8 @@ mod tests {
         let theme = catalog.theme("arch").unwrap();
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).unwrap();
-        let mut caret = SmoothCaret::default();
         terminal
-            .draw(|frame| {
-                render(
-                    frame,
-                    engine,
-                    theme,
-                    settings_open,
-                    "arch",
-                    &mut caret,
-                    Instant::now(),
-                )
-            })
+            .draw(|frame| render(frame, engine, theme, settings_open, "arch"))
             .unwrap();
         let buffer = terminal.backend().buffer();
         (0..height)
@@ -1348,25 +1218,5 @@ mod tests {
         assert_eq!(curve.first(), Some(&observed[0]));
         assert_eq!(curve.last(), Some(&observed[2]));
         assert_eq!(curve.len(), 33);
-    }
-
-    #[test]
-    fn smooth_caret_interpolates_for_one_hundred_milliseconds() {
-        let started_at = Instant::now();
-        let mut caret = SmoothCaret::default();
-        caret.retarget((10, 4), started_at);
-        caret.retarget((14, 4), started_at);
-
-        assert_eq!(caret.position(started_at), Some((10, 4)));
-        assert_eq!(
-            caret.position(started_at + Duration::from_millis(50)),
-            Some((12, 4))
-        );
-        assert!(caret.is_animating(started_at + Duration::from_millis(99)));
-        assert!(!caret.is_animating(started_at + Duration::from_millis(100)));
-        assert_eq!(
-            caret.position(started_at + Duration::from_millis(100)),
-            Some((14, 4))
-        );
     }
 }

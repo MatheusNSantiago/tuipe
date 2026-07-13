@@ -83,7 +83,7 @@ Embarcar estas dez paletas: `arch`, `serika_dark`, `serika`, `catppuccin`, `drac
 - Modos `zen` e `custom`.
 - Todos os `funboxes`.
 - Tags, presets, exportacao CSV e importacao/exportacao de configuracoes.
-- Sons, efeitos de particula, efeitos de letras e rolagem animada. O caret padrao permanece fino, piscante e interpola movimentos em 100 ms, como o `smoothCaret: medium` do Monkeytype.
+- Sons, efeitos de particula, efeitos de letras e rolagem animada. O caret padrao permanece fino e piscante, preservando a fonte nativa do terminal.
 - Multiplos estilos de cursor; usar um unico cursor coerente com o tema.
 - WPM, precisao e burst ao vivo. Eles aparecem apenas depois do teste.
 - Teclado virtual, pace caret, blind mode, stop-on-error, confidence mode e freedom mode.
