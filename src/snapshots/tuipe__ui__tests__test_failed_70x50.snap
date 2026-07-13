@@ -15,24 +15,24 @@ expression: "render_engine_at(70, 50, &engine)"
 
 
 
-
-
-   wpm             80│
-   61                │⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠤⠤⠤⠤⠤⠤⠤⠤⠔⠒⠒⠒⠒⠒⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉•
-                     │
-   acc               │
-   96%             0 │
-                     └─────────────────────────────────────────────
-                     1                                          4.1
+   wpm             wpm over time   × errors
+   71              120│▀▀▀▀▀▄▄▄▄▄▄▄▄
+                      │             ▀▀▀▀▀▀▀▀▀▄▄▄▄▄▄▄▄▄
+   acc                │                               ▀▀▀▀▀▀▀▀▄▄▄▄×
+   92%             60 │
+                      │
+                      │
+                   0  │
+                      └────────────────────────────────────────────
+                      1                                         1.7
 
    test type             other                 raw
-   words 6               failed (difficulty)   70
+   words 4               failed (difficulty)   92
    portuguese common
    expert · adaptive
 
    characters            consistency           time
-   21/1/0/1              72%                   4.1s
-
+   10/1/0/1              46%                   1.7s
 
 
 

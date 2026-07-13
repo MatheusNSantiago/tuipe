@@ -414,7 +414,7 @@ fn render_result(frame: &mut Frame, area: Rect, engine: &TestEngine, theme: &The
     let failed = matches!(engine.status(), TestStatus::Failed { .. });
     let group_count = if failed { 6 } else { 5 };
     let details_height = result_details_height(area.width, group_count);
-    let body = centered_height(area, (8 + details_height).min(area.height));
+    let body = centered_height(area, (11 + details_height).min(area.height));
     let top_height = body
         .height
         .saturating_sub(details_height.saturating_add(1))
@@ -463,6 +463,16 @@ fn render_primary_result(frame: &mut Frame, area: Rect, metrics: &Metrics, theme
 }
 
 fn render_result_chart(frame: &mut Frame, area: Rect, metrics: &Metrics, theme: &Theme) {
+    let sections = Layout::vertical([Constraint::Length(1), Constraint::Min(4)]).split(area);
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("wpm over time", Style::default().fg(color(&theme.text))),
+            Span::raw("   "),
+            Span::styled("× errors", Style::default().fg(color(&theme.error))),
+        ])),
+        sections[0],
+    );
+
     let wpm_points = metrics
         .wpm_history
         .iter()
@@ -485,40 +495,67 @@ fn render_result_chart(frame: &mut Frame, area: Rect, metrics: &Metrics, theme: 
     let datasets = vec![
         Dataset::default()
             .data(&wpm_points)
-            .marker(Marker::Braille)
+            .marker(Marker::HalfBlock)
             .graph_type(GraphType::Line)
             .style(Style::default().fg(color(&theme.main))),
         Dataset::default()
             .data(&error_points)
-            .marker(Marker::Dot)
+            .marker(Marker::Custom('×'))
             .graph_type(GraphType::Scatter)
             .style(Style::default().fg(color(&theme.error))),
     ];
+    let axis_label_style = Style::default().fg(color(&theme.main));
+    let x_labels = chart_x_labels(metrics, axis_label_style);
+    let y_labels = [
+        Line::styled("0", axis_label_style),
+        Line::styled(format!("{:.0}", chart_ceiling / 2.0), axis_label_style),
+        Line::styled(format!("{chart_ceiling:.0}"), axis_label_style),
+    ];
     frame.render_widget(
         Chart::new(datasets)
-            .style(Style::default().fg(color(&theme.sub_alt)))
+            .style(Style::default().fg(color(&theme.main)))
             .x_axis(
                 Axis::default()
                     .bounds([0.0, last_point.max(1.0)])
-                    .labels(["1".to_owned(), format_chart_duration(metrics.duration_ms)])
-                    .style(Style::default().fg(color(&theme.sub))),
+                    .labels(x_labels)
+                    .style(axis_label_style),
             )
             .y_axis(
                 Axis::default()
                     .bounds([0.0, chart_ceiling])
-                    .labels(["0".to_owned(), format!("{chart_ceiling:.0}")])
-                    .style(Style::default().fg(color(&theme.sub))),
+                    .labels(y_labels)
+                    .style(axis_label_style),
             ),
-        area,
+        sections[1],
     );
 }
 
-fn format_chart_duration(duration_ms: u64) -> String {
-    if duration_ms.is_multiple_of(1_000) {
-        (duration_ms / 1_000).max(1).to_string()
-    } else {
-        format!("{:.1}", duration_ms as f64 / 1_000.0)
+fn chart_x_labels(metrics: &Metrics, style: Style) -> Vec<Line<'static>> {
+    let duration = metrics.duration_ms as f64 / 1_000.0;
+    let mut labels = vec![Line::styled("1", style)];
+    if metrics.wpm_history.len() >= 3 {
+        labels.push(Line::styled(
+            format_chart_seconds((1.0 + duration) / 2.0),
+            style,
+        ));
     }
+    labels.push(Line::styled(
+        format_chart_duration(metrics.duration_ms),
+        style,
+    ));
+    labels
+}
+
+fn format_chart_seconds(seconds: f64) -> String {
+    if seconds.fract().abs() < f64::EPSILON {
+        format!("{seconds:.0}")
+    } else {
+        format!("{seconds:.1}")
+    }
+}
+
+fn format_chart_duration(duration_ms: u64) -> String {
+    format_chart_seconds((duration_ms as f64 / 1_000.0).max(1.0))
 }
 
 fn render_result_details(
@@ -1024,27 +1061,14 @@ mod tests {
     #[test]
     fn failed_result_stays_centered_and_preserves_the_result_hierarchy() {
         let config = TestConfig {
-            mode: TestMode::Words { count: 6 },
+            mode: TestMode::Words { count: 4 },
             ..TestConfig::default()
         };
         let mut engine = TestEngine::new(
             config,
-            [
-                "cada ".into(),
-                "aqui ".into(),
-                "ele ".into(),
-                "sempre ".into(),
-                "sem ".into(),
-                "fim".into(),
-            ],
+            ["cada ".into(), "aqui ".into(), "sem ".into(), "fim".into()],
         );
-        for (text, at_ms) in [
-            ("cada ", 100),
-            ("aqui ", 1_200),
-            ("ele ", 2_300),
-            ("sempre ", 3_400),
-            ("se ", 4_200),
-        ] {
+        for (text, at_ms) in [("cada ", 100), ("aqui ", 900), ("se ", 1_800)] {
             engine.update(InputEvent::Key {
                 action: KeyAction::Text(text.into()),
                 at_ms,
@@ -1053,7 +1077,7 @@ mod tests {
 
         assert!(matches!(
             engine.status(),
-            TestStatus::Failed { word_index: 4, .. }
+            TestStatus::Failed { word_index: 2, .. }
         ));
         insta::assert_snapshot!("test_failed_100x28", render_engine_at(100, 28, &engine));
         insta::assert_snapshot!("test_failed_70x50", render_engine_at(70, 50, &engine));
