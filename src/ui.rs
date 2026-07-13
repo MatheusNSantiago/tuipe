@@ -4,7 +4,10 @@ use ratatui::{
     style::{Color, Modifier, Style},
     symbols::Marker,
     text::{Line, Span},
-    widgets::{Axis, Block, BorderType, Borders, Chart, Clear, Dataset, GraphType, Paragraph},
+    widgets::{
+        Block, BorderType, Borders, Clear, Paragraph,
+        canvas::{Canvas, Line as CanvasLine, Points},
+    },
 };
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
@@ -20,6 +23,7 @@ const CONFIG_MIN_WIDTH: u16 = 84;
 const RESULT_WIDE_WIDTH: u16 = 84;
 const RESULT_MEDIUM_WIDTH: u16 = 54;
 const RESULT_GROUP_HEIGHT: u16 = 4;
+const RESULT_CHART_HEIGHT: u16 = 12;
 
 pub fn render(
     frame: &mut Frame,
@@ -414,7 +418,10 @@ fn render_result(frame: &mut Frame, area: Rect, engine: &TestEngine, theme: &The
     let failed = matches!(engine.status(), TestStatus::Failed { .. });
     let group_count = if failed { 6 } else { 5 };
     let details_height = result_details_height(area.width, group_count);
-    let body = centered_height(area, (11 + details_height).min(area.height));
+    let body = centered_height(
+        area,
+        (RESULT_CHART_HEIGHT + 1 + details_height).min(area.height),
+    );
     let top_height = body
         .height
         .saturating_sub(details_height.saturating_add(1))
@@ -463,7 +470,12 @@ fn render_primary_result(frame: &mut Frame, area: Rect, metrics: &Metrics, theme
 }
 
 fn render_result_chart(frame: &mut Frame, area: Rect, metrics: &Metrics, theme: &Theme) {
-    let sections = Layout::vertical([Constraint::Length(1), Constraint::Min(4)]).split(area);
+    let sections = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Min(4),
+        Constraint::Length(1),
+    ])
+    .split(area);
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled("wpm over time", Style::default().fg(color(&theme.text))),
@@ -473,6 +485,10 @@ fn render_result_chart(frame: &mut Frame, area: Rect, metrics: &Metrics, theme: 
         sections[0],
     );
 
+    let chart_columns =
+        Layout::horizontal([Constraint::Length(5), Constraint::Min(10)]).split(sections[1]);
+    let labels = chart_columns[0];
+    let plot = chart_columns[1];
     let wpm_points = metrics
         .wpm_history
         .iter()
@@ -492,58 +508,94 @@ fn render_result_chart(frame: &mut Frame, area: Rect, metrics: &Metrics, theme: 
         .map(|point| point.1)
         .fold(metrics.raw_wpm.max(metrics.wpm), f64::max);
     let chart_ceiling = ((peak_wpm.max(20.0) / 20.0).ceil() * 20.0).max(20.0);
-    let datasets = vec![
-        Dataset::default()
-            .data(&wpm_points)
-            .marker(Marker::HalfBlock)
-            .graph_type(GraphType::Line)
-            .style(Style::default().fg(color(&theme.main))),
-        Dataset::default()
-            .data(&error_points)
-            .marker(Marker::Custom('×'))
-            .graph_type(GraphType::Scatter)
-            .style(Style::default().fg(color(&theme.error))),
-    ];
-    let axis_label_style = Style::default().fg(color(&theme.main));
-    let x_labels = chart_x_labels(metrics, axis_label_style);
-    let y_labels = [
-        Line::styled("0", axis_label_style),
-        Line::styled(format!("{:.0}", chart_ceiling / 2.0), axis_label_style),
-        Line::styled(format!("{chart_ceiling:.0}"), axis_label_style),
-    ];
+
+    render_chart_y_labels(frame, labels, plot, chart_ceiling, theme);
     frame.render_widget(
-        Chart::new(datasets)
-            .style(Style::default().fg(color(&theme.main)))
-            .x_axis(
-                Axis::default()
-                    .bounds([0.0, last_point.max(1.0)])
-                    .labels(x_labels)
-                    .style(axis_label_style),
+        Canvas::default()
+            .marker(Marker::Braille)
+            .background_color(color(&theme.bg))
+            .block(
+                Block::default()
+                    .borders(Borders::LEFT | Borders::BOTTOM)
+                    .border_style(Style::default().fg(color(&theme.main))),
             )
-            .y_axis(
-                Axis::default()
-                    .bounds([0.0, chart_ceiling])
-                    .labels(y_labels)
-                    .style(axis_label_style),
-            ),
-        sections[1],
+            .x_bounds([0.0, last_point.max(1.0)])
+            .y_bounds([0.0, chart_ceiling])
+            .paint(|context| {
+                context.draw(&Points {
+                    coords: &wpm_points,
+                    color: color(&theme.main),
+                });
+                for points in wpm_points.windows(2) {
+                    context.draw(&CanvasLine {
+                        x1: points[0].0,
+                        y1: points[0].1,
+                        x2: points[1].0,
+                        y2: points[1].1,
+                        color: color(&theme.main),
+                    });
+                }
+                context.layer();
+                context.marker(Marker::Custom('×'));
+                context.draw(&Points {
+                    coords: &error_points,
+                    color: color(&theme.error),
+                });
+            }),
+        plot,
     );
+    render_chart_x_labels(frame, sections[2], plot, metrics, theme);
 }
 
-fn chart_x_labels(metrics: &Metrics, style: Style) -> Vec<Line<'static>> {
-    let duration = metrics.duration_ms as f64 / 1_000.0;
-    let mut labels = vec![Line::styled("1", style)];
-    if metrics.wpm_history.len() >= 3 {
-        labels.push(Line::styled(
-            format_chart_seconds((1.0 + duration) / 2.0),
-            style,
-        ));
+fn render_chart_y_labels(frame: &mut Frame, area: Rect, plot: Rect, ceiling: f64, theme: &Theme) {
+    let style = Style::default().fg(color(&theme.main));
+    for (offset, label) in [
+        (0, format!("{ceiling:.0}")),
+        (
+            plot.height.saturating_sub(1) / 2,
+            format!("{:.0}", ceiling / 2.0),
+        ),
+        (plot.height.saturating_sub(1), "0".to_owned()),
+    ] {
+        frame.render_widget(
+            Paragraph::new(Line::styled(label, style)).alignment(Alignment::Right),
+            Rect::new(area.x, plot.y + offset, area.width, 1),
+        );
     }
-    labels.push(Line::styled(
-        format_chart_duration(metrics.duration_ms),
-        style,
-    ));
-    labels
+}
+
+fn render_chart_x_labels(
+    frame: &mut Frame,
+    area: Rect,
+    plot: Rect,
+    metrics: &Metrics,
+    theme: &Theme,
+) {
+    let style = Style::default().fg(color(&theme.main));
+    let duration = format_chart_duration(metrics.duration_ms);
+    frame.render_widget(
+        Paragraph::new(Line::styled("1", style)),
+        Rect::new(plot.x, area.y, 4.min(plot.width), 1),
+    );
+    if metrics.wpm_history.len() >= 3 {
+        frame.render_widget(
+            Paragraph::new(Line::styled(
+                format_chart_seconds((1.0 + metrics.duration_ms as f64 / 1_000.0) / 2.0),
+                style,
+            ))
+            .alignment(Alignment::Center),
+            Rect::new(plot.x, area.y, plot.width, 1),
+        );
+    }
+    frame.render_widget(
+        Paragraph::new(Line::styled(duration.clone(), style)).alignment(Alignment::Right),
+        Rect::new(
+            plot.right().saturating_sub(duration.len() as u16),
+            area.y,
+            duration.len() as u16,
+            1,
+        ),
+    );
 }
 
 fn format_chart_seconds(seconds: f64) -> String {
