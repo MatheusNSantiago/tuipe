@@ -246,7 +246,7 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, terminal: ratatui::layout::Siz
         return Ok(false);
     }
 
-    let Some(cards) = ui::config_card_areas(viewport) else {
+    let Some(cards) = ui::config_card_areas(viewport, &app.engine.config().mode) else {
         app.settings_open = true;
         return Ok(true);
     };

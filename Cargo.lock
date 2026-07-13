@@ -938,6 +938,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "071dfc062690e90b734c0b2273ce72ad0ffa95f0c74596bc250dcfd960262841"
 dependencies = [
  "autocfg",
+ "libm",
 ]
 
 [[package]]
@@ -1621,6 +1622,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "spline1d"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "459cc8dde087632ae16d91d96c3153df65f014acf35919a18357a6c5942f4fb5"
+dependencies = [
+ "num-traits",
+]
+
+[[package]]
 name = "stable_deref_trait"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1902,6 +1912,7 @@ dependencies = [
  "scopeguard",
  "serde",
  "serde_json",
+ "spline1d",
  "tempfile",
  "termina",
  "toml",

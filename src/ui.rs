@@ -9,6 +9,7 @@ use ratatui::{
         canvas::{Canvas, Line as CanvasLine, Points},
     },
 };
+use spline1d::pchip;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
@@ -19,11 +20,20 @@ use crate::{
 
 const MIN_PAGE_PADDING: u16 = 2;
 const WORD_GAP: usize = 2;
-const CONFIG_MIN_WIDTH: u16 = 84;
+const CONFIG_MIN_WIDTH: u16 = 76;
+const CONFIG_QUOTE_WIDTH: u16 = 82;
+const CONFIG_CARD_GAP: u16 = 2;
+const CONFIG_MODIFIER_WIDTH: u16 = 26;
+const CONFIG_MODE_WIDTH: u16 = 26;
+const CONFIG_COMPACT_VALUE_WIDTH: u16 = 20;
+const CONFIG_QUOTE_VALUE_WIDTH: u16 = 26;
 const RESULT_WIDE_WIDTH: u16 = 84;
 const RESULT_MEDIUM_WIDTH: u16 = 54;
 const RESULT_GROUP_HEIGHT: u16 = 4;
 const RESULT_CHART_HEIGHT: u16 = 12;
+const RESULT_PRIMARY_WIDTH: u16 = 10;
+const RESULT_AXIS_LABEL_WIDTH: u16 = 4;
+const CURVE_SAMPLES_PER_INTERVAL: u16 = 16;
 
 pub fn render(
     frame: &mut Frame,
@@ -238,7 +248,8 @@ fn render_settings(
 
 fn render_config_bar(frame: &mut Frame, viewport: Rect, engine: &TestEngine, theme: &Theme) {
     let area = config_bar_area(viewport);
-    let Some(cards) = config_card_areas(viewport) else {
+    let config = engine.config();
+    let Some(cards) = config_card_areas(viewport, &config.mode) else {
         let card = centered_width(area, 21.min(area.width));
         render_card(
             frame,
@@ -249,7 +260,6 @@ fn render_config_bar(frame: &mut Frame, viewport: Rect, engine: &TestEngine, the
         return;
     };
 
-    let config = engine.config();
     let active = Style::default()
         .fg(color(&theme.main))
         .add_modifier(Modifier::BOLD);
@@ -257,7 +267,7 @@ fn render_config_bar(frame: &mut Frame, viewport: Rect, engine: &TestEngine, the
 
     let modifiers = Line::from(vec![
         selector("@ punctuation", config.punctuation, active, idle),
-        Span::raw("  "),
+        Span::raw(" "),
         selector("# numbers", config.numbers, active, idle),
     ]);
     render_card(frame, cards[0], modifiers, theme);
@@ -269,14 +279,14 @@ fn render_config_bar(frame: &mut Frame, viewport: Rect, engine: &TestEngine, the
             active,
             idle,
         ),
-        Span::raw("  "),
+        Span::raw(" "),
         selector(
             "A words",
             matches!(config.mode, TestMode::Words { .. }),
             active,
             idle,
         ),
-        Span::raw("  "),
+        Span::raw(" "),
         selector(
             "❝ quote",
             matches!(config.mode, TestMode::Quote),
@@ -314,18 +324,30 @@ pub fn config_bar_area(viewport: Rect) -> Rect {
     Rect::new(content.x, y, content.width, 3)
 }
 
-pub fn config_card_areas(viewport: Rect) -> Option<[Rect; 3]> {
+pub fn config_card_areas(viewport: Rect, mode: &TestMode) -> Option<[Rect; 3]> {
     let area = config_bar_area(viewport);
-    if area.width < CONFIG_MIN_WIDTH {
+    let value_width = if matches!(mode, TestMode::Quote) {
+        CONFIG_QUOTE_VALUE_WIDTH
+    } else {
+        CONFIG_COMPACT_VALUE_WIDTH
+    };
+    let row_width =
+        CONFIG_MODIFIER_WIDTH + CONFIG_CARD_GAP + CONFIG_MODE_WIDTH + CONFIG_CARD_GAP + value_width;
+    let minimum_width = if matches!(mode, TestMode::Quote) {
+        CONFIG_QUOTE_WIDTH
+    } else {
+        CONFIG_MIN_WIDTH
+    };
+    if area.width < minimum_width {
         return None;
     }
-    let row = centered_width(area, CONFIG_MIN_WIDTH);
+    let row = centered_width(area, row_width);
     let layout = Layout::horizontal([
-        Constraint::Length(28),
-        Constraint::Length(2),
-        Constraint::Length(28),
-        Constraint::Length(2),
-        Constraint::Length(24),
+        Constraint::Length(CONFIG_MODIFIER_WIDTH),
+        Constraint::Length(CONFIG_CARD_GAP),
+        Constraint::Length(CONFIG_MODE_WIDTH),
+        Constraint::Length(CONFIG_CARD_GAP),
+        Constraint::Length(value_width),
     ])
     .split(row);
     Some([layout[0], layout[2], layout[4]])
@@ -428,7 +450,11 @@ fn render_result(frame: &mut Frame, area: Rect, engine: &TestEngine, theme: &The
         .max(5)
         .min(body.height);
     let top = Rect::new(body.x, body.y, body.width, top_height);
-    let columns = Layout::horizontal([Constraint::Length(16), Constraint::Min(24)]).split(top);
+    let columns = Layout::horizontal([
+        Constraint::Length(RESULT_PRIMARY_WIDTH),
+        Constraint::Min(24),
+    ])
+    .split(top);
 
     render_primary_result(frame, columns[0], &metrics, theme);
     render_result_chart(frame, columns[1], &metrics, theme);
@@ -485,8 +511,11 @@ fn render_result_chart(frame: &mut Frame, area: Rect, metrics: &Metrics, theme: 
         sections[0],
     );
 
-    let chart_columns =
-        Layout::horizontal([Constraint::Length(5), Constraint::Min(10)]).split(sections[1]);
+    let chart_columns = Layout::horizontal([
+        Constraint::Length(RESULT_AXIS_LABEL_WIDTH),
+        Constraint::Min(10),
+    ])
+    .split(sections[1]);
     let labels = chart_columns[0];
     let plot = chart_columns[1];
     let wpm_points = metrics
@@ -503,6 +532,7 @@ fn render_result_chart(frame: &mut Frame, area: Rect, metrics: &Metrics, theme: 
         .map(|(index, _)| (index as f64, metrics.wpm_history[index]))
         .collect::<Vec<_>>();
     let last_point = wpm_points.len().saturating_sub(1) as f64;
+    let smooth_wpm_points = smooth_wpm_points(&wpm_points);
     let peak_wpm = wpm_points
         .iter()
         .map(|point| point.1)
@@ -526,7 +556,7 @@ fn render_result_chart(frame: &mut Frame, area: Rect, metrics: &Metrics, theme: 
                     coords: &wpm_points,
                     color: color(&theme.main),
                 });
-                for points in wpm_points.windows(2) {
+                for points in smooth_wpm_points.windows(2) {
                     context.draw(&CanvasLine {
                         x1: points[0].0,
                         y1: points[0].1,
@@ -545,6 +575,30 @@ fn render_result_chart(frame: &mut Frame, area: Rect, metrics: &Metrics, theme: 
         plot,
     );
     render_chart_x_labels(frame, sections[2], plot, metrics, theme);
+}
+
+fn smooth_wpm_points(points: &[(f64, f64)]) -> Vec<(f64, f64)> {
+    if points.len() < 2 {
+        return points.to_vec();
+    }
+
+    let xs = points.iter().map(|(x, _)| *x).collect::<Vec<_>>();
+    let ys = points.iter().map(|(_, y)| *y).collect::<Vec<_>>();
+    let spline = pchip(&xs, &ys);
+    let mut smoothed =
+        Vec::with_capacity((points.len() - 1) * CURVE_SAMPLES_PER_INTERVAL as usize + 1);
+
+    for (index, _) in points.windows(2).enumerate() {
+        for step in 0..CURVE_SAMPLES_PER_INTERVAL {
+            let x = index as f64 + f64::from(step) / f64::from(CURVE_SAMPLES_PER_INTERVAL);
+            let y = spline
+                .interpolate(&x)
+                .expect("amostras de WPM possuem coordenadas estritamente crescentes");
+            smoothed.push((x, y));
+        }
+    }
+    smoothed.push(*points.last().expect("histórico de WPM não está vazio"));
+    smoothed
 }
 
 fn render_chart_y_labels(frame: &mut Frame, area: Rect, plot: Rect, ceiling: f64, theme: &Theme) {
@@ -960,7 +1014,7 @@ fn choices<T: std::fmt::Display + Copy + PartialEq>(
     let mut spans = Vec::new();
     for (index, value) in values.iter().enumerate() {
         if index > 0 {
-            spans.push(Span::raw("   "));
+            spans.push(Span::raw("  "));
         }
         spans.push(Span::styled(
             value.to_string(),
@@ -974,7 +1028,7 @@ fn choice_names(values: &[&str], selected: usize, active: Style, idle: Style) ->
     let mut spans = Vec::new();
     for (index, value) in values.iter().enumerate() {
         if index > 0 {
-            spans.push(Span::raw("  "));
+            spans.push(Span::raw(" "));
         }
         spans.push(Span::styled(
             (*value).to_owned(),
@@ -1154,5 +1208,15 @@ mod tests {
             (0..6).map(first_visible_line).collect::<Vec<_>>(),
             [0, 0, 0, 1, 2, 3]
         );
+    }
+
+    #[test]
+    fn smooth_wpm_curve_keeps_the_observed_endpoints() {
+        let observed = [(0.0, 120.0), (1.0, 60.0), (2.0, 80.0)];
+        let curve = smooth_wpm_points(&observed);
+
+        assert_eq!(curve.first(), Some(&observed[0]));
+        assert_eq!(curve.last(), Some(&observed[2]));
+        assert_eq!(curve.len(), 33);
     }
 }

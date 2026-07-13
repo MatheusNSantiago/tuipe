@@ -7,9 +7,9 @@ expression: "render_engine_with_settings(100, 28, &engine, true)"
      ⌨ tuipe
                      ╭────────────────────────────────────────────────────────╮
                      │                                                        │
-        ╭────────────│ test settings                                          │────────────╮
-        │ @ punctuati│                                                        │  60   120  │
-        ╰────────────│  p punctuation    n numbers                            │────────────╯
+            ╭────────│ test settings                                          │────────╮
+            │ @ punct│                                                        │60  120 │
+            ╰────────│  p punctuation    n numbers                            │────────╯
                      │                                                        │
                      │  m time    m words    m quote                          │
                      │  v 15    v 30    v 60    v 120                         │
