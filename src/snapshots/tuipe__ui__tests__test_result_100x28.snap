@@ -12,19 +12,20 @@ expression: "render_engine_at(100, 28, &engine)"
 
 
 
-
-     wpm                      █
-     7                        █
-                              █
-     acc                      █
-     100%                     █
-                              █
-                     ······························
+     wpm             200│                       ⡆
+     7                  │                      ⢸⢸
+                        │                      ⡜ ⡇
+     acc                │                     ⢀⠇ ⢱
+     100%               │                     ⢸  ⠈⡆
+                     0  │  ⠈⠒⢄⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⡎   ⢱⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀
+                        └──────────────────────────────────────────────────────────────────────
+                        0                                                                   30s
 
      test type              raw           characters         consistency        time
      time 30                7             18/0/0/0           0%                 30.0s
      portuguese common
      expert · adaptive
+
 
 
                        enter next    r repeat    h words    s stats    q quit

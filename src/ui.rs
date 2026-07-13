@@ -2,15 +2,16 @@ use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
+    symbols::Marker,
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, Clear, Paragraph, Sparkline},
+    widgets::{Axis, Block, BorderType, Borders, Chart, Clear, Dataset, GraphType, Paragraph},
 };
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 use crate::{
     content::Theme,
-    typing::{Difficulty, QuoteLength, TestEngine, TestMode, TestStatus},
+    typing::{Difficulty, Metrics, QuoteLength, TestEngine, TestMode, TestStatus},
 };
 
 const MIN_PAGE_PADDING: u16 = 2;
@@ -49,7 +50,7 @@ pub fn render(
     let test_top = if compact {
         viewport.y + 6
     } else {
-        viewport.y + viewport.height.saturating_mul(41) / 100
+        viewport.y + viewport.height.saturating_mul(39) / 100
     };
     let bottom_reserve = if compact { 2 } else { 5 };
     let test_area = Rect::new(
@@ -63,9 +64,8 @@ pub fn render(
     );
 
     match engine.status() {
-        TestStatus::Completed { .. } => render_result(frame, test_area, engine, theme),
-        TestStatus::Failed { word_index, .. } => {
-            render_failure(frame, test_area, engine, *word_index, theme)
+        TestStatus::Completed { .. } | TestStatus::Failed { .. } => {
+            render_result(frame, test_area, engine, theme)
         }
         TestStatus::Ready | TestStatus::Running { .. } => {
             render_test(frame, test_area, engine, theme)
@@ -81,7 +81,7 @@ pub fn render(
             frame,
             Rect::new(
                 content.x,
-                viewport.bottom().saturating_sub(3),
+                viewport.bottom().saturating_sub(2),
                 content.width,
                 2,
             ),
@@ -407,6 +407,25 @@ fn render_result(frame: &mut Frame, area: Rect, engine: &TestEngine, theme: &The
     let top = Rect::new(body.x, body.y, body.width, top_height);
     let columns = Layout::horizontal([Constraint::Length(16), Constraint::Min(24)]).split(top);
 
+    render_primary_result(frame, columns[0], &metrics, theme);
+    render_result_chart(frame, columns[1], &metrics, theme);
+
+    let details_top = top.bottom().saturating_add(1);
+    render_result_details(
+        frame,
+        Rect::new(
+            body.x,
+            details_top,
+            body.width,
+            body.bottom().saturating_sub(details_top),
+        ),
+        engine,
+        &metrics,
+        theme,
+    );
+}
+
+fn render_primary_result(frame: &mut Frame, area: Rect, metrics: &Metrics, theme: &Theme) {
     let primary = vec![
         Line::styled("wpm", Style::default().fg(color(&theme.sub))),
         Line::styled(
@@ -424,93 +443,130 @@ fn render_result(frame: &mut Frame, area: Rect, engine: &TestEngine, theme: &The
                 .add_modifier(Modifier::BOLD),
         ),
     ];
-    frame.render_widget(Paragraph::new(primary), columns[0]);
+    frame.render_widget(Paragraph::new(primary), area);
+}
 
-    let data = metrics
+fn render_result_chart(frame: &mut Frame, area: Rect, metrics: &Metrics, theme: &Theme) {
+    let wpm_points = metrics
         .burst_history
         .iter()
-        .map(|value| value.round().max(0.0) as u64)
+        .enumerate()
+        .map(|(index, value)| (index as f64 + 1.0, *value))
         .collect::<Vec<_>>();
-    frame.render_widget(
-        Sparkline::default()
-            .data(&data)
-            .style(Style::default().fg(color(&theme.main))),
-        columns[1],
-    );
-    let errors = metrics
+    let error_points = metrics
         .error_history
         .iter()
-        .map(|count| if *count > 0 { '×' } else { '·' })
-        .collect::<String>();
+        .enumerate()
+        .filter(|(_, count)| **count > 0)
+        .map(|(index, _)| (index as f64 + 1.0, metrics.burst_history[index]))
+        .collect::<Vec<_>>();
+    let seconds = (metrics.duration_ms as f64 / 1_000.0)
+        .ceil()
+        .max(wpm_points.last().map_or(1.0, |point| point.0));
+    let peak_wpm = wpm_points
+        .iter()
+        .map(|point| point.1)
+        .fold(metrics.raw_wpm.max(metrics.wpm), f64::max);
+    let chart_ceiling = ((peak_wpm.max(20.0) / 20.0).ceil() * 20.0).max(20.0);
+    let datasets = vec![
+        Dataset::default()
+            .data(&wpm_points)
+            .marker(Marker::Braille)
+            .graph_type(GraphType::Line)
+            .style(Style::default().fg(color(&theme.main))),
+        Dataset::default()
+            .data(&error_points)
+            .marker(Marker::Dot)
+            .graph_type(GraphType::Scatter)
+            .style(Style::default().fg(color(&theme.error))),
+    ];
     frame.render_widget(
-        Paragraph::new(errors)
-            .style(Style::default().fg(color(&theme.error)))
-            .alignment(Alignment::Left),
-        Rect::new(
-            columns[1].x,
-            columns[1].bottom().saturating_sub(1),
-            columns[1].width,
-            1,
-        ),
-    );
-
-    let stats = metrics.characters;
-    let more = Rect::new(
-        body.x,
-        top.bottom().saturating_add(1),
-        body.width,
-        body.bottom().saturating_sub(top.bottom().saturating_add(1)),
-    );
-    let groups = Layout::horizontal([
-        Constraint::Percentage(28),
-        Constraint::Percentage(13),
-        Constraint::Percentage(23),
-        Constraint::Percentage(19),
-        Constraint::Percentage(17),
-    ])
-    .spacing(2)
-    .split(more);
-    render_result_group(
-        frame,
-        groups[0],
-        "test type",
-        result_descriptor(engine),
-        theme,
-    );
-    render_result_group(
-        frame,
-        groups[1],
-        "raw",
-        format!("{:.0}", metrics.raw_wpm),
-        theme,
-    );
-    render_result_group(
-        frame,
-        groups[2],
-        "characters",
-        format!(
-            "{}/{}/{}/{}",
-            stats.correct_word, stats.incorrect, stats.extra, stats.missed
-        ),
-        theme,
-    );
-    render_result_group(
-        frame,
-        groups[3],
-        "consistency",
-        format!("{:.0}%", metrics.consistency),
-        theme,
-    );
-    render_result_group(
-        frame,
-        groups[4],
-        "time",
-        format!("{:.1}s", metrics.duration_ms as f64 / 1_000.0),
-        theme,
+        Chart::new(datasets)
+            .style(Style::default().fg(color(&theme.sub_alt)))
+            .x_axis(
+                Axis::default()
+                    .bounds([0.0, seconds])
+                    .labels(["0".to_owned(), format!("{seconds:.0}s")])
+                    .style(Style::default().fg(color(&theme.sub))),
+            )
+            .y_axis(
+                Axis::default()
+                    .bounds([0.0, chart_ceiling])
+                    .labels(["0".to_owned(), format!("{chart_ceiling:.0}")])
+                    .style(Style::default().fg(color(&theme.sub))),
+            ),
+        area,
     );
 }
 
-fn render_result_group(frame: &mut Frame, area: Rect, name: &str, result: String, theme: &Theme) {
+fn render_result_details(
+    frame: &mut Frame,
+    area: Rect,
+    engine: &TestEngine,
+    metrics: &Metrics,
+    theme: &Theme,
+) {
+    let stats = metrics.characters;
+    let failed_word = match engine.status() {
+        TestStatus::Failed { word_index, .. } => Some(*word_index),
+        TestStatus::Ready | TestStatus::Running { .. } | TestStatus::Completed { .. } => None,
+    };
+    let mut details = vec![result_group_lines(
+        "test type",
+        result_descriptor(engine),
+        theme,
+    )];
+    if let Some(word_index) = failed_word {
+        details.push(failure_group_lines(engine, word_index, theme));
+    }
+    details.extend([
+        result_group_lines("raw", format!("{:.0}", metrics.raw_wpm), theme),
+        result_group_lines(
+            "characters",
+            format!(
+                "{}/{}/{}/{}",
+                stats.correct_word, stats.incorrect, stats.extra, stats.missed
+            ),
+            theme,
+        ),
+        result_group_lines("consistency", format!("{:.0}%", metrics.consistency), theme),
+        result_group_lines(
+            "time",
+            format!("{:.1}s", metrics.duration_ms as f64 / 1_000.0),
+            theme,
+        ),
+    ]);
+
+    let groups = Layout::horizontal(result_detail_constraints(failed_word.is_some()))
+        .spacing(2)
+        .split(area);
+    for (group_area, lines) in groups.iter().zip(details) {
+        frame.render_widget(Paragraph::new(lines), *group_area);
+    }
+}
+
+fn result_detail_constraints(failed: bool) -> Vec<Constraint> {
+    if failed {
+        vec![
+            Constraint::Percentage(22),
+            Constraint::Percentage(24),
+            Constraint::Percentage(9),
+            Constraint::Percentage(19),
+            Constraint::Percentage(16),
+            Constraint::Percentage(10),
+        ]
+    } else {
+        vec![
+            Constraint::Percentage(28),
+            Constraint::Percentage(13),
+            Constraint::Percentage(23),
+            Constraint::Percentage(19),
+            Constraint::Percentage(17),
+        ]
+    }
+}
+
+fn result_group_lines(name: &str, result: String, theme: &Theme) -> Vec<Line<'static>> {
     let mut lines = vec![Line::styled(
         name.to_owned(),
         Style::default().fg(color(&theme.sub)),
@@ -520,36 +576,54 @@ fn render_result_group(frame: &mut Frame, area: Rect, name: &str, result: String
             .lines()
             .map(|line| Line::styled(line.to_owned(), Style::default().fg(color(&theme.main)))),
     );
-    frame.render_widget(Paragraph::new(lines), area);
+    lines
 }
 
-fn render_failure(
-    frame: &mut Frame,
-    area: Rect,
+fn failure_group_lines(
     engine: &TestEngine,
     word_index: usize,
     theme: &Theme,
-) {
-    let target = &engine.targets()[word_index].text;
-    let input = engine.attempts()[word_index].without_commit();
-    let lines = vec![
+) -> Vec<Line<'static>> {
+    let target = engine.targets()[word_index].with_commit();
+    let input = &engine.attempts()[word_index].input;
+    vec![
+        Line::styled("other", Style::default().fg(color(&theme.sub))),
         Line::styled(
-            "test failed",
-            Style::default()
-                .fg(color(&theme.error))
-                .add_modifier(Modifier::BOLD),
+            "failed (difficulty)",
+            Style::default().fg(color(&theme.error)),
         ),
-        Line::from(""),
-        Line::from(vec![label("expected  ", theme), value(target, theme)]),
-        Line::from(vec![
-            label("received  ", theme),
-            Span::styled(input, Style::default().fg(color(&theme.error))),
-        ]),
-    ];
-    frame.render_widget(
-        Paragraph::new(lines).alignment(Alignment::Center),
-        centered_height(area, 6),
-    );
+        failed_word_line(input, &target, theme),
+    ]
+}
+
+fn failed_word_line(input: &str, target: &str, theme: &Theme) -> Line<'static> {
+    let typed = input.graphemes(true).collect::<Vec<_>>();
+    let expected = target.graphemes(true).collect::<Vec<_>>();
+    let mut spans = Vec::new();
+    for (index, grapheme) in typed.iter().enumerate() {
+        let correct = expected.get(index).is_some_and(|value| value == grapheme);
+        spans.push(Span::styled(
+            visible_grapheme(grapheme),
+            Style::default().fg(color(if correct { &theme.text } else { &theme.error })),
+        ));
+    }
+    spans.push(label("  →  ", theme));
+    spans.push(value(
+        expected
+            .iter()
+            .map(|grapheme| visible_grapheme(grapheme))
+            .collect::<String>(),
+        theme,
+    ));
+    Line::from(spans)
+}
+
+fn visible_grapheme(grapheme: &str) -> String {
+    match grapheme {
+        " " => "·".to_owned(),
+        "\n" => "↵".to_owned(),
+        _ => grapheme.to_owned(),
+    }
 }
 
 fn render_footer(frame: &mut Frame, area: Rect, engine: &TestEngine, theme: &Theme) {
@@ -934,6 +1008,31 @@ mod tests {
         });
         engine.update(InputEvent::Tick { at_ms: 30_100 });
         insta::assert_snapshot!("test_result_100x28", render_engine_at(100, 28, &engine));
+    }
+
+    #[test]
+    fn failed_result_keeps_the_result_hierarchy_and_exposes_the_cause() {
+        let config = TestConfig {
+            mode: TestMode::Words { count: 3 },
+            ..TestConfig::default()
+        };
+        let mut engine =
+            TestEngine::new(config, ["filho ".into(), "mundo ".into(), "prática".into()]);
+        engine.update(InputEvent::Key {
+            action: KeyAction::Text("fil".into()),
+            at_ms: 100,
+        });
+        engine.update(InputEvent::Key {
+            action: KeyAction::Text("ha ".into()),
+            at_ms: 1_100,
+        });
+
+        assert!(matches!(
+            engine.status(),
+            TestStatus::Failed { word_index: 0, .. }
+        ));
+        insta::assert_snapshot!("test_failed_100x28", render_engine_at(100, 28, &engine));
+        insta::assert_snapshot!("test_failed_180x40", render_engine_at(180, 40, &engine));
     }
 
     #[test]

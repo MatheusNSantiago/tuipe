@@ -1,0 +1,43 @@
+---
+source: src/ui.rs
+expression: "render_engine_at(180, 40, &engine)"
+---
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+         wpm             80│                                                                                                                                              ⠠
+         0                 │                                                                                                                                              •
+                           │
+         acc               │
+         83%               │
+                         0 │
+                           └───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+                           0                                                                                                                                             1s
+
+         test type                             other                                raw              characters                 consistency                time
+         words 3                               failed (difficulty)                  72               0/1/1/0                    100%                       1.0s
+         portuguese common                     filha·  →  filho·
+         expert · adaptive
+
+
+
+
+
+
+
+                                                               enter next    r repeat    h words    s stats    q quit
