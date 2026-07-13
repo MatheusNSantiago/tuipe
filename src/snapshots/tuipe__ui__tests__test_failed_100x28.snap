@@ -8,23 +8,23 @@ expression: "render_engine_at(100, 28, &engine)"
 
 
 
-
-
-
-
-     wpm             80│                                                                      ⠠
-     0                 │                                                                      •
+     wpm             80│
+     61                │⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠒⠒⠒⠒⠒⠒⠒⠒⠒⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉•
                        │
      acc               │
-     83%               │
-                     0 │
+     96%             0 │
                        └───────────────────────────────────────────────────────────────────────
-                       0                                                                     1s
+                       1                                                                    4.1
 
      test type             other                 raw       characters   consistency   time
-     words 3               failed (difficulty)   72        0/1/1/0      100%          1.0s
-     portuguese common     filha·  →  filho·
+     words 6               failed (difficulty)   70        21/1/0/1     72%           4.1s
+     portuguese common
      expert · adaptive
+
+
+
+
+
 
 
 

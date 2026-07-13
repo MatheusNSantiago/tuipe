@@ -1,0 +1,53 @@
+---
+source: src/ui.rs
+expression: "render_engine_at(70, 50, &engine)"
+---
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+   wpm             80│
+   61                │⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠤⠤⠤⠤⠤⠤⠤⠤⠔⠒⠒⠒⠒⠒⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉•
+                     │
+   acc               │
+   96%             0 │
+                     └─────────────────────────────────────────────
+                     1                                          4.1
+
+   test type             other                 raw
+   words 6               failed (difficulty)   70
+   portuguese common
+   expert · adaptive
+
+   characters            consistency           time
+   21/1/0/1              72%                   4.1s
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+        enter next    r repeat    h words    s stats    q quit

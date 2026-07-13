@@ -33,6 +33,8 @@ pub enum Transition {
 
 #[derive(Debug, Clone)]
 struct CharacterEvent {
+    word_index: usize,
+    input_after: String,
     correct: bool,
     at_ms: u64,
 }
@@ -166,7 +168,8 @@ impl TestEngine {
 
     fn insert_grapheme(&mut self, grapheme: &str, at_ms: u64) -> Vec<Transition> {
         let mut transitions = self.start_if_needed(at_ms);
-        let input_before = self.attempts[self.active_word].input.clone();
+        let word_index = self.active_word;
+        let input_before = self.attempts[word_index].input.clone();
 
         // O handler before-insert do Monkeytype descarta um separador inicial no
         // modo normal não estrito. O tuipe não possui a opção strict-space.
@@ -177,19 +180,23 @@ impl TestEngine {
             return transitions;
         }
 
-        let target = self.targets[self.active_word].with_commit();
+        let target = self.targets[word_index].with_commit();
         let correct = grapheme_at(&target, grapheme_count(&input_before))
             .is_some_and(|expected| expected == grapheme);
         let commit = is_separator(grapheme);
 
-        let attempt = &mut self.attempts[self.active_word];
+        let attempt = &mut self.attempts[word_index];
         attempt.input.push_str(grapheme);
         attempt.first_keypress_ms.get_or_insert(at_ms);
         attempt.last_keypress_ms = Some(at_ms);
-        self.character_events
-            .push(CharacterEvent { correct, at_ms });
 
         let after = format!("{input_before}{grapheme}");
+        self.character_events.push(CharacterEvent {
+            word_index,
+            input_after: after.clone(),
+            correct,
+            at_ms,
+        });
         let can_advance =
             commit && !(input_before.is_empty() && self.config.difficulty != Difficulty::Normal);
         let last_word = self.active_word + 1 == self.targets.len();
@@ -345,7 +352,7 @@ impl TestEngine {
             })
     }
 
-    pub(crate) fn burst_history(&self, duration_ms: u64) -> (Vec<f64>, Vec<u32>) {
+    pub(crate) fn metric_histories(&self, duration_ms: u64) -> (Vec<f64>, Vec<f64>, Vec<u32>) {
         let started_at = self
             .attempts
             .iter()
@@ -357,7 +364,7 @@ impl TestEngine {
         let mut errors = vec![0_u32; bucket_count];
         for event in &self.character_events {
             let elapsed = event.at_ms.saturating_sub(started_at);
-            let index = (elapsed / 1_000) as usize;
+            let index = (elapsed.saturating_sub(1) / 1_000) as usize;
             let index = index.min(bucket_count - 1);
             keypresses[index] += 1;
             if !event.correct {
@@ -368,8 +375,59 @@ impl TestEngine {
             .into_iter()
             .map(|count| f64::from(count) / 5.0 * 60.0)
             .collect();
-        (wpm, errors)
+        (self.wpm_history(started_at, duration_ms), wpm, errors)
     }
+
+    fn wpm_history(&self, started_at: u64, duration_ms: u64) -> Vec<f64> {
+        let bucket_count = duration_ms.div_ceil(1_000).max(1) as usize;
+        let mut inputs = vec![String::new(); self.targets.len()];
+        let mut event_index = 0;
+
+        (0..bucket_count)
+            .map(|bucket_index| {
+                let regular_boundary = (bucket_index as u64 + 1) * 1_000;
+                let boundary_ms = regular_boundary.min(duration_ms.max(1));
+                while let Some(event) = self.character_events.get(event_index) {
+                    if event.at_ms.saturating_sub(started_at) > boundary_ms {
+                        break;
+                    }
+                    inputs[event.word_index].clone_from(&event.input_after);
+                    event_index += 1;
+                }
+
+                let correct_characters = inputs
+                    .iter()
+                    .rposition(|input| !input.is_empty())
+                    .map_or(0, |active_word| {
+                        correct_word_characters(&self.targets, &inputs, active_word)
+                    });
+                let seconds = boundary_ms as f64 / 1_000.0;
+                f64::from(correct_characters) / 5.0 / (seconds / 60.0)
+            })
+            .collect()
+    }
+}
+
+fn correct_word_characters(targets: &[TargetWord], inputs: &[String], active_word: usize) -> u32 {
+    targets
+        .iter()
+        .zip(inputs)
+        .enumerate()
+        .take(active_word + 1)
+        .map(|(word_index, (target, input))| {
+            let target = target.with_commit();
+            let earns_credit = if word_index == active_word {
+                target.starts_with(input)
+            } else {
+                input == &target
+            };
+            if earns_credit {
+                input.graphemes(true).count() as u32
+            } else {
+                0
+            }
+        })
+        .sum()
 }
 
 fn is_separator(grapheme: &str) -> bool {
@@ -446,6 +504,25 @@ mod tests {
             transitions,
             vec![Transition::Started, Transition::Failed { word_index: 0 }]
         );
+    }
+
+    #[test]
+    fn wpm_history_is_cumulative_instead_of_a_per_second_burst() {
+        let mut engine = engine(Difficulty::Normal, &["word ", "next "]);
+        engine.config.mode = TestMode::Time { seconds: 30 };
+        engine.update(InputEvent::Key {
+            action: KeyAction::Text("word ".into()),
+            at_ms: 100,
+        });
+        engine.update(InputEvent::Key {
+            action: KeyAction::Text("next".into()),
+            at_ms: 1_200,
+        });
+        engine.update(InputEvent::Tick { at_ms: 2_100 });
+
+        let metrics = engine.metrics();
+        assert_eq!(metrics.wpm_history, vec![60.0, 54.0]);
+        assert_eq!(metrics.burst_history, vec![60.0, 48.0]);
     }
 
     #[test]
