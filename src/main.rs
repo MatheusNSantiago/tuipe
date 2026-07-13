@@ -148,6 +148,7 @@ fn run(
     let mut last_drawn_second = 0;
     let mut last_size = terminal.size()?;
     let mut last_cursor_color = String::new();
+    let mut caret = ui::SmoothCaret::default();
     loop {
         if needs_draw {
             let theme = app
@@ -165,6 +166,8 @@ fn run(
                     theme,
                     app.settings_open,
                     &app.preferences.theme,
+                    &mut caret,
+                    Instant::now(),
                 )
             })?;
             last_drawn_second = app.engine.elapsed_ms() / 1_000;
@@ -200,7 +203,8 @@ fn run(
         let current_second = app.engine.elapsed_ms() / 1_000;
         needs_draw |= app.engine.status() != &previous_status
             || (matches!(app.engine.status(), TestStatus::Running { .. })
-                && current_second != last_drawn_second);
+                && current_second != last_drawn_second)
+            || caret.is_animating(Instant::now());
         if !app.persisted
             && matches!(
                 app.engine.status(),
