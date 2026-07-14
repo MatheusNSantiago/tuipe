@@ -11,6 +11,7 @@ use ratatui::{
 };
 use spline1d::pchip;
 use std::{env, sync::OnceLock};
+use tui_big_text::{BigText, PixelSize};
 
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
@@ -33,7 +34,7 @@ const RESULT_WIDE_WIDTH: u16 = 84;
 const RESULT_MEDIUM_WIDTH: u16 = 54;
 const RESULT_GROUP_HEIGHT: u16 = 4;
 const RESULT_CHART_HEIGHT: u16 = 12;
-const RESULT_PRIMARY_WIDTH: u16 = 10;
+const RESULT_PRIMARY_WIDTH: u16 = 18;
 const RESULT_AXIS_LABEL_WIDTH: u16 = 4;
 const CURVE_SAMPLES_PER_INTERVAL: u16 = 16;
 
@@ -565,24 +566,52 @@ fn render_result(frame: &mut Frame, area: Rect, engine: &TestEngine, theme: &The
 }
 
 fn render_primary_result(frame: &mut Frame, area: Rect, metrics: &Metrics, theme: &Theme) {
-    let primary = vec![
-        Line::styled("wpm", Style::default().fg(color(&theme.sub))),
-        Line::styled(
-            format!("{:.0}", metrics.wpm),
-            Style::default()
-                .fg(color(&theme.main))
-                .add_modifier(Modifier::BOLD),
-        ),
-        Line::from(""),
-        Line::styled("precisão", Style::default().fg(color(&theme.sub))),
-        Line::styled(
-            format!("{:.0}%", metrics.accuracy),
-            Style::default()
-                .fg(color(&theme.main))
-                .add_modifier(Modifier::BOLD),
-        ),
-    ];
-    frame.render_widget(Paragraph::new(primary), area);
+    if area.width < 16 || area.height < 10 {
+        let primary = vec![
+            Line::styled("wpm", Style::default().fg(color(&theme.sub))),
+            Line::styled(
+                format!("{:.0}", metrics.wpm),
+                Style::default().fg(color(&theme.main)),
+            ),
+            Line::styled("precisão", Style::default().fg(color(&theme.sub))),
+            Line::styled(
+                format!("{:.0}%", metrics.accuracy),
+                Style::default().fg(color(&theme.main)),
+            ),
+        ];
+        frame.render_widget(Paragraph::new(primary), area);
+        return;
+    }
+
+    let secoes = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(4),
+        Constraint::Length(1),
+        Constraint::Length(4),
+    ])
+    .split(area);
+    let label = Style::default().fg(color(&theme.sub));
+    let numero = Style::default()
+        .fg(color(&theme.main))
+        .add_modifier(Modifier::BOLD);
+    frame.render_widget(Paragraph::new("wpm").style(label), secoes[0]);
+    frame.render_widget(
+        BigText::builder()
+            .pixel_size(PixelSize::Quadrant)
+            .style(numero)
+            .lines(vec![Line::from(format!("{:.0}", metrics.wpm))])
+            .build(),
+        secoes[1],
+    );
+    frame.render_widget(Paragraph::new("precisão").style(label), secoes[2]);
+    frame.render_widget(
+        BigText::builder()
+            .pixel_size(PixelSize::Quadrant)
+            .style(numero)
+            .lines(vec![Line::from(format!("{:.0}%", metrics.accuracy))])
+            .build(),
+        secoes[3],
+    );
 }
 
 fn render_result_chart(frame: &mut Frame, area: Rect, metrics: &Metrics, theme: &Theme) {

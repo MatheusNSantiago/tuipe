@@ -122,6 +122,16 @@ impl App {
             .unwrap_or(u64::MAX)
     }
 
+    fn bloqueia_atalhos_do_resultado(&self) -> bool {
+        let terminou_em = match self.engine.status() {
+            TestStatus::Completed { ended_at_ms } | TestStatus::Failed { ended_at_ms, .. } => {
+                *ended_at_ms
+            }
+            TestStatus::Ready | TestStatus::Running { .. } => return false,
+        };
+        self.elapsed_ms().saturating_sub(terminou_em) < 300
+    }
+
     fn update(&mut self, event: InputEvent) {
         self.engine.update(event);
         if matches!(self.engine.config().mode, TestMode::Time { .. })
@@ -303,8 +313,14 @@ fn handle_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> Result<b
         app.settings_open = true;
         return Ok(false);
     }
+    if matches!(code, KeyCode::Char('c')) && modifiers.contains(KeyModifiers::CONTROL) {
+        app.repeat()?;
+        return Ok(false);
+    }
+    let resultado_recente = app.bloqueia_atalhos_do_resultado();
     if matches!(code, KeyCode::Char('q'))
         && !matches!(app.engine.status(), TestStatus::Running { .. })
+        && !resultado_recente
     {
         return Ok(true);
     }
@@ -317,6 +333,7 @@ fn handle_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> Result<b
             app.engine.status(),
             TestStatus::Completed { .. } | TestStatus::Failed { .. }
         )
+        && !resultado_recente
     {
         app.repeat()?;
         return Ok(false);
@@ -335,8 +352,7 @@ fn handle_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> Result<b
 fn typing_action(code: KeyCode, modifiers: KeyModifiers) -> Option<KeyAction> {
     match code {
         KeyCode::Char(character)
-            if modifiers.contains(KeyModifiers::CONTROL)
-                && character.eq_ignore_ascii_case(&'w') =>
+            if modifiers.contains(KeyModifiers::CONTROL) && matches!(character, 'w' | 'h') =>
         {
             Some(KeyAction::DeleteWordBackward)
         }
@@ -511,6 +527,10 @@ mod tests {
         );
         assert_eq!(
             typing_action(KeyCode::Backspace, KeyModifiers::CONTROL),
+            Some(KeyAction::DeleteWordBackward)
+        );
+        assert_eq!(
+            typing_action(KeyCode::Char('h'), KeyModifiers::CONTROL),
             Some(KeyAction::DeleteWordBackward)
         );
     }
