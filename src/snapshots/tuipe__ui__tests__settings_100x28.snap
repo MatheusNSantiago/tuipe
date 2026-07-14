@@ -7,25 +7,25 @@ expression: "render_engine_with_settings(100, 28, &engine, true)"
      ⌨ tuipe
                      ╭────────────────────────────────────────────────────────╮
                      │                                                        │
-            ╭────────│ test settings                                          │────────╮
-            │ @ punct│                                                        │60  120 │
-            ╰────────│  p punctuation    n numbers                            │────────╯
+            ╭────────│ ⚙ configurações do teste                               │────────╮
+            │  @ pont│                                                        │60  120 │
+            ╰────────│  p pontuação    n números                              │────────╯
                      │                                                        │
-                     │  m time    m words    m quote                          │
+                     │  m tempo    m palavras    m citação                    │
                      │  v 15    v 30    v 60    v 120                         │
                      │                                                        │
-     olá mundo prátic│  d normal    d expert    d master                      │
-                     │  a adaptive                                            │
+     olá mundo prátic│  d normal    d especialista    d mestre                │
+                     │  a adaptativo                                          │
                      │                                                        │
-                     │  l portuguese    l english                             │
-                     │  k common    k 1k    k 5k                              │
-                     │ t theme   arch                                         │
+                     │  l português    l inglês                               │
+                     │  k comum    k 1k    k 5k                               │
+                     │ t tema   arch                                          │
                      │                                                        │
-                     │ esc close                                              │
+                     │ esc fechar                                             │
                      │                                                        │
                      │                                                        │
                      │                                                        │
                      ╰────────────────────────────────────────────────────────╯
 
 
-                               enter restart    esc settings    q quit
+                           enter reiniciar    esc configurações    q sair

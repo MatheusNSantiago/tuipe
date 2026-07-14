@@ -6,10 +6,10 @@ expression: "render_engine_at(100, 28, &engine)"
 
 
 
-     wpm       wpm over time   × errors
+     wpm       wpm ao longo do tempo   × erros
      7           40│
                    │
-     acc           │
+     precisão      │
      100%          │⡄
                  20│⠘⡄                    ⢠⠋⠓⠢⠤⣄⣀
                    │ ⠹⡄                   ⡎      ⠉⠉⠓⠒⠲⠤⠤⢄⣀⣀⣀
@@ -19,13 +19,13 @@ expression: "render_engine_at(100, 28, &engine)"
                   0└───────────────────────────────────────────────────────────────────────────
                    1                                   15.5                                  30
 
-     test type              raw           characters         consistency        time
-     time 30                7             18/0/0/0           0%                 30.0s
-     portuguese common
-     expert · adaptive
+     tipo de teste          bruto         caracteres         consistência       tempo
+     tempo 30               7             18/0/0/0           0%                 30.0s
+     ◎ português comum
+     ★ especialista
 
 
 
 
 
-                       enter next    r repeat    h words    s stats    q quit
+                enter próximo    r repetir    h palavras    s estatísticas    q sair

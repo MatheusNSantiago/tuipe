@@ -322,7 +322,24 @@ fn handle_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> Result<b
         return Ok(false);
     }
 
-    let action = match code {
+    let action = typing_action(code, modifiers);
+    if let Some(action) = action {
+        app.update(InputEvent::Key {
+            action,
+            at_ms: app.elapsed_ms(),
+        });
+    }
+    Ok(false)
+}
+
+fn typing_action(code: KeyCode, modifiers: KeyModifiers) -> Option<KeyAction> {
+    match code {
+        KeyCode::Char(character)
+            if modifiers.contains(KeyModifiers::CONTROL)
+                && character.eq_ignore_ascii_case(&'w') =>
+        {
+            Some(KeyAction::DeleteWordBackward)
+        }
         KeyCode::Char(character)
             if !modifiers
                 .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER) =>
@@ -334,14 +351,7 @@ fn handle_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> Result<b
         }
         KeyCode::Backspace => Some(KeyAction::Backspace),
         _ => None,
-    };
-    if let Some(action) = action {
-        app.update(InputEvent::Key {
-            action,
-            at_ms: app.elapsed_ms(),
-        });
     }
-    Ok(false)
 }
 
 fn handle_settings_key(app: &mut App, code: KeyCode) -> Result<bool> {
@@ -487,4 +497,21 @@ fn without_last_commit(mut words: Vec<String>) -> Vec<String> {
         last.pop();
     }
     words
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ctrl_w_and_ctrl_backspace_remove_the_active_word() {
+        assert_eq!(
+            typing_action(KeyCode::Char('w'), KeyModifiers::CONTROL),
+            Some(KeyAction::DeleteWordBackward)
+        );
+        assert_eq!(
+            typing_action(KeyCode::Backspace, KeyModifiers::CONTROL),
+            Some(KeyAction::DeleteWordBackward)
+        );
+    }
 }

@@ -12,10 +12,10 @@ expression: "render_engine_at(180, 40, &engine)"
 
 
 
-         wpm       wpm over time   × errors
+         wpm       wpm ao longo do tempo   × erros
          71         120│⠉⠉⠉⠉⠉⠒⠒⠒⠒⠒⠒⠒⠒⠒⠤⠤⠤⠤⠤⠤⠤⠤⠤⢄⣀⣀⣀⣀⣀⣀⣀⣀⡀
                        │                                ⠈⠉⠉⠉⠉⠉⠉⠉⠉⠑⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠤⠤⠤⠤⠤⠤⠤⠤⠤⣀⣀⣀⣀⣀⣀⣀⣀⣀⡀
-         acc           │                                                                              ⠈⠉⠉⠉⠉⠉⠉⠉⠉⠑⠒⠒⠒⠒⠒⠒⠒⠒⠢⠤⠤⠤⠤⠤⠤⠤⠤⢄⣀⣀⣀⣀⣀⣀⣀⣀⣀
+         precisão      │                                                                              ⠈⠉⠉⠉⠉⠉⠉⠉⠉⠑⠒⠒⠒⠒⠒⠒⠒⠒⠢⠤⠤⠤⠤⠤⠤⠤⠤⢄⣀⣀⣀⣀⣀⣀⣀⣀⣀
          92%           │                                                                                                                   ⠉⠉⠉⠉⠉⠉⠉⠉⠉⠒⠒⠒⠒⠒⠒⠒⠒⠒⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤×
                      60│
                        │
@@ -25,10 +25,10 @@ expression: "render_engine_at(180, 40, &engine)"
                       0└───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
                        1                                                                                                                                                1.7
 
-         test type                             other                                raw              characters                 consistency                time
-         words 4                               failed (difficulty)                  92               10/1/0/1                   46%                        1.7s
-         portuguese common
-         expert · adaptive
+         tipo de teste                         outro                                bruto            caracteres                 consistência               tempo
+         palavras 4                            falhou (dificuldade)                 92               10/1/0/1                   46%                        1.7s
+         ◎ português comum
+         ★ especialista
 
 
 
@@ -40,4 +40,4 @@ expression: "render_engine_at(180, 40, &engine)"
 
 
 
-                                                               enter next    r repeat    h words    s stats    q quit
+                                                        enter próximo    r repetir    h palavras    s estatísticas    q sair

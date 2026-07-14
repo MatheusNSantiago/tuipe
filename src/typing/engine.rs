@@ -542,6 +542,29 @@ mod tests {
     }
 
     #[test]
+    fn delete_word_clears_the_current_word_and_returns_to_the_previous_one() {
+        let mut engine = engine(Difficulty::Normal, &["uma ", "palavra "]);
+        engine.update(InputEvent::Key {
+            action: KeyAction::Text("uma pal".into()),
+            at_ms: 10,
+        });
+        engine.update(InputEvent::Key {
+            action: KeyAction::DeleteWordBackward,
+            at_ms: 20,
+        });
+        assert_eq!(engine.active_word(), 1);
+        assert_eq!(engine.attempts()[1].input, "");
+
+        engine.update(InputEvent::Key {
+            action: KeyAction::DeleteWordBackward,
+            at_ms: 30,
+        });
+        assert_eq!(engine.active_word(), 0);
+        assert_eq!(engine.attempts()[0].input, "");
+        assert!(!engine.attempts()[0].committed);
+    }
+
+    #[test]
     fn bounded_test_finishes_on_the_last_character_without_a_separator() {
         let mut engine = engine(Difficulty::Expert, &["one ", "two"]);
         engine.update(InputEvent::Key {

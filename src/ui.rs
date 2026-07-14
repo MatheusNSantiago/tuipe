@@ -10,6 +10,8 @@ use ratatui::{
     },
 };
 use spline1d::pchip;
+use std::{env, sync::OnceLock};
+
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
@@ -35,12 +37,81 @@ const RESULT_PRIMARY_WIDTH: u16 = 10;
 const RESULT_AXIS_LABEL_WIDTH: u16 = 4;
 const CURVE_SAMPLES_PER_INTERVAL: u16 = 16;
 
+#[derive(Clone, Copy)]
+struct Icons {
+    teclado: &'static str,
+    configuracoes: &'static str,
+    tempo: &'static str,
+    palavras: &'static str,
+    citacao: &'static str,
+    idioma: &'static str,
+    dificuldade: &'static str,
+}
+
+const ICONES_UNICODE: Icons = Icons {
+    teclado: "⌨",
+    configuracoes: "⚙",
+    tempo: "◷",
+    palavras: "Aa",
+    citacao: "❝",
+    idioma: "◎",
+    dificuldade: "★",
+};
+
+const ICONES_NERD: Icons = Icons {
+    teclado: "",
+    configuracoes: "",
+    tempo: "",
+    palavras: "",
+    citacao: "",
+    idioma: "",
+    dificuldade: "",
+};
+
+fn icones_do_terminal() -> Icons {
+    static ICONES: OnceLock<Icons> = OnceLock::new();
+    *ICONES.get_or_init(|| match env::var("TUIPE_ICONS").ok().as_deref() {
+        Some("unicode") => ICONES_UNICODE,
+        Some("nerd") => ICONES_NERD,
+        _ if nerd_font_instalada() => ICONES_NERD,
+        _ => ICONES_UNICODE,
+    })
+}
+
+fn nerd_font_instalada() -> bool {
+    let mut fontes = fontdb::Database::new();
+    fontes.load_system_fonts();
+    fontes.faces().any(|face| {
+        face.families
+            .iter()
+            .any(|(familia, _)| familia.to_ascii_lowercase().contains("nerd font"))
+    })
+}
+
 pub fn render(
     frame: &mut Frame,
     engine: &TestEngine,
     theme: &Theme,
     settings_open: bool,
     theme_name: &str,
+) {
+    render_com_icones(
+        frame,
+        engine,
+        theme,
+        settings_open,
+        theme_name,
+        icones_do_terminal(),
+    );
+}
+
+fn render_com_icones(
+    frame: &mut Frame,
+    engine: &TestEngine,
+    theme: &Theme,
+    settings_open: bool,
+    theme_name: &str,
+    icones: Icons,
 ) {
     let viewport = frame.area();
     frame.render_widget(
@@ -59,8 +130,9 @@ pub fn render(
             frame,
             Rect::new(content.x, viewport.y + 2, content.width, 2),
             theme,
+            icones,
         );
-        render_config_bar(frame, viewport, engine, theme);
+        render_config_bar(frame, viewport, engine, theme, icones);
     }
 
     let compact = viewport.height < 18;
@@ -88,10 +160,10 @@ pub fn render(
 
     match engine.status() {
         TestStatus::Completed { .. } | TestStatus::Failed { .. } => {
-            render_result(frame, result_area, engine, theme)
+            render_result(frame, result_area, engine, theme, icones)
         }
         TestStatus::Ready | TestStatus::Running { .. } => {
-            render_test(frame, test_area, engine, theme)
+            render_test(frame, test_area, engine, theme, icones)
         }
     }
     if ready
@@ -110,17 +182,21 @@ pub fn render(
             ),
             engine,
             theme,
+            icones,
         );
     }
     if settings_open {
-        render_settings(frame, viewport, engine, theme, theme_name);
+        render_settings(frame, viewport, engine, theme, theme_name, icones);
     }
 }
 
-fn render_header(frame: &mut Frame, area: Rect, theme: &Theme) {
+fn render_header(frame: &mut Frame, area: Rect, theme: &Theme, icones: Icons) {
     frame.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled("⌨ ", Style::default().fg(color(&theme.main))),
+            Span::styled(
+                format!("{} ", icones.teclado),
+                Style::default().fg(color(&theme.main)),
+            ),
             Span::styled(
                 "tuipe",
                 Style::default()
@@ -138,6 +214,7 @@ fn render_settings(
     engine: &TestEngine,
     theme: &Theme,
     theme_name: &str,
+    icones: Icons,
 ) {
     for y in viewport.y..viewport.bottom() {
         for x in viewport.x..viewport.right() {
@@ -163,21 +240,24 @@ fn render_settings(
     };
     let config = engine.config();
     let lines = vec![
-        Line::styled("test settings", Style::default().fg(color(&theme.sub))),
+        Line::styled(
+            format!("{} configurações do teste", icones.configuracoes),
+            Style::default().fg(color(&theme.sub)),
+        ),
         Line::from(""),
         button_group(
             &[
-                ("p punctuation", config.punctuation),
-                ("n numbers", config.numbers),
+                ("p pontuação", config.punctuation),
+                ("n números", config.numbers),
             ],
             theme,
         ),
         Line::from(""),
         button_group(
             &[
-                ("m time", matches!(config.mode, TestMode::Time { .. })),
-                ("m words", matches!(config.mode, TestMode::Words { .. })),
-                ("m quote", matches!(config.mode, TestMode::Quote)),
+                ("m tempo", matches!(config.mode, TestMode::Time { .. })),
+                ("m palavras", matches!(config.mode, TestMode::Words { .. })),
+                ("m citação", matches!(config.mode, TestMode::Quote)),
             ],
             theme,
         ),
@@ -202,10 +282,10 @@ fn render_settings(
             ),
             TestMode::Quote => button_group(
                 &[
-                    ("all", config.quote_length == QuoteLength::All),
-                    ("short", config.quote_length == QuoteLength::Short),
-                    ("medium", config.quote_length == QuoteLength::Medium),
-                    ("long", config.quote_length == QuoteLength::Long),
+                    ("todas", config.quote_length == QuoteLength::All),
+                    ("curta", config.quote_length == QuoteLength::Short),
+                    ("média", config.quote_length == QuoteLength::Medium),
+                    ("longa", config.quote_length == QuoteLength::Long),
                 ],
                 theme,
             ),
@@ -214,39 +294,45 @@ fn render_settings(
         button_group(
             &[
                 ("d normal", config.difficulty == Difficulty::Normal),
-                ("d expert", config.difficulty == Difficulty::Expert),
-                ("d master", config.difficulty == Difficulty::Master),
+                ("d especialista", config.difficulty == Difficulty::Expert),
+                ("d mestre", config.difficulty == Difficulty::Master),
             ],
             theme,
         ),
-        button_group(&[("a adaptive", config.adaptive)], theme),
+        button_group(&[("a adaptativo", config.adaptive)], theme),
         Line::from(""),
         button_group(
             &[
-                ("l portuguese", config.language == "portuguese"),
-                ("l english", config.language == "english"),
+                ("l português", config.language == "portuguese"),
+                ("l inglês", config.language == "english"),
             ],
             theme,
         ),
         button_group(
             &[
-                ("k common", config.word_pack == "common"),
+                ("k comum", config.word_pack == "common"),
                 ("k 1k", config.word_pack == "1k"),
                 ("k 5k", config.word_pack == "5k"),
             ],
             theme,
         ),
         Line::from(vec![
-            Span::styled("t theme  ", Style::default().fg(color(&theme.sub))),
+            Span::styled("t tema  ", Style::default().fg(color(&theme.sub))),
             chip(theme_name.to_owned(), true, theme),
         ]),
         Line::from(""),
-        Line::styled("esc close", Style::default().fg(color(&theme.sub))),
+        Line::styled("esc fechar", Style::default().fg(color(&theme.sub))),
     ];
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
-fn render_config_bar(frame: &mut Frame, viewport: Rect, engine: &TestEngine, theme: &Theme) {
+fn render_config_bar(
+    frame: &mut Frame,
+    viewport: Rect,
+    engine: &TestEngine,
+    theme: &Theme,
+    icones: Icons,
+) {
     let area = config_bar_area(viewport);
     let config = engine.config();
     let Some(cards) = config_card_areas(viewport, &config.mode) else {
@@ -254,7 +340,10 @@ fn render_config_bar(frame: &mut Frame, viewport: Rect, engine: &TestEngine, the
         render_card(
             frame,
             card,
-            Line::styled("⚙  test settings", Style::default().fg(color(&theme.sub))),
+            Line::styled(
+                format!("{}  configurações", icones.configuracoes),
+                Style::default().fg(color(&theme.sub)),
+            ),
             theme,
         );
         return;
@@ -266,29 +355,29 @@ fn render_config_bar(frame: &mut Frame, viewport: Rect, engine: &TestEngine, the
     let idle = Style::default().fg(color(&theme.sub));
 
     let modifiers = Line::from(vec![
-        selector("@ punctuation", config.punctuation, active, idle),
+        selector("@ pontuação", config.punctuation, active, idle),
         Span::raw(" "),
-        selector("# numbers", config.numbers, active, idle),
+        selector("# números", config.numbers, active, idle),
     ]);
     render_card(frame, cards[0], modifiers, theme);
 
     let modes = Line::from(vec![
         selector(
-            "◷ time",
+            format!("{} tempo", icones.tempo),
             matches!(config.mode, TestMode::Time { .. }),
             active,
             idle,
         ),
         Span::raw(" "),
         selector(
-            "A words",
+            format!("{} palavras", icones.palavras),
             matches!(config.mode, TestMode::Words { .. }),
             active,
             idle,
         ),
         Span::raw(" "),
         selector(
-            "❝ quote",
+            format!("{} citação", icones.citacao),
             matches!(config.mode, TestMode::Quote),
             active,
             idle,
@@ -371,11 +460,11 @@ fn render_card(frame: &mut Frame, area: Rect, line: Line<'static>, theme: &Theme
     frame.render_widget(Paragraph::new(line).alignment(Alignment::Center), text);
 }
 
-fn render_test(frame: &mut Frame, area: Rect, engine: &TestEngine, theme: &Theme) {
+fn render_test(frame: &mut Frame, area: Rect, engine: &TestEngine, theme: &Theme, icones: Icons) {
     let text_width = area.width;
     if text_width < 20 || area.height < 4 {
         frame.render_widget(
-            Paragraph::new("terminal too small")
+            Paragraph::new("terminal pequeno demais")
                 .alignment(Alignment::Center)
                 .style(Style::default().fg(color(&theme.error))),
             area,
@@ -399,7 +488,7 @@ fn render_test(frame: &mut Frame, area: Rect, engine: &TestEngine, theme: &Theme
     let first_word_y = area.y + 2;
 
     frame.render_widget(
-        Paragraph::new(test_descriptor(engine))
+        Paragraph::new(test_descriptor(engine, icones))
             .style(Style::default().fg(color(&theme.sub)))
             .alignment(Alignment::Center),
         Rect::new(area.x, area.y, area.width, 1),
@@ -435,7 +524,7 @@ const fn first_visible_line(active_line: usize) -> usize {
     active_line.saturating_sub(2)
 }
 
-fn render_result(frame: &mut Frame, area: Rect, engine: &TestEngine, theme: &Theme) {
+fn render_result(frame: &mut Frame, area: Rect, engine: &TestEngine, theme: &Theme, icones: Icons) {
     let metrics = engine.metrics();
     let failed = matches!(engine.status(), TestStatus::Failed { .. });
     let group_count = if failed { 6 } else { 5 };
@@ -471,6 +560,7 @@ fn render_result(frame: &mut Frame, area: Rect, engine: &TestEngine, theme: &The
         engine,
         &metrics,
         theme,
+        icones,
     );
 }
 
@@ -484,7 +574,7 @@ fn render_primary_result(frame: &mut Frame, area: Rect, metrics: &Metrics, theme
                 .add_modifier(Modifier::BOLD),
         ),
         Line::from(""),
-        Line::styled("acc", Style::default().fg(color(&theme.sub))),
+        Line::styled("precisão", Style::default().fg(color(&theme.sub))),
         Line::styled(
             format!("{:.0}%", metrics.accuracy),
             Style::default()
@@ -504,9 +594,12 @@ fn render_result_chart(frame: &mut Frame, area: Rect, metrics: &Metrics, theme: 
     .split(area);
     frame.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled("wpm over time", Style::default().fg(color(&theme.text))),
+            Span::styled(
+                "wpm ao longo do tempo",
+                Style::default().fg(color(&theme.text)),
+            ),
             Span::raw("   "),
-            Span::styled("× errors", Style::default().fg(color(&theme.error))),
+            Span::styled("× erros", Style::default().fg(color(&theme.error))),
         ])),
         sections[0],
     );
@@ -670,30 +763,35 @@ fn render_result_details(
     engine: &TestEngine,
     metrics: &Metrics,
     theme: &Theme,
+    icones: Icons,
 ) {
     let stats = metrics.characters;
     let failed = matches!(engine.status(), TestStatus::Failed { .. });
     let mut details = vec![result_group_lines(
-        "test type",
-        result_descriptor(engine),
+        "tipo de teste",
+        result_descriptor(engine, icones),
         theme,
     )];
     if failed {
         details.push(failure_group_lines(theme));
     }
     details.extend([
-        result_group_lines("raw", format!("{:.0}", metrics.raw_wpm), theme),
+        result_group_lines("bruto", format!("{:.0}", metrics.raw_wpm), theme),
         result_group_lines(
-            "characters",
+            "caracteres",
             format!(
                 "{}/{}/{}/{}",
                 stats.correct_word, stats.incorrect, stats.extra, stats.missed
             ),
             theme,
         ),
-        result_group_lines("consistency", format!("{:.0}%", metrics.consistency), theme),
         result_group_lines(
-            "time",
+            "consistência",
+            format!("{:.0}%", metrics.consistency),
+            theme,
+        ),
+        result_group_lines(
+            "tempo",
             format!("{:.1}s", metrics.duration_ms as f64 / 1_000.0),
             theme,
         ),
@@ -780,28 +878,38 @@ fn result_group_lines(name: &str, result: String, theme: &Theme) -> Vec<Line<'st
 
 fn failure_group_lines(theme: &Theme) -> Vec<Line<'static>> {
     vec![
-        Line::styled("other", Style::default().fg(color(&theme.sub))),
+        Line::styled("outro", Style::default().fg(color(&theme.sub))),
         Line::styled(
-            "failed (difficulty)",
+            "falhou (dificuldade)",
             Style::default().fg(color(&theme.error)),
         ),
     ]
 }
 
-fn render_footer(frame: &mut Frame, area: Rect, engine: &TestEngine, theme: &Theme) {
+fn render_footer(
+    frame: &mut Frame,
+    area: Rect,
+    engine: &TestEngine,
+    theme: &Theme,
+    _icones: Icons,
+) {
     let line = match engine.status() {
         TestStatus::Ready => key_hints(
-            &[("enter", "restart"), ("esc", "settings"), ("q", "quit")],
+            &[
+                ("enter", "reiniciar"),
+                ("esc", "configurações"),
+                ("q", "sair"),
+            ],
             theme,
         ),
         TestStatus::Running { .. } => return,
         TestStatus::Completed { .. } | TestStatus::Failed { .. } => key_hints(
             &[
-                ("enter", "next"),
-                ("r", "repeat"),
-                ("h", "words"),
-                ("s", "stats"),
-                ("q", "quit"),
+                ("enter", "próximo"),
+                ("r", "repetir"),
+                ("h", "palavras"),
+                ("s", "estatísticas"),
+                ("q", "sair"),
             ],
             theme,
         ),
@@ -916,49 +1024,62 @@ fn mini_progress(engine: &TestEngine) -> String {
     }
 }
 
-fn test_descriptor(engine: &TestEngine) -> String {
+fn test_descriptor(engine: &TestEngine, icones: Icons) -> String {
     let config = engine.config();
     let mut modifiers = vec![difficulty_name(config.difficulty)];
     if config.punctuation {
-        modifiers.push("punctuation");
+        modifiers.push("pontuação");
     }
     if config.numbers {
-        modifiers.push("numbers");
-    }
-    if config.adaptive && !matches!(config.mode, TestMode::Quote) {
-        modifiers.push("adaptive");
+        modifiers.push("números");
     }
     format!(
-        "{} {} · {}",
-        config.language,
-        config.word_pack,
+        "{} {} {} · {} {}",
+        icones.idioma,
+        language_name(&config.language),
+        word_pack_name(&config.word_pack),
+        icones.dificuldade,
         modifiers.join(" · ")
     )
 }
 
-fn result_descriptor(engine: &TestEngine) -> String {
+fn result_descriptor(engine: &TestEngine, icones: Icons) -> String {
     let config = engine.config();
     let mode = match config.mode {
-        TestMode::Time { seconds } => format!("time {seconds}"),
-        TestMode::Words { count } => format!("words {count}"),
-        TestMode::Quote => "quote".into(),
+        TestMode::Time { seconds } => format!("tempo {seconds}"),
+        TestMode::Words { count } => format!("palavras {count}"),
+        TestMode::Quote => "citação".into(),
     };
     let mut modifiers = vec![difficulty_name(config.difficulty)];
     if config.punctuation {
-        modifiers.push("punctuation");
+        modifiers.push("pontuação");
     }
     if config.numbers {
-        modifiers.push("numbers");
-    }
-    if config.adaptive && !matches!(config.mode, TestMode::Quote) {
-        modifiers.push("adaptive");
+        modifiers.push("números");
     }
     format!(
-        "{mode}\n{} {}\n{}",
-        config.language,
-        config.word_pack,
+        "{mode}\n{} {} {}\n{} {}",
+        icones.idioma,
+        language_name(&config.language),
+        word_pack_name(&config.word_pack),
+        icones.dificuldade,
         modifiers.join(" · ")
     )
+}
+
+fn language_name(language: &str) -> &str {
+    match language {
+        "portuguese" => "português",
+        "english" => "inglês",
+        _ => language,
+    }
+}
+
+fn word_pack_name(pack: &str) -> &str {
+    match pack {
+        "common" => "comum",
+        _ => pack,
+    }
 }
 
 fn key_hints(hints: &[(&str, &str)], theme: &Theme) -> Line<'static> {
@@ -1001,8 +1122,8 @@ fn chip(text: String, active: bool, theme: &Theme) -> Span<'static> {
     Span::styled(format!(" {text} "), style)
 }
 
-fn selector<'a>(text: &'a str, selected: bool, active: Style, idle: Style) -> Span<'a> {
-    Span::styled(text, if selected { active } else { idle })
+fn selector(text: impl Into<String>, selected: bool, active: Style, idle: Style) -> Span<'static> {
+    Span::styled(text.into(), if selected { active } else { idle })
 }
 
 fn choices<T: std::fmt::Display + Copy + PartialEq>(
@@ -1041,8 +1162,8 @@ fn choice_names(values: &[&str], selected: usize, active: Style, idle: Style) ->
 fn difficulty_name(difficulty: Difficulty) -> &'static str {
     match difficulty {
         Difficulty::Normal => "normal",
-        Difficulty::Expert => "expert",
-        Difficulty::Master => "master",
+        Difficulty::Expert => "especialista",
+        Difficulty::Master => "mestre",
     }
 }
 
@@ -1116,7 +1237,9 @@ mod tests {
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
-            .draw(|frame| render(frame, engine, theme, settings_open, "arch"))
+            .draw(|frame| {
+                render_com_icones(frame, engine, theme, settings_open, "arch", ICONES_UNICODE)
+            })
             .unwrap();
         let buffer = terminal.backend().buffer();
         (0..height)
@@ -1135,11 +1258,13 @@ mod tests {
     fn test_screen_renders_at_small_medium_and_ultrawide_sizes() {
         for (width, height) in [(50, 14), (100, 28), (180, 40)] {
             let rendered = render_at(width, height);
-            assert!(rendered.contains(if width < 80 { "test settings" } else { "time" }));
+            assert!(rendered.contains(if width < 80 {
+                "configurações"
+            } else {
+                "tempo"
+            }));
             assert!(rendered.contains("olá"));
-            if width >= 100 {
-                assert!(rendered.contains("adaptive"));
-            }
+            assert!(!rendered.contains("adaptativo"));
             insta::assert_snapshot!(format!("test_{width}x{height}"), rendered);
         }
     }
