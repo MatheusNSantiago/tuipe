@@ -83,6 +83,22 @@ struct App {
     session_kind: SessionKind,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+struct WordTiming {
+    fluent_ms: u64,
+    correction_ms: u64,
+    planning_ms: u64,
+    afk_ms: u64,
+    input_events: u16,
+    corrective_events: u16,
+}
+
+impl WordTiming {
+    fn execution_ms(self) -> u64 {
+        self.fluent_ms.saturating_add(self.correction_ms)
+    }
+}
+
 impl App {
     fn new(
         preferences: Preferences,
@@ -270,7 +286,11 @@ impl App {
                 self.engine.status(),
                 TestStatus::Failed { word_index: failed_index, .. } if *failed_index == word_index
             );
-            if (attempt.committed || terminal_failure)
+            let censored = !attempt.committed
+                && !terminal_failure
+                && matches!(self.engine.status(), TestStatus::Completed { .. })
+                && !attempt.input.is_empty();
+            if (attempt.committed || terminal_failure || censored)
                 && let Some(word) = lexical_word(&target.text)
             {
                 *occurrences.entry(word).or_default() += 1;
@@ -286,16 +306,28 @@ impl App {
                     self.engine.status(),
                     TestStatus::Failed { word_index: failed_index, .. } if *failed_index == word_index
                 );
-                if !attempt.committed && !terminal_failure {
+                let censored = !attempt.committed
+                    && !terminal_failure
+                    && matches!(self.engine.status(), TestStatus::Completed { .. })
+                    && !attempt.input.is_empty();
+                if !attempt.committed && !terminal_failure && !censored {
                     return None;
                 }
                 let word = lexical_word(&target.text)?;
-                let (active_ms, afk_ms) = timings.get(word_index).copied().unwrap_or_default();
+                let timing = timings.get(word_index).copied().unwrap_or_default();
+                let active_ms = timing.execution_ms();
                 let grapheme_count = word.graphemes(true).count().try_into().unwrap_or(u16::MAX);
                 let active_per_grapheme = active_ms as f64 / f64::from(grapheme_count.max(1));
                 let latency_baseline = baseline.latency_ms_per_grapheme(grapheme_count);
+                let typed = attempt.without_commit();
+                let expected_prefix = target
+                    .text
+                    .graphemes(true)
+                    .take(typed.graphemes(true).count())
+                    .collect::<String>();
                 let confirmed_error = terminal_failure
-                    || (attempt.committed && attempt.without_commit() != target.text);
+                    || (attempt.committed && typed != target.text)
+                    || (censored && typed != expected_prefix);
                 let fast_success = attempt.committed
                     && !confirmed_error
                     && attempt.corrections == 0
@@ -303,14 +335,21 @@ impl App {
                         .is_some_and(|baseline| active_per_grapheme <= baseline * 0.8);
                 let slow = latency_baseline
                     .is_some_and(|baseline| active_per_grapheme >= baseline * 1.5);
-                let evidence_weight = if self.repeated_test {
+                let evidence_weight = if self.repeated_test || (censored && !confirmed_error) {
                     0.0
                 } else {
-                    1.0 / occurrences
+                    let occurrence_weight = 1.0 / occurrences
                         .get(&word)
                         .copied()
                         .unwrap_or(1)
-                        .max(1) as f64
+                        .max(1) as f64;
+                    if censored {
+                        let observed_fraction = typed.graphemes(true).count() as f64
+                            / f64::from(grapheme_count.max(1));
+                        occurrence_weight * observed_fraction.min(1.0) * 0.5
+                    } else {
+                        occurrence_weight
+                    }
                 };
                 let selection = (!self.repeated_test)
                     .then(|| self.selections.get(word_index).cloned().flatten())
@@ -344,7 +383,13 @@ impl App {
                     confirmed_error,
                     corrections: attempt.corrections,
                     active_ms,
-                    afk_ms,
+                    afk_ms: timing.afk_ms,
+                    planning_ms: timing.planning_ms,
+                    fluent_ms: timing.fluent_ms,
+                    correction_ms: timing.correction_ms,
+                    input_events: timing.input_events,
+                    corrective_events: timing.corrective_events,
+                    censored,
                     grapheme_count,
                     fast_success,
                     slow,
@@ -361,17 +406,20 @@ impl App {
     /// Separa execução e interrupção pela distribuição da própria sessão. Um
     /// intervalo entre palavras continua sendo latência de planejamento, não
     /// tempo motor da palavra seguinte.
-    fn word_timings(&self) -> Vec<(u64, u64)> {
+    fn word_timings(&self) -> Vec<WordTiming> {
         #[derive(Clone, Copy)]
         struct Gap {
             word_index: usize,
             elapsed_ms: u64,
             interrupted: bool,
+            same_word: bool,
+            correction: bool,
         }
 
         let mut gaps = Vec::new();
-        let mut previous_key = None::<(u64, usize)>;
+        let mut previous_key = None::<(u64, usize, bool)>;
         let mut interrupted = false;
+        let mut event_counts = vec![(0_u16, 0_u16); self.engine.targets().len()];
         for event in self.engine.recorded_events() {
             match &event.kind {
                 RecordedInputKind::Focus { gained } => {
@@ -380,16 +428,20 @@ impl App {
                     }
                 }
                 RecordedInputKind::Insert { .. } | RecordedInputKind::Delete { .. } => {
-                    if let Some((previous_at, previous_word)) = previous_key
-                        && previous_word == event.word_index
-                    {
+                    let current_delete = matches!(event.kind, RecordedInputKind::Delete { .. });
+                    let counts = &mut event_counts[event.word_index];
+                    counts.0 = counts.0.saturating_add(1);
+                    counts.1 = counts.1.saturating_add(u16::from(current_delete));
+                    if let Some((previous_at, previous_word, previous_delete)) = previous_key {
                         gaps.push(Gap {
                             word_index: event.word_index,
                             elapsed_ms: event.at_ms.saturating_sub(previous_at),
                             interrupted,
+                            same_word: previous_word == event.word_index,
+                            correction: current_delete || previous_delete,
                         });
                     }
-                    previous_key = Some((event.at_ms, event.word_index));
+                    previous_key = Some((event.at_ms, event.word_index, current_delete));
                     interrupted = false;
                 }
                 RecordedInputKind::Paste { .. } => {}
@@ -398,7 +450,7 @@ impl App {
 
         let mut log_intervals = gaps
             .iter()
-            .filter(|gap| !gap.interrupted && gap.elapsed_ms > 0)
+            .filter(|gap| gap.same_word && !gap.interrupted && gap.elapsed_ms > 0)
             .map(|gap| (gap.elapsed_ms as f64).ln())
             .collect::<Vec<_>>();
         let pause_threshold = if log_intervals.len() >= 12 {
@@ -413,7 +465,7 @@ impl App {
             None
         };
 
-        let mut timings = vec![(0_u64, 0_u64); self.engine.targets().len()];
+        let mut timings = vec![WordTiming::default(); self.engine.targets().len()];
         for gap in gaps {
             let is_pause = gap.interrupted
                 || pause_threshold.is_some_and(|threshold| {
@@ -421,10 +473,18 @@ impl App {
                 });
             let timing = &mut timings[gap.word_index];
             if is_pause {
-                timing.1 = timing.1.saturating_add(gap.elapsed_ms);
+                timing.afk_ms = timing.afk_ms.saturating_add(gap.elapsed_ms);
+            } else if !gap.same_word {
+                timing.planning_ms = timing.planning_ms.saturating_add(gap.elapsed_ms);
+            } else if gap.correction {
+                timing.correction_ms = timing.correction_ms.saturating_add(gap.elapsed_ms);
             } else {
-                timing.0 = timing.0.saturating_add(gap.elapsed_ms);
+                timing.fluent_ms = timing.fluent_ms.saturating_add(gap.elapsed_ms);
             }
+        }
+        for (timing, (input_events, corrective_events)) in timings.iter_mut().zip(event_counts) {
+            timing.input_events = input_events;
+            timing.corrective_events = corrective_events;
         }
         timings
     }
@@ -454,7 +514,7 @@ impl App {
                     record.evidence_weight,
                 );
             }
-            if record.evidence_weight > 0.0 {
+            if record.evidence_weight > 0.0 && !record.censored {
                 reviewed_words
                     .entry((record.language.clone(), record.word.clone()))
                     .and_modify(|clean| {
@@ -1018,6 +1078,25 @@ fn without_last_commit(mut words: Vec<String>) -> Vec<String> {
 mod tests {
     use super::*;
 
+    fn app_de_teste(config: tuipe::typing::TestConfig, words: &[&str]) -> App {
+        let temporary = tempfile::tempdir().unwrap();
+        let repository = Repository::open(&temporary.path().join("history.db")).unwrap();
+        let preferences = Preferences {
+            test: config.clone(),
+            ..Preferences::default()
+        };
+        let mut app = App::new(
+            preferences,
+            ContentCatalog::bundled().unwrap(),
+            temporary.path().join("config.toml"),
+            &repository,
+        )
+        .unwrap();
+        app.engine = TestEngine::new(config, words.iter().map(|word| (*word).to_owned()));
+        app.selections = vec![None; words.len()];
+        app
+    }
+
     #[test]
     fn ctrl_w_and_ctrl_backspace_remove_the_active_word() {
         assert_eq!(
@@ -1044,5 +1123,52 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(first, second);
         assert!((70..=130).contains(&first.len()));
+    }
+
+    #[test]
+    fn palavra_cortada_pelo_tempo_nao_vira_acerto() {
+        let config = tuipe::typing::TestConfig {
+            mode: TestMode::Time { seconds: 1 },
+            difficulty: tuipe::typing::Difficulty::Normal,
+            ..tuipe::typing::TestConfig::default()
+        };
+        let mut app = app_de_teste(config, &["casa ", "tempo "]);
+        app.update(InputEvent::Key {
+            action: KeyAction::Text("c".into()),
+            at_ms: 0,
+        });
+        app.update(InputEvent::Tick { at_ms: 1_000 });
+        let observations = app.observations(&Default::default());
+        assert_eq!(observations.len(), 1);
+        assert!(observations[0].censored);
+        assert!(!observations[0].confirmed_error);
+        assert_eq!(observations[0].evidence_weight, 0.0);
+    }
+
+    #[test]
+    fn tempo_de_correcao_fica_separado_da_execucao_fluente() {
+        let config = tuipe::typing::TestConfig {
+            mode: TestMode::Time { seconds: 1 },
+            difficulty: tuipe::typing::Difficulty::Normal,
+            ..tuipe::typing::TestConfig::default()
+        };
+        let mut app = app_de_teste(config, &["casa ", "tempo "]);
+        for (action, at_ms) in [
+            (KeyAction::Text("c".into()), 0),
+            (KeyAction::Text("x".into()), 100),
+            (KeyAction::Backspace, 250),
+            (KeyAction::Text("a".into()), 300),
+            (KeyAction::Text("s".into()), 400),
+            (KeyAction::Text("a".into()), 500),
+            (KeyAction::Text(" ".into()), 600),
+        ] {
+            app.update(InputEvent::Key { action, at_ms });
+        }
+        app.update(InputEvent::Tick { at_ms: 1_000 });
+        let observations = app.observations(&Default::default());
+        assert_eq!(observations[0].fluent_ms, 400);
+        assert_eq!(observations[0].correction_ms, 200);
+        assert_eq!(observations[0].corrective_events, 1);
+        assert_eq!(observations[0].input_events, 7);
     }
 }

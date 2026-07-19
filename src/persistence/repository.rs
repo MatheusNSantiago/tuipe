@@ -118,6 +118,12 @@ pub struct WordObservationRecord {
     pub corrections: u32,
     pub active_ms: u64,
     pub afk_ms: u64,
+    pub planning_ms: u64,
+    pub fluent_ms: u64,
+    pub correction_ms: u64,
+    pub input_events: u16,
+    pub corrective_events: u16,
+    pub censored: bool,
     pub grapheme_count: u16,
     pub fast_success: bool,
     pub slow: bool,
@@ -297,7 +303,7 @@ impl Repository {
             )?;
         }
         for record in observations {
-            if record.evidence_weight > 0.0 {
+            if record.evidence_weight > 0.0 && !record.censored {
                 reviewed_words
                     .entry((record.language.clone(), record.word.clone()))
                     .and_modify(|clean| {
@@ -310,8 +316,9 @@ impl Repository {
                     session_id, language, word, confirmed_error, corrections,
                     active_ms, afk_ms, fast_success, grapheme_count, slow,
                     latency_ratio, evidence_weight, selection_source, selection_propensity,
-                    mechanics_json
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                    mechanics_json, planning_ms, fluent_ms, correction_ms,
+                    input_events, corrective_events, censored
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
                 params![
                     session_id,
                     record.language,
@@ -330,6 +337,12 @@ impl Repository {
                         .map(|source| format!("{source:?}").to_lowercase()),
                     record.selection_propensity,
                     serde_json::to_string(&record.mechanics)?,
+                    record.planning_ms as i64,
+                    record.fluent_ms as i64,
+                    record.correction_ms as i64,
+                    record.input_events,
+                    record.corrective_events,
+                    record.censored,
                 ],
             )?;
 
@@ -505,12 +518,13 @@ impl Repository {
             mechanics: Vec<MechanicObservationRecord>,
             session_id: i64,
             observed_at: i64,
+            censored: bool,
         }
 
         let mut statement = self.connection.prepare(
             "SELECT wo.language, wo.word, wo.confirmed_error, wo.corrections,
                     wo.fast_success, wo.slow, wo.latency_ratio, wo.evidence_weight,
-                    wo.mechanics_json, wo.session_id, unixepoch(s.created_at)
+                    wo.mechanics_json, wo.session_id, unixepoch(s.created_at), wo.censored
              FROM word_observations wo
              JOIN sessions s ON s.id = wo.session_id
              ORDER BY wo.session_id, wo.id",
@@ -541,6 +555,7 @@ impl Repository {
                     mechanics,
                     session_id: row.get(9)?,
                     observed_at: row.get(10)?,
+                    censored: row.get(11)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -571,7 +586,7 @@ impl Repository {
                         record.observation.evidence_weight,
                     );
             }
-            if record.observation.evidence_weight > 0.0 {
+            if record.observation.evidence_weight > 0.0 && !record.censored {
                 reviews
                     .entry((
                         record.session_id,
@@ -1075,7 +1090,13 @@ fn migrate(connection: &Connection) -> Result<()> {
            slow INTEGER NOT NULL DEFAULT 0, latency_ratio REAL,
            evidence_weight REAL NOT NULL DEFAULT 1,
            selection_source TEXT, selection_propensity REAL,
-           mechanics_json TEXT NOT NULL DEFAULT '[]'
+           mechanics_json TEXT NOT NULL DEFAULT '[]',
+           planning_ms INTEGER NOT NULL DEFAULT 0,
+           fluent_ms INTEGER NOT NULL DEFAULT 0,
+           correction_ms INTEGER NOT NULL DEFAULT 0,
+           input_events INTEGER NOT NULL DEFAULT 0,
+           corrective_events INTEGER NOT NULL DEFAULT 0,
+           censored INTEGER NOT NULL DEFAULT 0
          );
          CREATE TABLE IF NOT EXISTS word_skill (language TEXT NOT NULL, word TEXT NOT NULL, state BLOB NOT NULL, PRIMARY KEY(language, word));
          CREATE TABLE IF NOT EXISTS ngram_skill (language TEXT NOT NULL, ngram TEXT NOT NULL, state BLOB NOT NULL, PRIMARY KEY(language, ngram));
@@ -1158,7 +1179,22 @@ fn migrate(connection: &Connection) -> Result<()> {
             )?;
         }
     }
-    connection.execute("UPDATE schema_version SET version = 5", [])?;
+    for (column, definition) in [
+        ("planning_ms", "INTEGER NOT NULL DEFAULT 0"),
+        ("fluent_ms", "INTEGER NOT NULL DEFAULT 0"),
+        ("correction_ms", "INTEGER NOT NULL DEFAULT 0"),
+        ("input_events", "INTEGER NOT NULL DEFAULT 0"),
+        ("corrective_events", "INTEGER NOT NULL DEFAULT 0"),
+        ("censored", "INTEGER NOT NULL DEFAULT 0"),
+    ] {
+        if !table_has_column(connection, "word_observations", column)? {
+            connection.execute(
+                &format!("ALTER TABLE word_observations ADD COLUMN {column} {definition}"),
+                [],
+            )?;
+        }
+    }
+    connection.execute("UPDATE schema_version SET version = 6", [])?;
     Ok(())
 }
 
@@ -1300,6 +1336,12 @@ mod tests {
                     corrections: 2,
                     active_ms: 320,
                     afk_ms: 0,
+                    planning_ms: 0,
+                    fluent_ms: 320,
+                    correction_ms: 0,
+                    input_events: 7,
+                    corrective_events: 0,
+                    censored: false,
                     grapheme_count: 7,
                     fast_success: false,
                     slow: false,
@@ -1373,6 +1415,12 @@ mod tests {
                         corrections: 0,
                         active_ms: 800,
                         afk_ms: 0,
+                        planning_ms: 0,
+                        fluent_ms: 800,
+                        correction_ms: 0,
+                        input_events: 4,
+                        corrective_events: 0,
+                        censored: false,
                         grapheme_count: 4,
                         fast_success: false,
                         slow: false,
@@ -1407,6 +1455,12 @@ mod tests {
                     corrections: 1,
                     active_ms: 900,
                     afk_ms: 0,
+                    planning_ms: 0,
+                    fluent_ms: 700,
+                    correction_ms: 200,
+                    input_events: 6,
+                    corrective_events: 1,
+                    censored: false,
                     grapheme_count: 4,
                     fast_success: false,
                     slow: false,
@@ -1442,6 +1496,12 @@ mod tests {
             corrections: 0,
             active_ms: 500,
             afk_ms: 0,
+            planning_ms: 0,
+            fluent_ms: 500,
+            correction_ms: 0,
+            input_events: 4,
+            corrective_events: 0,
+            censored: false,
             grapheme_count: 4,
             fast_success: false,
             slow: false,
