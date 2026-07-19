@@ -58,7 +58,9 @@ pub struct WordObservationRecord {
     pub corrections: u32,
     pub active_ms: u64,
     pub afk_ms: u64,
+    pub grapheme_count: u16,
     pub fast_success: bool,
+    pub slow: bool,
     pub repeat_discount: f64,
 }
 
@@ -123,8 +125,8 @@ impl Repository {
             transaction.execute(
                 "INSERT INTO word_observations (
                     session_id, language, word, confirmed_error, corrections,
-                    active_ms, afk_ms, fast_success
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                    active_ms, afk_ms, fast_success, grapheme_count, slow
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                 params![
                     session_id,
                     record.language,
@@ -134,6 +136,8 @@ impl Repository {
                     record.active_ms as i64,
                     record.afk_ms as i64,
                     record.fast_success,
+                    record.grapheme_count,
+                    record.slow,
                 ],
             )?;
 
@@ -152,6 +156,7 @@ impl Repository {
                 confirmed_error: record.confirmed_error,
                 corrected: record.corrections > 0,
                 fast_success: record.fast_success,
+                slow: record.slow,
                 repeat_discount: record.repeat_discount,
             });
             let state = postcard::to_allocvec(&skill)?;
@@ -166,6 +171,21 @@ impl Repository {
             self.award_completed_session(config, &metrics)?;
         }
         Ok(session_id)
+    }
+
+    /// Baseline robusto (mediana aproximada) por idioma e tamanho. Só entra em
+    /// ação após haver oito amostras, preservando o início frio.
+    pub fn baseline_ms_per_grapheme(&self, language: &str) -> Result<Option<f64>> {
+        let mut statement = self.connection.prepare(
+            "SELECT active_ms * 1.0 / grapheme_count
+             FROM word_observations
+             WHERE language = ?1 AND active_ms > 0 AND grapheme_count > 0
+             ORDER BY active_ms * 1.0 / grapheme_count",
+        )?;
+        let samples = statement
+            .query_map([language], |row| row.get::<_, f64>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok((samples.len() >= 8).then(|| samples[samples.len() / 2]))
     }
 
     pub fn progress(&self) -> Result<(XpState, StreakState)> {
@@ -350,7 +370,8 @@ fn migrate(connection: &Connection) -> Result<()> {
            id INTEGER PRIMARY KEY, session_id INTEGER NOT NULL REFERENCES sessions(id),
            language TEXT NOT NULL, word TEXT NOT NULL, confirmed_error INTEGER NOT NULL,
            corrections INTEGER NOT NULL, active_ms INTEGER NOT NULL, afk_ms INTEGER NOT NULL,
-           fast_success INTEGER NOT NULL DEFAULT 0
+           fast_success INTEGER NOT NULL DEFAULT 0, grapheme_count INTEGER NOT NULL DEFAULT 0,
+           slow INTEGER NOT NULL DEFAULT 0
          );
          CREATE TABLE IF NOT EXISTS word_skill (language TEXT NOT NULL, word TEXT NOT NULL, state BLOB NOT NULL, PRIMARY KEY(language, word));
          CREATE TABLE IF NOT EXISTS ngram_skill (language TEXT NOT NULL, ngram TEXT NOT NULL, state BLOB NOT NULL, PRIMARY KEY(language, ngram));
@@ -364,6 +385,18 @@ fn migrate(connection: &Connection) -> Result<()> {
     if !table_has_column(connection, "word_observations", "fast_success")? {
         connection.execute(
             "ALTER TABLE word_observations ADD COLUMN fast_success INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
+    if !table_has_column(connection, "word_observations", "grapheme_count")? {
+        connection.execute(
+            "ALTER TABLE word_observations ADD COLUMN grapheme_count INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
+    if !table_has_column(connection, "word_observations", "slow")? {
+        connection.execute(
+            "ALTER TABLE word_observations ADD COLUMN slow INTEGER NOT NULL DEFAULT 0",
             [],
         )?;
     }
@@ -474,7 +507,9 @@ mod tests {
                     corrections: 2,
                     active_ms: 320,
                     afk_ms: 0,
+                    grapheme_count: 7,
                     fast_success: false,
+                    slow: false,
                     repeat_discount: 1.0,
                 }],
             )
@@ -489,6 +524,7 @@ mod tests {
                     confirmed_errors: 1.0,
                     corrections: 1.0,
                     fast_successes: 0.0,
+                    slowdowns: 0.0,
                     observations: 1,
                 },
             )]
@@ -497,5 +533,39 @@ mod tests {
         assert_eq!(priority.len(), 1);
         assert_eq!(priority[0].word, "difícil");
         assert_eq!(priority[0].confirmed_errors, 1.0);
+    }
+
+    #[test]
+    fn baseline_por_idioma_so_ativa_com_amostras_suficientes() {
+        let temporary = tempfile::tempdir().unwrap();
+        let repository = Repository::open(&temporary.path().join("history.db")).unwrap();
+        for index in 0..8 {
+            repository
+                .save_session_with_observations(
+                    &TestConfig::default(),
+                    &TestStatus::Failed {
+                        ended_at_ms: index,
+                        word_index: 0,
+                    },
+                    Metrics::default(),
+                    &[WordObservationRecord {
+                        language: "portuguese".into(),
+                        word: format!("palavra{index}"),
+                        confirmed_error: false,
+                        corrections: 0,
+                        active_ms: 800,
+                        afk_ms: 0,
+                        grapheme_count: 4,
+                        fast_success: false,
+                        slow: false,
+                        repeat_discount: 1.0,
+                    }],
+                )
+                .unwrap();
+        }
+        assert_eq!(
+            repository.baseline_ms_per_grapheme("portuguese").unwrap(),
+            Some(200.0)
+        );
     }
 }

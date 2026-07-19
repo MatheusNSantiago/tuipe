@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 pub struct AdaptivePolicy {
     /// Sinal mais forte: palavra confirmada incorretamente sem correção.
     pub confirmed_error_weight: f64,
-    /// Um erro removido depois é relevante, mas menos conclusivo.
+    /// Correções recorrentes são relevantes; as duas primeiras são ruído.
     pub correction_weight: f64,
     /// O sucesso pesa menos de propósito: a recuperação exige boas sessões repetidas.
     pub fast_success_weight: f64,
@@ -29,7 +29,7 @@ impl Default for AdaptivePolicy {
     fn default() -> Self {
         Self {
             confirmed_error_weight: 1.0,
-            correction_weight: 0.45,
+            correction_weight: 0.22,
             fast_success_weight: 0.16,
             maximum_boost: 3.0,
             evidence_midpoint: 3.0,
@@ -42,6 +42,8 @@ pub struct WordSkill {
     pub confirmed_errors: f64,
     pub corrections: f64,
     pub fast_successes: f64,
+    #[serde(default)]
+    pub slowdowns: f64,
     pub observations: u32,
 }
 
@@ -51,6 +53,7 @@ impl WordSkill {
         self.confirmed_errors += f64::from(observation.confirmed_error);
         self.corrections += f64::from(observation.corrected) * observation.repeat_discount;
         self.fast_successes += f64::from(observation.fast_success) * observation.repeat_discount;
+        self.slowdowns += f64::from(observation.slow) * observation.repeat_discount;
     }
 }
 
@@ -59,6 +62,7 @@ pub struct Observation {
     pub confirmed_error: bool,
     pub corrected: bool,
     pub fast_success: bool,
+    pub slow: bool,
     /// Repetir o mesmo teste reduz toda evidência não terminal.
     pub repeat_discount: f64,
 }
@@ -69,6 +73,7 @@ impl Observation {
             confirmed_error,
             corrected,
             fast_success,
+            slow: false,
             repeat_discount: 1.0,
         }
     }
@@ -76,8 +81,13 @@ impl Observation {
 
 impl AdaptivePolicy {
     pub fn difficulty(&self, skill: &WordSkill) -> f64 {
+        // Uma correção eventual é comum e não deve transformar uma palavra em
+        // prioridade. O sinal só começa na terceira ocorrência e cresce de
+        // maneira gradual; erros confirmados permanecem independentes.
+        let recurring_corrections = (skill.corrections - 2.0).max(0.0).powf(1.35);
         let evidence = skill.confirmed_errors * self.confirmed_error_weight
-            + skill.corrections * self.correction_weight
+            + recurring_corrections * self.correction_weight
+            + skill.slowdowns * 0.25
             - skill.fast_successes * self.fast_success_weight;
         let confidence = 1.0 - (-(skill.observations as f64) / self.evidence_midpoint).exp();
         let sigmoid = 1.0 / (1.0 + (-evidence).exp());
@@ -216,6 +226,36 @@ mod tests {
         };
         assert!(policy.weight(Some(&skill)) > policy.weight(None));
         assert!(policy.weight(Some(&skill)) <= 1.0 + policy.maximum_boost);
+    }
+
+    #[test]
+    fn uma_ou_duas_correcoes_nao_criam_prioridade() {
+        let policy = AdaptivePolicy::default();
+        for corrections in [1.0, 2.0] {
+            let skill = WordSkill {
+                corrections,
+                observations: corrections as u32,
+                ..WordSkill::default()
+            };
+            assert_eq!(policy.weight(Some(&skill)), 1.0);
+        }
+    }
+
+    #[test]
+    fn correcoes_recorrentes_aumentam_prioridade_gradualmente() {
+        let policy = AdaptivePolicy::default();
+        let three = WordSkill {
+            corrections: 3.0,
+            observations: 3,
+            ..WordSkill::default()
+        };
+        let eight = WordSkill {
+            corrections: 8.0,
+            observations: 8,
+            ..WordSkill::default()
+        };
+        assert!(policy.weight(Some(&three)) > 1.0);
+        assert!(policy.weight(Some(&eight)) > policy.weight(Some(&three)));
     }
 
     #[test]

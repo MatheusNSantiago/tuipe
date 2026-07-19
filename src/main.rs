@@ -18,6 +18,7 @@ use termina::{
     escape::osc::{DynamicColorNumber, Osc},
     style::RgbColor,
 };
+use unicode_segmentation::UnicodeSegmentation;
 
 use tuipe::{
     adaptive::{AdaptivePolicy, AdaptiveSampler, Observation},
@@ -174,7 +175,7 @@ impl App {
         }
     }
 
-    fn observations(&self) -> Vec<WordObservationRecord> {
+    fn observations(&self, baseline_ms_per_grapheme: Option<f64>) -> Vec<WordObservationRecord> {
         self.engine
             .targets()
             .iter()
@@ -186,6 +187,8 @@ impl App {
                 }
                 let word = lexical_word(&target.text)?;
                 let active_ms = attempt.active_ms;
+                let grapheme_count = word.graphemes(true).count().try_into().unwrap_or(u16::MAX);
+                let active_per_grapheme = active_ms as f64 / f64::from(grapheme_count.max(1));
                 let confirmed_error = matches!(
                     self.engine.status(),
                     TestStatus::Failed { word_index: failed_index, .. } if *failed_index == word_index
@@ -193,7 +196,10 @@ impl App {
                 let fast_success = attempt.committed
                     && !confirmed_error
                     && attempt.corrections == 0
-                    && active_ms <= 750;
+                    && baseline_ms_per_grapheme
+                        .is_some_and(|baseline| active_per_grapheme <= baseline * 0.8);
+                let slow = baseline_ms_per_grapheme
+                    .is_some_and(|baseline| active_per_grapheme >= baseline * 1.5);
                 Some(WordObservationRecord {
                     language: self.engine.config().language.clone(),
                     word,
@@ -201,7 +207,9 @@ impl App {
                     corrections: attempt.corrections,
                     active_ms,
                     afk_ms: attempt.afk_ms,
+                    grapheme_count,
                     fast_success,
+                    slow,
                     repeat_discount: if self.repeated_test { 0.5 } else { 1.0 },
                 })
             })
@@ -217,6 +225,7 @@ impl App {
                     confirmed_error: record.confirmed_error,
                     corrected: record.corrections > 0,
                     fast_success: record.fast_success,
+                    slow: record.slow,
                     repeat_discount: record.repeat_discount,
                 },
             );
@@ -327,7 +336,8 @@ fn run(
                 TestStatus::Completed { .. } | TestStatus::Failed { .. }
             )
         {
-            let observations = app.observations();
+            let baseline = repository.baseline_ms_per_grapheme(&app.engine.config().language)?;
+            let observations = app.observations(baseline);
             repository.save_session_with_observations(
                 app.engine.config(),
                 app.engine.status(),
