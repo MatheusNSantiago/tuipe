@@ -21,6 +21,9 @@ pub struct StatisticsOverview {
     pub best_wpm: f64,
     pub recent_tests: Vec<SessionSummary>,
     pub priority_words: Vec<PriorityWord>,
+    pub total_xp: u64,
+    pub level: u64,
+    pub streak: u16,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -258,6 +261,9 @@ impl Repository {
                     best_wpm: row.get(4)?,
                     recent_tests: Vec::new(),
                     priority_words: Vec::new(),
+                    total_xp: 0,
+                    level: 0,
+                    streak: 0,
                 })
             },
         )?;
@@ -292,6 +298,10 @@ impl Repository {
             .collect::<rusqlite::Result<Vec<_>>>()?;
         overview.recent_tests.reverse();
         overview.priority_words = self.priority_words()?;
+        let (xp, streak) = self.progress()?;
+        overview.total_xp = xp.total;
+        overview.level = crate::gamification::level_from_total_xp(xp.total);
+        overview.streak = streak.current;
         Ok(overview)
     }
 
@@ -436,6 +446,9 @@ mod tests {
                     config: TestConfig::default(),
                 }],
                 priority_words: Vec::new(),
+                total_xp: 27,
+                level: 1,
+                streak: 1,
             }
         );
     }

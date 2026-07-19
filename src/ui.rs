@@ -242,8 +242,8 @@ fn render_statistics_summary(
         ("testes", statistics.completed_tests.to_string()),
         ("wpm médio", format!("{:.0}", statistics.average_wpm)),
         ("precisão", format!("{:.0}%", statistics.average_accuracy)),
-        ("melhor", format!("{:.0}", statistics.best_wpm)),
-        ("tempo", format_duration(statistics.active_ms)),
+        ("nível", statistics.level.to_string()),
+        ("streak", format!("{} dias", statistics.streak)),
     ];
     for (area, (label, value)) in Layout::horizontal(vec![Constraint::Ratio(1, 5); 5])
         .spacing(2)
@@ -1580,6 +1580,9 @@ mod tests {
                             })
                             .collect(),
                         priority_words: Vec::new(),
+                        total_xp: 0,
+                        level: 0,
+                        streak: 0,
                     },
                     theme,
                 )

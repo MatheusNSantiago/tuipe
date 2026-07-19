@@ -15,8 +15,8 @@ expression: rendered
          │
         0└─────────────────────────────────────────────────────────────────────────────────────
          #1                                        #7                                       #12
-     testes            wpm médio          precisão          melhor             tempo
-     42                84                 96%               112                61m 01s
+     testes            wpm médio          precisão          nível              streak
+     42                84                 96%               0                  0 dias
 
      histórico recente                                           palavras prioritárias
      teste    wpm  bruto  precisão  caracteres  duração          sem evidência suficiente
