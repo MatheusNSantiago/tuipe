@@ -70,6 +70,7 @@ struct App {
     generator: Option<WordGenerator<SmallRng>>,
     adaptive: AdaptiveSampler,
     seed: u64,
+    repeated_test: bool,
 }
 
 impl App {
@@ -98,6 +99,7 @@ impl App {
             generator,
             adaptive,
             seed,
+            repeated_test: false,
         })
     }
 
@@ -113,6 +115,7 @@ impl App {
         self.generator = generator;
         self.started = Instant::now();
         self.persisted = false;
+        self.repeated_test = false;
         Ok(())
     }
 
@@ -127,6 +130,7 @@ impl App {
         self.generator = generator;
         self.started = Instant::now();
         self.persisted = false;
+        self.repeated_test = true;
         Ok(())
     }
 
@@ -174,8 +178,9 @@ impl App {
         self.engine
             .targets()
             .iter()
+            .enumerate()
             .zip(self.engine.attempts())
-            .filter_map(|(target, attempt)| {
+            .filter_map(|((word_index, target), attempt)| {
                 if !attempt.committed && attempt.input.is_empty() {
                     return None;
                 }
@@ -184,7 +189,10 @@ impl App {
                     .first_keypress_ms
                     .zip(attempt.last_keypress_ms)
                     .map_or(0, |(first, last)| last.saturating_sub(first));
-                let confirmed_error = attempt.committed && attempt.without_commit() != target.text;
+                let confirmed_error = matches!(
+                    self.engine.status(),
+                    TestStatus::Failed { word_index: failed_index, .. } if *failed_index == word_index
+                ) || (attempt.committed && attempt.without_commit() != target.text);
                 let fast_success = attempt.committed
                     && !confirmed_error
                     && attempt.corrections == 0
@@ -196,6 +204,7 @@ impl App {
                     corrections: attempt.corrections,
                     active_ms,
                     fast_success,
+                    repeat_discount: if self.repeated_test { 0.5 } else { 1.0 },
                 })
             })
             .collect()
@@ -206,11 +215,12 @@ impl App {
             self.adaptive.observe(
                 &record.language,
                 &record.word,
-                Observation::regular(
-                    record.confirmed_error,
-                    record.corrections > 0,
-                    record.fast_success,
-                ),
+                Observation {
+                    confirmed_error: record.confirmed_error,
+                    corrected: record.corrections > 0,
+                    fast_success: record.fast_success,
+                    repeat_discount: record.repeat_discount,
+                },
             );
         }
     }

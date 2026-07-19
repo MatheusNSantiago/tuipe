@@ -45,7 +45,7 @@ pub struct PriorityWord {
 }
 
 /// Evidência consultável de uma palavra observada durante uma sessão terminal.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct WordObservationRecord {
     pub language: String,
     pub word: String,
@@ -53,6 +53,7 @@ pub struct WordObservationRecord {
     pub corrections: u32,
     pub active_ms: u64,
     pub fast_success: bool,
+    pub repeat_discount: f64,
 }
 
 impl Repository {
@@ -140,11 +141,12 @@ impl Repository {
                 .transpose()?
                 .unwrap_or_default();
             let mut skill = previous;
-            skill.observe(Observation::regular(
-                record.confirmed_error,
-                record.corrections > 0,
-                record.fast_success,
-            ));
+            skill.observe(Observation {
+                confirmed_error: record.confirmed_error,
+                corrected: record.corrections > 0,
+                fast_success: record.fast_success,
+                repeat_discount: record.repeat_discount,
+            });
             let state = postcard::to_allocvec(&skill)?;
             transaction.execute(
                 "INSERT INTO word_skill (language, word, state) VALUES (?1, ?2, ?3)
@@ -415,6 +417,7 @@ mod tests {
                     corrections: 2,
                     active_ms: 320,
                     fast_success: false,
+                    repeat_discount: 1.0,
                 }],
             )
             .unwrap();
