@@ -69,8 +69,8 @@ const ICONES_NERD: Icons = Icons {
 
 fn icones_do_terminal() -> Icons {
     match env::var("TUIPE_ICONS").ok().as_deref() {
-        Some("nerd") => ICONES_NERD,
-        _ => ICONES_UNICODE,
+        Some("unicode") => ICONES_UNICODE,
+        _ => ICONES_NERD,
     }
 }
 
