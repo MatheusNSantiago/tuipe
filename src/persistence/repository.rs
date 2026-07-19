@@ -1,12 +1,12 @@
-use std::{fs, path::Path};
+use std::{collections::HashMap, fs, path::Path};
 
 use anyhow::Result;
 use chrono::{Datelike, Local};
 use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::adaptive::{
-    MechanicSkill, NgramSkill, Observation, PersonalBaseline, SelectionSource, WordSkill,
-    lexical_ngrams,
+    MechanicSkill, NgramSkill, Observation, PersonalBaseline, ReviewState, SelectionSource,
+    WordSkill, lexical_ngrams,
 };
 use crate::gamification::{StreakState, XpGain, XpState, award};
 use crate::persistence::{RawEvent, RawEventCodec};
@@ -223,6 +223,7 @@ impl Repository {
             ],
         )?;
         let session_id = transaction.last_insert_rowid();
+        let mut reviewed_words = HashMap::<(String, String), bool>::new();
         if !raw_events.is_empty() {
             let (uncompressed_size, blob) = RawEventCodec::encode(raw_events)?;
             transaction.execute(
@@ -238,6 +239,14 @@ impl Repository {
             )?;
         }
         for record in observations {
+            if record.evidence_weight > 0.0 {
+                reviewed_words
+                    .entry((record.language.clone(), record.word.clone()))
+                    .and_modify(|clean| {
+                        *clean &= !record.confirmed_error && record.corrections == 0;
+                    })
+                    .or_insert(!record.confirmed_error && record.corrections == 0);
+            }
             transaction.execute(
                 "INSERT INTO word_observations (
                     session_id, language, word, confirmed_error, corrections,
@@ -337,6 +346,22 @@ impl Repository {
                     ],
                 )?;
             }
+        }
+        let observed_at = Local::now().timestamp();
+        for ((language, word), clean) in reviewed_words {
+            transaction.execute(
+                "INSERT INTO skill_review (
+                    language, word, last_seen_unix_s, last_session_id, consecutive_clean_sessions
+                 ) VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(language, word) DO UPDATE SET
+                    last_seen_unix_s = excluded.last_seen_unix_s,
+                    last_session_id = excluded.last_session_id,
+                    consecutive_clean_sessions = CASE
+                        WHEN excluded.consecutive_clean_sessions = 0 THEN 0
+                        ELSE skill_review.consecutive_clean_sessions + 1
+                    END",
+                params![language, word, observed_at, session_id, i64::from(clean),],
+            )?;
         }
         transaction.commit()?;
         if matches!(status, TestStatus::Completed { .. }) {
@@ -544,6 +569,25 @@ impl Repository {
             .collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    pub fn load_all_review_states(&self) -> Result<Vec<(String, String, ReviewState)>> {
+        let mut statement = self.connection.prepare(
+            "SELECT language, word, last_seen_unix_s, consecutive_clean_sessions
+             FROM skill_review",
+        )?;
+        Ok(statement
+            .query_map([], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    ReviewState {
+                        last_seen_unix_s: row.get(2)?,
+                        consecutive_clean_sessions: row.get::<_, u16>(3)?,
+                    },
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     pub fn statistics_overview(&self) -> Result<StatisticsOverview> {
         let mut overview = self.connection.query_row(
             "SELECT
@@ -691,6 +735,12 @@ fn migrate(connection: &Connection) -> Result<()> {
          CREATE TABLE IF NOT EXISTS word_skill (language TEXT NOT NULL, word TEXT NOT NULL, state BLOB NOT NULL, PRIMARY KEY(language, word));
          CREATE TABLE IF NOT EXISTS ngram_skill (language TEXT NOT NULL, ngram TEXT NOT NULL, state BLOB NOT NULL, PRIMARY KEY(language, ngram));
          CREATE TABLE IF NOT EXISTS mechanic_skill (language TEXT NOT NULL, mechanic TEXT NOT NULL, state BLOB NOT NULL, PRIMARY KEY(language, mechanic));
+         CREATE TABLE IF NOT EXISTS skill_review (
+           language TEXT NOT NULL, word TEXT NOT NULL, last_seen_unix_s INTEGER NOT NULL,
+           last_session_id INTEGER NOT NULL REFERENCES sessions(id),
+           consecutive_clean_sessions INTEGER NOT NULL,
+           PRIMARY KEY(language, word)
+         );
          CREATE TABLE IF NOT EXISTS favorite_quotes (quote_id INTEGER PRIMARY KEY);
          CREATE TABLE IF NOT EXISTS xp_state (id INTEGER PRIMARY KEY CHECK(id = 1), state BLOB NOT NULL);
          CREATE TABLE IF NOT EXISTS streak_state (id INTEGER PRIMARY KEY CHECK(id = 1), state BLOB NOT NULL);
@@ -751,7 +801,7 @@ fn migrate(connection: &Connection) -> Result<()> {
             [],
         )?;
     }
-    connection.execute("UPDATE schema_version SET version = 3", [])?;
+    connection.execute("UPDATE schema_version SET version = 4", [])?;
     Ok(())
 }
 
@@ -983,6 +1033,62 @@ mod tests {
         assert_eq!(skills[0].1, "til");
         assert_eq!(skills[0].2.corrected_error_mass, 1.0);
         assert_eq!(skills[0].2.distinct_words, vec!["ação"]);
+    }
+
+    #[test]
+    fn revisao_conta_sessoes_limpas_e_erro_reinicia_a_sequencia() {
+        let temporary = tempfile::tempdir().unwrap();
+        let repository = Repository::open(&temporary.path().join("history.db")).unwrap();
+        let mut record = WordObservationRecord {
+            language: "portuguese".into(),
+            word: "casa".into(),
+            confirmed_error: false,
+            corrections: 0,
+            active_ms: 500,
+            afk_ms: 0,
+            grapheme_count: 4,
+            fast_success: false,
+            slow: false,
+            latency_ratio: None,
+            evidence_weight: 1.0,
+            selection_source: None,
+            selection_propensity: None,
+            mechanics: Vec::new(),
+        };
+        for ended_at_ms in [500, 1_000] {
+            repository
+                .save_session_with_observations(
+                    &TestConfig::default(),
+                    &TestStatus::Completed { ended_at_ms },
+                    Metrics::default(),
+                    &[record.clone()],
+                )
+                .unwrap();
+        }
+        assert_eq!(
+            repository.load_all_review_states().unwrap()[0]
+                .2
+                .consecutive_clean_sessions,
+            2
+        );
+        record.confirmed_error = true;
+        repository
+            .save_session_with_observations(
+                &TestConfig::default(),
+                &TestStatus::Failed {
+                    ended_at_ms: 1_500,
+                    word_index: 0,
+                },
+                Metrics::default(),
+                &[record],
+            )
+            .unwrap();
+        assert_eq!(
+            repository.load_all_review_states().unwrap()[0]
+                .2
+                .consecutive_clean_sessions,
+            0
+        );
     }
 
     #[test]

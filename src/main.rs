@@ -97,6 +97,10 @@ impl App {
         );
         adaptive.set_ngram_skills(repository.load_all_ngram_skills()?);
         adaptive.set_mechanic_skills(repository.load_all_mechanic_skills()?);
+        adaptive.set_review_states(
+            repository.load_all_review_states()?,
+            chrono::Utc::now().timestamp(),
+        );
         for language in ["portuguese", "english"] {
             adaptive.set_baseline(language, repository.baseline_profile(language)?.rates);
         }
@@ -412,6 +416,7 @@ impl App {
     }
 
     fn apply_observations(&mut self, observations: &[WordObservationRecord]) {
+        let mut reviewed_words = HashMap::<(String, String), bool>::new();
         for record in observations {
             self.adaptive.observe(
                 &record.language,
@@ -435,6 +440,19 @@ impl App {
                     record.evidence_weight,
                 );
             }
+            if record.evidence_weight > 0.0 {
+                reviewed_words
+                    .entry((record.language.clone(), record.word.clone()))
+                    .and_modify(|clean| {
+                        *clean &= !record.confirmed_error && record.corrections == 0;
+                    })
+                    .or_insert(!record.confirmed_error && record.corrections == 0);
+            }
+        }
+        let observed_at = chrono::Utc::now().timestamp();
+        for ((language, word), clean) in reviewed_words {
+            self.adaptive
+                .record_review(&language, &word, clean, observed_at);
         }
     }
 

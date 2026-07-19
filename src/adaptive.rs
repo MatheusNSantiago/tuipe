@@ -109,6 +109,12 @@ pub struct MechanicSkill {
     pub distinct_words: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ReviewState {
+    pub last_seen_unix_s: i64,
+    pub consecutive_clean_sessions: u16,
+}
+
 impl MechanicSkill {
     pub fn observe(
         &mut self,
@@ -357,6 +363,8 @@ pub struct AdaptiveSampler {
     baselines: HashMap<String, PersonalBaseline>,
     ngram_skills: HashMap<(String, String), NgramSkill>,
     mechanic_skills: HashMap<(String, String), MechanicSkill>,
+    review_states: HashMap<(String, String), ReviewState>,
+    as_of_unix_s: i64,
 }
 
 impl AdaptiveSampler {
@@ -367,6 +375,8 @@ impl AdaptiveSampler {
             baselines: HashMap::new(),
             ngram_skills: HashMap::new(),
             mechanic_skills: HashMap::new(),
+            review_states: HashMap::new(),
+            as_of_unix_s: 0,
         }
     }
 
@@ -383,6 +393,8 @@ impl AdaptiveSampler {
             baselines: HashMap::new(),
             ngram_skills: HashMap::new(),
             mechanic_skills: HashMap::new(),
+            review_states: HashMap::new(),
+            as_of_unix_s: 0,
         }
     }
 
@@ -404,6 +416,38 @@ impl AdaptiveSampler {
             .into_iter()
             .map(|(language, mechanic, skill)| ((language, mechanic), skill))
             .collect();
+    }
+
+    pub fn set_review_states(
+        &mut self,
+        states: impl IntoIterator<Item = (String, String, ReviewState)>,
+        as_of_unix_s: i64,
+    ) {
+        self.review_states = states
+            .into_iter()
+            .map(|(language, word, state)| ((language, word), state))
+            .collect();
+        self.as_of_unix_s = as_of_unix_s;
+    }
+
+    pub fn record_review(
+        &mut self,
+        language: &str,
+        word: &str,
+        clean: bool,
+        observed_at_unix_s: i64,
+    ) {
+        let state = self
+            .review_states
+            .entry((language.into(), word.into()))
+            .or_default();
+        state.last_seen_unix_s = observed_at_unix_s;
+        state.consecutive_clean_sessions = if clean {
+            state.consecutive_clean_sessions.saturating_add(1)
+        } else {
+            0
+        };
+        self.as_of_unix_s = self.as_of_unix_s.max(observed_at_unix_s);
     }
 
     pub fn set_baseline(&mut self, language: impl Into<String>, baseline: PersonalBaseline) {
@@ -558,7 +602,7 @@ impl AdaptiveSampler {
         let targeted = normalized_or_uniform(
             eligible
                 .iter()
-                .map(|word| self.candidate_difficulty(language, word, baseline))
+                .map(|word| self.candidate_priority(language, word, baseline))
                 .collect(),
             &uniform,
         );
@@ -630,7 +674,7 @@ impl AdaptiveSampler {
         1.0 / (self.policy.prior_strength + skill.effective_exposures).sqrt()
     }
 
-    fn candidate_difficulty(&self, language: &str, word: &str, baseline: PersonalBaseline) -> f64 {
+    fn candidate_priority(&self, language: &str, word: &str, baseline: PersonalBaseline) -> f64 {
         let lexical = self.skill(language, word).map_or(0.0, |skill| {
             self.policy.difficulty_with_baseline(skill, baseline)
         });
@@ -644,7 +688,27 @@ impl AdaptiveSampler {
             .filter_map(|mechanic| self.mechanic_skills.get(&(language.into(), mechanic)))
             .map(|skill| self.policy.mechanic_difficulty(skill, baseline))
             .fold(0.0, f64::max);
-        (lexical + motor * 0.45 + mechanics * 0.25).min(1.0)
+        let review = self.review_value(language, word);
+        (lexical + motor * 0.45 + mechanics * 0.25 + review * 0.20).min(1.0)
+    }
+
+    fn review_value(&self, language: &str, word: &str) -> f64 {
+        let Some(state) = self.review_states.get(&(language.into(), word.into())) else {
+            return 0.0;
+        };
+        if state.consecutive_clean_sessions == 0 || self.as_of_unix_s <= state.last_seen_unix_s {
+            return 0.0;
+        }
+        let interval_days = 2_u64
+            .saturating_pow(u32::from(
+                state.consecutive_clean_sessions.saturating_sub(1).min(5),
+            ))
+            .min(32) as f64;
+        let age_days = (self.as_of_unix_s - state.last_seen_unix_s) as f64 / 86_400.0;
+        if age_days <= interval_days {
+            return 0.0;
+        }
+        1.0 - (-(age_days - interval_days) / interval_days.max(1.0)).exp()
     }
 
     fn transfer_weights(&self, language: &str) -> HashMap<String, f64> {
@@ -888,6 +952,47 @@ mod tests {
         let boost = sampler.mechanic_boost("portuguese", "til");
         assert!(boost > 1.0);
         assert!(boost <= 1.5);
+    }
+
+    #[test]
+    fn revisao_so_fica_elegivel_depois_do_intervalo() {
+        let mut sampler = AdaptiveSampler::default();
+        sampler.set_review_states(
+            [(
+                "portuguese".into(),
+                "casa".into(),
+                ReviewState {
+                    last_seen_unix_s: 1_000,
+                    consecutive_clean_sessions: 1,
+                },
+            )],
+            1_000 + 12 * 60 * 60,
+        );
+        assert_eq!(sampler.review_value("portuguese", "casa"), 0.0);
+        sampler.as_of_unix_s = 1_000 + 3 * 86_400;
+        assert!(sampler.review_value("portuguese", "casa") > 0.0);
+    }
+
+    #[test]
+    fn passagem_do_tempo_nao_recria_dificuldade() {
+        let mut sampler = AdaptiveSampler::default();
+        sampler.set_review_states(
+            [(
+                "portuguese".into(),
+                "casa".into(),
+                ReviewState {
+                    last_seen_unix_s: 1,
+                    consecutive_clean_sessions: 5,
+                },
+            )],
+            90 * 86_400,
+        );
+        assert_eq!(
+            sampler.policy().difficulty(&WordSkill::default()),
+            0.0,
+            "recência controla revisão, não altera a posterior de erro"
+        );
+        assert!(sampler.review_value("portuguese", "casa") > 0.0);
     }
 
     proptest! {
