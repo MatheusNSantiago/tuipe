@@ -4,7 +4,7 @@ use anyhow::Result;
 use chrono::{Datelike, Local};
 use rusqlite::{Connection, OptionalExtension, params};
 
-use crate::adaptive::{Observation, WordSkill};
+use crate::adaptive::{Observation, PersonalBaseline, SelectionSource, WordSkill};
 use crate::gamification::{StreakState, XpGain, XpState, award};
 use crate::persistence::{RawEvent, RawEventCodec};
 use crate::typing::{Metrics, TestConfig, TestStatus};
@@ -47,6 +47,9 @@ pub struct PriorityWord {
     pub confirmed_errors: f64,
     pub corrections: f64,
     pub observations: u32,
+    pub effective_exposures: f64,
+    pub uncorrected_error_rate: f64,
+    pub corrected_error_rate: f64,
     pub estimated_session_chance: f64,
 }
 
@@ -62,7 +65,39 @@ pub struct WordObservationRecord {
     pub grapheme_count: u16,
     pub fast_success: bool,
     pub slow: bool,
-    pub repeat_discount: f64,
+    pub latency_ratio: Option<f64>,
+    pub evidence_weight: f64,
+    pub selection_source: Option<SelectionSource>,
+    pub selection_propensity: Option<f64>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PersonalBaselineProfile {
+    pub rates: PersonalBaseline,
+    latency_samples: Vec<(u16, f64)>,
+}
+
+impl PersonalBaselineProfile {
+    pub fn latency_ms_per_grapheme(&self, grapheme_count: u16) -> Option<f64> {
+        let mut nearby = self
+            .latency_samples
+            .iter()
+            .filter(|(length, _)| length.abs_diff(grapheme_count) <= 1)
+            .map(|(_, value)| *value)
+            .collect::<Vec<_>>();
+        if nearby.len() < 8 {
+            nearby = self
+                .latency_samples
+                .iter()
+                .map(|(_, value)| *value)
+                .collect();
+        }
+        if nearby.len() < 8 {
+            return None;
+        }
+        nearby.sort_by(f64::total_cmp);
+        Some(nearby[nearby.len() / 2])
+    }
 }
 
 impl Repository {
@@ -120,7 +155,7 @@ impl Repository {
                 terminal_state, config_toml, elapsed_ms, wpm, raw_wpm, accuracy,
                 correct_chars, incorrect_chars, extra_chars, missed_chars,
                 metrics_version, adaptive_version, codec_version
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 1, 1, ?11)",
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 1, 2, ?11)",
             params![
                 terminal_state,
                 toml::to_string(config)?,
@@ -154,8 +189,9 @@ impl Repository {
             transaction.execute(
                 "INSERT INTO word_observations (
                     session_id, language, word, confirmed_error, corrections,
-                    active_ms, afk_ms, fast_success, grapheme_count, slow
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                    active_ms, afk_ms, fast_success, grapheme_count, slow,
+                    latency_ratio, evidence_weight, selection_source, selection_propensity
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
                 params![
                     session_id,
                     record.language,
@@ -167,6 +203,12 @@ impl Repository {
                     record.fast_success,
                     record.grapheme_count,
                     record.slow,
+                    record.latency_ratio,
+                    record.evidence_weight,
+                    record
+                        .selection_source
+                        .map(|source| format!("{source:?}").to_lowercase()),
+                    record.selection_propensity,
                 ],
             )?;
 
@@ -177,7 +219,7 @@ impl Repository {
                     |row| row.get::<_, Vec<u8>>(0),
                 )
                 .optional()?
-                .map(|bytes| postcard::from_bytes::<WordSkill>(&bytes))
+                .map(|bytes| WordSkill::decode(&bytes))
                 .transpose()?
                 .unwrap_or_default();
             let mut skill = previous;
@@ -186,7 +228,8 @@ impl Repository {
                 corrected: record.corrections > 0,
                 fast_success: record.fast_success,
                 slow: record.slow,
-                repeat_discount: record.repeat_discount,
+                latency_ratio: record.latency_ratio,
+                evidence_weight: record.evidence_weight,
             });
             let state = postcard::to_allocvec(&skill)?;
             transaction.execute(
@@ -224,16 +267,47 @@ impl Repository {
     /// Baseline robusto (mediana aproximada) por idioma e tamanho. Só entra em
     /// ação após haver oito amostras, preservando o início frio.
     pub fn baseline_ms_per_grapheme(&self, language: &str) -> Result<Option<f64>> {
+        Ok(self.baseline_profile(language)?.latency_ms_per_grapheme(0))
+    }
+
+    pub fn baseline_profile(&self, language: &str) -> Result<PersonalBaselineProfile> {
         let mut statement = self.connection.prepare(
-            "SELECT active_ms * 1.0 / grapheme_count
+            "SELECT grapheme_count, active_ms * 1.0 / grapheme_count,
+                    confirmed_error, corrections
              FROM word_observations
-             WHERE language = ?1 AND active_ms > 0 AND grapheme_count > 0
-             ORDER BY active_ms * 1.0 / grapheme_count",
+             WHERE language = ?1 AND active_ms > 0 AND grapheme_count > 0",
         )?;
-        let samples = statement
-            .query_map([language], |row| row.get::<_, f64>(0))?
+        let rows = statement
+            .query_map([language], |row| {
+                Ok((
+                    row.get::<_, u16>(0)?,
+                    row.get::<_, f64>(1)?,
+                    row.get::<_, bool>(2)?,
+                    row.get::<_, u32>(3)?,
+                ))
+            })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        Ok((samples.len() >= 8).then(|| samples[samples.len() / 2]))
+        let prior = PersonalBaseline::default();
+        let exposures = rows.len() as f64;
+        let prior_strength = 24.0;
+        let uncorrected = rows.iter().filter(|(_, _, error, _)| *error).count() as f64;
+        let corrected = rows
+            .iter()
+            .filter(|(_, _, error, corrections)| !*error && *corrections > 0)
+            .count() as f64;
+        Ok(PersonalBaselineProfile {
+            rates: PersonalBaseline {
+                uncorrected_error_rate: (prior.uncorrected_error_rate * prior_strength
+                    + uncorrected)
+                    / (prior_strength + exposures),
+                corrected_error_rate: (prior.corrected_error_rate * prior_strength + corrected)
+                    / (prior_strength + exposures),
+            },
+            latency_samples: rows
+                .into_iter()
+                .map(|(length, latency, _, _)| (length, latency))
+                .collect(),
+        })
     }
 
     pub fn progress(&self) -> Result<(XpState, StreakState)> {
@@ -280,7 +354,7 @@ impl Repository {
         Ok(statement
             .query_map([language], |row| {
                 let encoded = row.get::<_, Vec<u8>>(2)?;
-                let skill = postcard::from_bytes(&encoded).map_err(|error| {
+                let skill = WordSkill::decode(&encoded).map_err(|error| {
                     rusqlite::Error::FromSqlConversionFailure(
                         encoded.len(),
                         rusqlite::types::Type::Blob,
@@ -299,7 +373,7 @@ impl Repository {
         Ok(statement
             .query_map([], |row| {
                 let encoded = row.get::<_, Vec<u8>>(2)?;
-                let skill = postcard::from_bytes(&encoded).map_err(|error| {
+                let skill = WordSkill::decode(&encoded).map_err(|error| {
                     rusqlite::Error::FromSqlConversionFailure(
                         encoded.len(),
                         rusqlite::types::Type::Blob,
@@ -377,22 +451,37 @@ impl Repository {
 
     fn priority_words(&self) -> Result<Vec<PriorityWord>> {
         let policy = crate::adaptive::AdaptivePolicy::default();
-        let mut skills = self.load_all_word_skills()?;
-        skills.sort_by(|left, right| {
-            policy
-                .difficulty(&right.2)
-                .total_cmp(&policy.difficulty(&left.2))
-        });
-        Ok(skills
+        let mut scored = self
+            .load_all_word_skills()?
             .into_iter()
-            .filter_map(|(_, word, skill)| {
-                let difficulty = policy.difficulty(&skill);
+            .map(|(language, word, skill)| {
+                let baseline = self.baseline_profile(&language)?.rates;
+                let difficulty = policy.difficulty_with_baseline(&skill, baseline);
+                Ok((word, skill, difficulty))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        scored.sort_by(|left, right| right.2.total_cmp(&left.2));
+        Ok(scored
+            .into_iter()
+            .filter_map(|(word, skill, difficulty)| {
+                let exposures = skill.effective_exposures;
                 (difficulty > 0.0).then_some(PriorityWord {
                     word,
                     difficulty,
                     confirmed_errors: skill.confirmed_errors,
                     corrections: skill.corrections,
                     observations: skill.observations,
+                    effective_exposures: exposures,
+                    uncorrected_error_rate: if exposures > 0.0 {
+                        skill.uncorrected_error_mass / exposures
+                    } else {
+                        0.0
+                    },
+                    corrected_error_rate: if exposures > 0.0 {
+                        skill.corrected_error_mass / exposures
+                    } else {
+                        0.0
+                    },
                     estimated_session_chance: 0.0,
                 })
             })
@@ -419,7 +508,9 @@ fn migrate(connection: &Connection) -> Result<()> {
            language TEXT NOT NULL, word TEXT NOT NULL, confirmed_error INTEGER NOT NULL,
            corrections INTEGER NOT NULL, active_ms INTEGER NOT NULL, afk_ms INTEGER NOT NULL,
            fast_success INTEGER NOT NULL DEFAULT 0, grapheme_count INTEGER NOT NULL DEFAULT 0,
-           slow INTEGER NOT NULL DEFAULT 0
+           slow INTEGER NOT NULL DEFAULT 0, latency_ratio REAL,
+           evidence_weight REAL NOT NULL DEFAULT 1,
+           selection_source TEXT, selection_propensity REAL
          );
          CREATE TABLE IF NOT EXISTS word_skill (language TEXT NOT NULL, word TEXT NOT NULL, state BLOB NOT NULL, PRIMARY KEY(language, word));
          CREATE TABLE IF NOT EXISTS ngram_skill (language TEXT NOT NULL, ngram TEXT NOT NULL, state BLOB NOT NULL, PRIMARY KEY(language, ngram));
@@ -448,6 +539,31 @@ fn migrate(connection: &Connection) -> Result<()> {
             [],
         )?;
     }
+    if !table_has_column(connection, "word_observations", "latency_ratio")? {
+        connection.execute(
+            "ALTER TABLE word_observations ADD COLUMN latency_ratio REAL",
+            [],
+        )?;
+    }
+    if !table_has_column(connection, "word_observations", "evidence_weight")? {
+        connection.execute(
+            "ALTER TABLE word_observations ADD COLUMN evidence_weight REAL NOT NULL DEFAULT 1",
+            [],
+        )?;
+    }
+    if !table_has_column(connection, "word_observations", "selection_source")? {
+        connection.execute(
+            "ALTER TABLE word_observations ADD COLUMN selection_source TEXT",
+            [],
+        )?;
+    }
+    if !table_has_column(connection, "word_observations", "selection_propensity")? {
+        connection.execute(
+            "ALTER TABLE word_observations ADD COLUMN selection_propensity REAL",
+            [],
+        )?;
+    }
+    connection.execute("UPDATE schema_version SET version = 2", [])?;
     Ok(())
 }
 
@@ -558,7 +674,10 @@ mod tests {
                     grapheme_count: 7,
                     fast_success: false,
                     slow: false,
-                    repeat_discount: 1.0,
+                    latency_ratio: None,
+                    evidence_weight: 1.0,
+                    selection_source: None,
+                    selection_propensity: None,
                 }],
             )
             .unwrap();
@@ -574,6 +693,12 @@ mod tests {
                     fast_successes: 0.0,
                     slowdowns: 0.0,
                     observations: 1,
+                    model_version: 2,
+                    effective_exposures: 1.0,
+                    uncorrected_error_mass: 1.0,
+                    corrected_error_mass: 0.0,
+                    latency_log_residual_sum: 0.0,
+                    latency_weight: 0.0,
                 },
             )]
         );
@@ -606,7 +731,10 @@ mod tests {
                         grapheme_count: 4,
                         fast_success: false,
                         slow: false,
-                        repeat_discount: 1.0,
+                        latency_ratio: None,
+                        evidence_weight: 1.0,
+                        selection_source: None,
+                        selection_propensity: None,
                     }],
                 )
                 .unwrap();

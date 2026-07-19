@@ -4,4 +4,4 @@ mod catalog;
 mod generator;
 
 pub use catalog::{ContentCatalog, Quote, Theme};
-pub use generator::{UniformWordGenerator, WordGenerator};
+pub use generator::{GeneratedWord, UniformWordGenerator, WordGenerator};

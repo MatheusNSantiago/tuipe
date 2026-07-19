@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     io::Write,
     path::PathBuf,
     time::{Duration, Instant},
@@ -27,7 +28,10 @@ use tuipe::{
         Preferences, RawEventCodec, RawSessionEnd, Repository, StatisticsOverview,
         WordObservationRecord, paths,
     },
-    typing::{ExternalEvent, InputEvent, KeyAction, QuoteLength, TestEngine, TestMode, TestStatus},
+    typing::{
+        ExternalEvent, InputEvent, KeyAction, QuoteLength, RecordedInputKind, TestEngine, TestMode,
+        TestStatus,
+    },
     ui,
 };
 
@@ -72,6 +76,7 @@ struct App {
     statistics_open: bool,
     statistics: StatisticsOverview,
     generator: Option<WordGenerator<SmallRng>>,
+    selections: Vec<Option<tuipe::adaptive::WordSelection>>,
     adaptive: AdaptiveSampler,
     seed: u64,
     repeated_test: bool,
@@ -85,11 +90,15 @@ impl App {
         repository: &Repository,
     ) -> Result<Self> {
         let seed = rand::random();
-        let adaptive = AdaptiveSampler::from_skills(
+        let mut adaptive = AdaptiveSampler::from_skills(
             AdaptivePolicy::default(),
             repository.load_all_word_skills()?,
         );
-        let (engine, generator) = new_test(&catalog, &preferences.test, seed, &adaptive)?;
+        for language in ["portuguese", "english"] {
+            adaptive.set_baseline(language, repository.baseline_profile(language)?.rates);
+        }
+        let (engine, generator, selections) =
+            new_test(&catalog, &preferences.test, seed, &adaptive)?;
         Ok(Self {
             preferences,
             catalog,
@@ -101,6 +110,7 @@ impl App {
             statistics_open: false,
             statistics: StatisticsOverview::default(),
             generator,
+            selections,
             adaptive,
             seed,
             repeated_test: false,
@@ -126,8 +136,14 @@ impl App {
 
     fn restart(&mut self, repository: &Repository) -> Result<()> {
         self.persist_interrupted(repository, RawSessionEnd::Restarted)?;
+        self.adaptive.set_baseline(
+            self.preferences.test.language.clone(),
+            repository
+                .baseline_profile(&self.preferences.test.language)?
+                .rates,
+        );
         self.seed = rand::random();
-        let (engine, generator) = new_test(
+        let (engine, generator, selections) = new_test(
             &self.catalog,
             &self.preferences.test,
             self.seed,
@@ -135,6 +151,7 @@ impl App {
         )?;
         self.engine = engine;
         self.generator = generator;
+        self.selections = selections;
         self.started = Instant::now();
         self.persisted = false;
         self.repeated_test = false;
@@ -143,7 +160,7 @@ impl App {
 
     fn repeat(&mut self, repository: &Repository) -> Result<()> {
         self.persist_interrupted(repository, RawSessionEnd::Restarted)?;
-        let (engine, generator) = new_test(
+        let (engine, generator, selections) = new_test(
             &self.catalog,
             &self.preferences.test,
             self.seed,
@@ -151,6 +168,7 @@ impl App {
         )?;
         self.engine = engine;
         self.generator = generator;
+        self.selections = selections.into_iter().map(|_| None).collect();
         self.started = Instant::now();
         self.persisted = false;
         self.repeated_test = true;
@@ -196,50 +214,163 @@ impl App {
                 < 20
             && let Some(generator) = &mut self.generator
         {
+            let generated = (0..40)
+                .map(|_| generator.next_generated())
+                .collect::<Vec<_>>();
+            self.selections
+                .extend(generated.iter().map(|word| word.selection.clone()));
             self.engine
-                .append_words((0..40).map(|_| format!("{} ", generator.next_word())));
+                .append_words(generated.into_iter().map(|word| format!("{} ", word.text)));
         }
     }
 
-    fn observations(&self, baseline_ms_per_grapheme: Option<f64>) -> Vec<WordObservationRecord> {
+    fn observations(
+        &self,
+        baseline: &tuipe::persistence::PersonalBaselineProfile,
+    ) -> Vec<WordObservationRecord> {
+        let timings = self.word_timings();
+        let mut occurrences = HashMap::<String, usize>::new();
+        for (word_index, (target, attempt)) in self
+            .engine
+            .targets()
+            .iter()
+            .zip(self.engine.attempts())
+            .enumerate()
+        {
+            let terminal_failure = matches!(
+                self.engine.status(),
+                TestStatus::Failed { word_index: failed_index, .. } if *failed_index == word_index
+            );
+            if (attempt.committed || terminal_failure)
+                && let Some(word) = lexical_word(&target.text)
+            {
+                *occurrences.entry(word).or_default() += 1;
+            }
+        }
         self.engine
             .targets()
             .iter()
             .enumerate()
             .zip(self.engine.attempts())
             .filter_map(|((word_index, target), attempt)| {
-                if !attempt.committed && attempt.input.is_empty() {
+                let terminal_failure = matches!(
+                    self.engine.status(),
+                    TestStatus::Failed { word_index: failed_index, .. } if *failed_index == word_index
+                );
+                if !attempt.committed && !terminal_failure {
                     return None;
                 }
                 let word = lexical_word(&target.text)?;
-                let active_ms = attempt.active_ms;
+                let (active_ms, afk_ms) = timings.get(word_index).copied().unwrap_or_default();
                 let grapheme_count = word.graphemes(true).count().try_into().unwrap_or(u16::MAX);
                 let active_per_grapheme = active_ms as f64 / f64::from(grapheme_count.max(1));
-                let confirmed_error = matches!(
-                    self.engine.status(),
-                    TestStatus::Failed { word_index: failed_index, .. } if *failed_index == word_index
-                ) || (attempt.committed && attempt.without_commit() != target.text);
+                let latency_baseline = baseline.latency_ms_per_grapheme(grapheme_count);
+                let confirmed_error = terminal_failure
+                    || (attempt.committed && attempt.without_commit() != target.text);
                 let fast_success = attempt.committed
                     && !confirmed_error
                     && attempt.corrections == 0
-                    && baseline_ms_per_grapheme
+                    && latency_baseline
                         .is_some_and(|baseline| active_per_grapheme <= baseline * 0.8);
-                let slow = baseline_ms_per_grapheme
+                let slow = latency_baseline
                     .is_some_and(|baseline| active_per_grapheme >= baseline * 1.5);
+                let evidence_weight = 1.0
+                    / occurrences
+                        .get(&word)
+                        .copied()
+                        .unwrap_or(1)
+                        .max(1) as f64;
+                let selection = (!self.repeated_test)
+                    .then(|| self.selections.get(word_index).cloned().flatten())
+                    .flatten();
                 Some(WordObservationRecord {
                     language: self.engine.config().language.clone(),
                     word,
                     confirmed_error,
                     corrections: attempt.corrections,
                     active_ms,
-                    afk_ms: attempt.afk_ms,
+                    afk_ms,
                     grapheme_count,
                     fast_success,
                     slow,
-                    repeat_discount: if self.repeated_test { 0.5 } else { 1.0 },
+                    latency_ratio: latency_baseline.map(|baseline| active_per_grapheme / baseline),
+                    evidence_weight,
+                    selection_source: selection.as_ref().map(|selection| selection.source),
+                    selection_propensity: selection.map(|selection| selection.propensity),
                 })
             })
             .collect()
+    }
+
+    /// Separa execução e interrupção pela distribuição da própria sessão. Um
+    /// intervalo entre palavras continua sendo latência de planejamento, não
+    /// tempo motor da palavra seguinte.
+    fn word_timings(&self) -> Vec<(u64, u64)> {
+        #[derive(Clone, Copy)]
+        struct Gap {
+            word_index: usize,
+            elapsed_ms: u64,
+            interrupted: bool,
+        }
+
+        let mut gaps = Vec::new();
+        let mut previous_key = None::<(u64, usize)>;
+        let mut interrupted = false;
+        for event in self.engine.recorded_events() {
+            match &event.kind {
+                RecordedInputKind::Focus { gained } => {
+                    if !gained {
+                        interrupted = true;
+                    }
+                }
+                RecordedInputKind::Insert { .. } | RecordedInputKind::Delete { .. } => {
+                    if let Some((previous_at, previous_word)) = previous_key
+                        && previous_word == event.word_index
+                    {
+                        gaps.push(Gap {
+                            word_index: event.word_index,
+                            elapsed_ms: event.at_ms.saturating_sub(previous_at),
+                            interrupted,
+                        });
+                    }
+                    previous_key = Some((event.at_ms, event.word_index));
+                    interrupted = false;
+                }
+                RecordedInputKind::Paste { .. } => {}
+            }
+        }
+
+        let mut log_intervals = gaps
+            .iter()
+            .filter(|gap| !gap.interrupted && gap.elapsed_ms > 0)
+            .map(|gap| (gap.elapsed_ms as f64).ln())
+            .collect::<Vec<_>>();
+        let pause_threshold = if log_intervals.len() >= 12 {
+            let median_value = median(&mut log_intervals);
+            let mut deviations = log_intervals
+                .iter()
+                .map(|value| (value - median_value).abs())
+                .collect::<Vec<_>>();
+            let mad = median(&mut deviations);
+            (mad > f64::EPSILON).then_some(median_value + 3.5 * 1.4826 * mad)
+        } else {
+            None
+        };
+
+        let mut timings = vec![(0_u64, 0_u64); self.engine.targets().len()];
+        for gap in gaps {
+            let is_pause = gap.interrupted
+                || pause_threshold.is_some_and(|threshold| {
+                    gap.elapsed_ms > 0 && (gap.elapsed_ms as f64).ln() > threshold
+                });
+            let timing = &mut timings[gap.word_index];
+            if is_pause {
+                timing.1 = timing.1.saturating_add(gap.elapsed_ms);
+            } else {
+                timing.0 = timing.0.saturating_add(gap.elapsed_ms);
+            }
+        }
+        timings
     }
 
     fn apply_observations(&mut self, observations: &[WordObservationRecord]) {
@@ -252,7 +383,8 @@ impl App {
                     corrected: record.corrections > 0,
                     fast_success: record.fast_success,
                     slow: record.slow,
-                    repeat_discount: record.repeat_discount,
+                    latency_ratio: record.latency_ratio,
+                    evidence_weight: record.evidence_weight,
                 },
             );
         }
@@ -270,17 +402,33 @@ impl App {
                 }
                 TestMode::Quote => 0,
             };
+            let targets = statistics
+                .priority_words
+                .iter()
+                .map(|word| word.word.clone())
+                .collect::<Vec<_>>();
+            let chances = self.adaptive.estimated_session_chances(
+                &config.language,
+                &targets,
+                candidates,
+                draws,
+            );
             for word in &mut statistics.priority_words {
-                word.estimated_session_chance = self.adaptive.estimated_session_chance(
-                    &config.language,
-                    &word.word,
-                    candidates,
-                    draws,
-                );
+                word.estimated_session_chance = chances.get(&word.word).copied().unwrap_or(0.0);
             }
         }
         self.statistics = statistics;
         Ok(())
+    }
+}
+
+fn median(values: &mut [f64]) -> f64 {
+    values.sort_by(f64::total_cmp);
+    let middle = values.len() / 2;
+    if values.len().is_multiple_of(2) {
+        (values[middle - 1] + values[middle]) / 2.0
+    } else {
+        values[middle]
     }
 }
 
@@ -383,8 +531,8 @@ fn run(
                 TestStatus::Completed { .. } | TestStatus::Failed { .. }
             )
         {
-            let baseline = repository.baseline_ms_per_grapheme(&app.engine.config().language)?;
-            let observations = app.observations(baseline);
+            let baseline = repository.baseline_profile(&app.engine.config().language)?;
+            let observations = app.observations(&baseline);
             let end = if matches!(app.engine.status(), TestStatus::Failed { .. }) {
                 RawSessionEnd::Failed
             } else {
@@ -671,9 +819,13 @@ fn new_test(
     config: &tuipe::typing::TestConfig,
     seed: u64,
     adaptive: &AdaptiveSampler,
-) -> Result<(TestEngine, Option<WordGenerator<SmallRng>>)> {
+) -> Result<(
+    TestEngine,
+    Option<WordGenerator<SmallRng>>,
+    Vec<Option<tuipe::adaptive::WordSelection>>,
+)> {
     let mut rng = SmallRng::seed_from_u64(seed);
-    let (words, generator) = match config.mode {
+    let (words, generator, selections) = match config.mode {
         TestMode::Quote => {
             let quotes = catalog.quotes(&config.language, config.quote_length);
             let quote = quotes.choose(&mut rng).context("language has no quotes")?;
@@ -681,21 +833,26 @@ fn new_test(
                 .text
                 .split_whitespace()
                 .map(|word| format!("{word} "))
-                .collect();
-            (without_last_commit(words), None)
+                .collect::<Vec<_>>();
+            let selections = vec![None; words.len()];
+            (without_last_commit(words), None, selections)
         }
         TestMode::Words { count } => {
             let mut generator = word_generator(catalog, config, rng, adaptive)?;
-            let words = without_last_commit(generate(&mut generator, usize::from(count)));
-            (words, None)
+            let (words, selections) = generate(&mut generator, usize::from(count));
+            (without_last_commit(words), None, selections)
         }
         TestMode::Time { .. } => {
             let mut generator = word_generator(catalog, config, rng, adaptive)?;
-            let words = generate(&mut generator, 40);
-            (words, Some(generator))
+            let (words, selections) = generate(&mut generator, 40);
+            (words, Some(generator), selections)
         }
     };
-    Ok((TestEngine::new(config.clone(), words), generator))
+    Ok((
+        TestEngine::new(config.clone(), words),
+        generator,
+        selections,
+    ))
 }
 
 fn word_generator(
@@ -717,10 +874,22 @@ fn word_generator(
     )
 }
 
-fn generate(generator: &mut WordGenerator<SmallRng>, count: usize) -> Vec<String> {
-    (0..count)
-        .map(|_| format!("{} ", generator.next_word()))
-        .collect()
+fn generate(
+    generator: &mut WordGenerator<SmallRng>,
+    count: usize,
+) -> (Vec<String>, Vec<Option<tuipe::adaptive::WordSelection>>) {
+    let generated = (0..count)
+        .map(|_| generator.next_generated())
+        .collect::<Vec<_>>();
+    let selections = generated
+        .iter()
+        .map(|word| word.selection.clone())
+        .collect();
+    let words = generated
+        .into_iter()
+        .map(|word| format!("{} ", word.text))
+        .collect();
+    (words, selections)
 }
 
 fn without_last_commit(mut words: Vec<String>) -> Vec<String> {

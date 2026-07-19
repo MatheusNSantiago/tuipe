@@ -322,7 +322,7 @@ fn render_priority_words(frame: &mut Frame, area: Rect, words: &[PriorityWord], 
         ));
     } else {
         lines.push(Line::styled(
-            "palavra       chance   erros  correções",
+            "palavra       chance   falha   corr   exp",
             Style::default().fg(color(&theme.sub)),
         ));
         lines.extend(
@@ -340,11 +340,15 @@ fn render_priority_words(frame: &mut Frame, area: Rect, words: &[PriorityWord], 
                             Style::default().fg(color(&theme.main)),
                         ),
                         Span::styled(
-                            format!("{:>3.0}    ", word.confirmed_errors),
+                            format!("{:>4.0}%  ", word.uncorrected_error_rate * 100.0),
                             Style::default().fg(color(&theme.error)),
                         ),
                         Span::styled(
-                            format!("{:>3.0}", word.corrections),
+                            format!("{:>4.0}%  ", word.corrected_error_rate * 100.0),
+                            Style::default().fg(color(&theme.sub)),
+                        ),
+                        Span::styled(
+                            format!("{:>3.0}", word.effective_exposures),
                             Style::default().fg(color(&theme.sub)),
                         ),
                     ])

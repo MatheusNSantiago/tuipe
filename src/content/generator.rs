@@ -2,7 +2,13 @@ use rand::{Rng, seq::IndexedRandom};
 use unicode_normalization::UnicodeNormalization;
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::adaptive::AdaptiveSampler;
+use crate::adaptive::{AdaptiveSampler, SelectionSource, WordSelection};
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct GeneratedWord {
+    pub text: String,
+    pub selection: Option<WordSelection>,
+}
 
 /// Amostragem uniforme com a mesma proteção das duas palavras anteriores do Monkeytype.
 #[derive(Debug, Clone)]
@@ -23,47 +29,62 @@ impl<R: Rng> UniformWordGenerator<R> {
     }
 
     pub fn next_lexical(&mut self) -> String {
-        let mut candidate = self
-            .words
-            .choose(&mut self.rng)
-            .expect("nonempty pack")
-            .nfc()
-            .collect::<String>();
-        for _ in 0..100 {
-            if !self
-                .previous
-                .iter()
-                .flatten()
-                .any(|word| word == &candidate)
-            {
-                break;
-            }
-            candidate = self
-                .words
-                .choose(&mut self.rng)
-                .expect("nonempty pack")
-                .nfc()
-                .collect();
-        }
-        self.previous.rotate_right(1);
-        self.previous[0] = Some(candidate.clone());
-        candidate
+        self.next_lexical_with_provenance().word
     }
 
-    pub fn next_lexical_adaptive(&mut self, sampler: &AdaptiveSampler, language: &str) -> String {
+    pub fn next_lexical_with_provenance(&mut self) -> WordSelection {
+        let eligible = self
+            .words
+            .iter()
+            .filter(|word| {
+                !self
+                    .previous
+                    .iter()
+                    .flatten()
+                    .any(|previous| previous == *word)
+            })
+            .collect::<Vec<_>>();
+        let eligible = if eligible.is_empty() {
+            self.words.iter().collect::<Vec<_>>()
+        } else {
+            eligible
+        };
+        let candidate = eligible
+            .choose(&mut self.rng)
+            .expect("pacote não vazio")
+            .nfc()
+            .collect::<String>();
+        let propensity = 1.0 / eligible.len() as f64;
+        self.previous.rotate_right(1);
+        self.previous[0] = Some(candidate.clone());
+        WordSelection {
+            word: candidate,
+            source: SelectionSource::Representative,
+            propensity,
+        }
+    }
+
+    pub fn next_lexical_adaptive(
+        &mut self,
+        sampler: &AdaptiveSampler,
+        language: &str,
+    ) -> WordSelection {
         let previous = self
             .previous
             .iter()
             .flatten()
             .map(String::as_str)
             .collect::<Vec<_>>();
-        let candidate = sampler
-            .sample(language, &self.words, &previous, &mut self.rng)
-            .nfc()
-            .collect::<String>();
+        let selected =
+            sampler.sample_with_provenance(language, &self.words, &previous, &mut self.rng);
+        let candidate = selected.word.nfc().collect::<String>();
         self.previous.rotate_right(1);
         self.previous[0] = Some(candidate.clone());
-        candidate
+        WordSelection {
+            word: candidate,
+            source: selected.source,
+            propensity: selected.propensity,
+        }
     }
 
     pub fn rng_mut(&mut self) -> &mut R {
@@ -99,16 +120,27 @@ impl<R: Rng> WordGenerator<R> {
     }
 
     pub fn next_word(&mut self) -> String {
+        self.next_generated().text
+    }
+
+    pub fn next_generated(&mut self) -> GeneratedWord {
         if self.numbers && self.uniform.rng_mut().random_bool(0.1) {
-            return self.random_number();
+            return GeneratedWord {
+                text: self.random_number(),
+                selection: None,
+            };
         }
 
-        let mut word = match &self.adaptive {
+        let selection = match &self.adaptive {
             Some((language, sampler)) => self.uniform.next_lexical_adaptive(sampler, language),
-            None => self.uniform.next_lexical(),
+            None => self.uniform.next_lexical_with_provenance(),
         };
+        let mut word = selection.word.clone();
         if !self.punctuation {
-            return word;
+            return GeneratedWord {
+                text: word,
+                selection: Some(selection),
+            };
         }
 
         if self.sentence_start {
@@ -132,7 +164,10 @@ impl<R: Rng> WordGenerator<R> {
         } else {
             self.sentence_start = false;
         }
-        word
+        GeneratedWord {
+            text: word,
+            selection: Some(selection),
+        }
     }
 
     fn random_number(&mut self) -> String {
