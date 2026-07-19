@@ -20,8 +20,9 @@ use termina::{
 };
 
 use tuipe::{
+    adaptive::{AdaptivePolicy, AdaptiveSampler, Observation},
     content::{ContentCatalog, WordGenerator},
-    persistence::{Preferences, Repository, StatisticsOverview, paths},
+    persistence::{Preferences, Repository, StatisticsOverview, WordObservationRecord, paths},
     typing::{InputEvent, KeyAction, QuoteLength, TestEngine, TestMode, TestStatus},
     ui,
 };
@@ -31,7 +32,7 @@ fn main() -> Result<()> {
     let preferences = Preferences::load(&config_path)?;
     let catalog = ContentCatalog::bundled()?;
     let repository = Repository::open(&database_path)?;
-    let mut app = App::new(preferences, catalog, config_path)?;
+    let mut app = App::new(preferences, catalog, config_path, &repository)?;
 
     ratatui::run(|terminal| {
         execute!(
@@ -67,6 +68,7 @@ struct App {
     statistics_open: bool,
     statistics: StatisticsOverview,
     generator: Option<WordGenerator<SmallRng>>,
+    adaptive: AdaptiveSampler,
     seed: u64,
 }
 
@@ -75,9 +77,14 @@ impl App {
         preferences: Preferences,
         catalog: ContentCatalog,
         config_path: PathBuf,
+        repository: &Repository,
     ) -> Result<Self> {
         let seed = rand::random();
-        let (engine, generator) = new_test(&catalog, &preferences.test, seed)?;
+        let adaptive = AdaptiveSampler::from_skills(
+            AdaptivePolicy::default(),
+            repository.load_all_word_skills()?,
+        );
+        let (engine, generator) = new_test(&catalog, &preferences.test, seed, &adaptive)?;
         Ok(Self {
             preferences,
             catalog,
@@ -89,13 +96,19 @@ impl App {
             statistics_open: false,
             statistics: StatisticsOverview::default(),
             generator,
+            adaptive,
             seed,
         })
     }
 
     fn restart(&mut self) -> Result<()> {
         self.seed = rand::random();
-        let (engine, generator) = new_test(&self.catalog, &self.preferences.test, self.seed)?;
+        let (engine, generator) = new_test(
+            &self.catalog,
+            &self.preferences.test,
+            self.seed,
+            &self.adaptive,
+        )?;
         self.engine = engine;
         self.generator = generator;
         self.started = Instant::now();
@@ -104,7 +117,12 @@ impl App {
     }
 
     fn repeat(&mut self) -> Result<()> {
-        let (engine, generator) = new_test(&self.catalog, &self.preferences.test, self.seed)?;
+        let (engine, generator) = new_test(
+            &self.catalog,
+            &self.preferences.test,
+            self.seed,
+            &self.adaptive,
+        )?;
         self.engine = engine;
         self.generator = generator;
         self.started = Instant::now();
@@ -151,6 +169,58 @@ impl App {
                 .append_words((0..40).map(|_| format!("{} ", generator.next_word())));
         }
     }
+
+    fn observations(&self) -> Vec<WordObservationRecord> {
+        self.engine
+            .targets()
+            .iter()
+            .zip(self.engine.attempts())
+            .filter_map(|(target, attempt)| {
+                if !attempt.committed && attempt.input.is_empty() {
+                    return None;
+                }
+                let word = lexical_word(&target.text)?;
+                let active_ms = attempt
+                    .first_keypress_ms
+                    .zip(attempt.last_keypress_ms)
+                    .map_or(0, |(first, last)| last.saturating_sub(first));
+                let confirmed_error = attempt.committed && attempt.without_commit() != target.text;
+                let fast_success = attempt.committed
+                    && !confirmed_error
+                    && attempt.corrections == 0
+                    && active_ms <= 750;
+                Some(WordObservationRecord {
+                    language: self.engine.config().language.clone(),
+                    word,
+                    confirmed_error,
+                    corrections: attempt.corrections,
+                    active_ms,
+                    fast_success,
+                })
+            })
+            .collect()
+    }
+
+    fn apply_observations(&mut self, observations: &[WordObservationRecord]) {
+        for record in observations {
+            self.adaptive.observe(
+                &record.language,
+                &record.word,
+                Observation::regular(
+                    record.confirmed_error,
+                    record.corrections > 0,
+                    record.fast_success,
+                ),
+            );
+        }
+    }
+}
+
+fn lexical_word(value: &str) -> Option<String> {
+    let lexical = value
+        .trim_matches(|character: char| !character.is_alphabetic())
+        .to_lowercase();
+    (!lexical.is_empty()).then_some(lexical)
 }
 
 fn run(
@@ -224,11 +294,14 @@ fn run(
                 TestStatus::Completed { .. } | TestStatus::Failed { .. }
             )
         {
-            repository.save_session(
+            let observations = app.observations();
+            repository.save_session_with_observations(
                 app.engine.config(),
                 app.engine.status(),
                 app.engine.metrics(),
+                &observations,
             )?;
+            app.apply_observations(&observations);
             app.persisted = true;
         }
     }
@@ -488,6 +561,7 @@ fn new_test(
     catalog: &ContentCatalog,
     config: &tuipe::typing::TestConfig,
     seed: u64,
+    adaptive: &AdaptiveSampler,
 ) -> Result<(TestEngine, Option<WordGenerator<SmallRng>>)> {
     let mut rng = SmallRng::seed_from_u64(seed);
     let (words, generator) = match config.mode {
@@ -502,12 +576,12 @@ fn new_test(
             (without_last_commit(words), None)
         }
         TestMode::Words { count } => {
-            let mut generator = word_generator(catalog, config, rng)?;
+            let mut generator = word_generator(catalog, config, rng, adaptive)?;
             let words = without_last_commit(generate(&mut generator, usize::from(count)));
             (words, None)
         }
         TestMode::Time { .. } => {
-            let mut generator = word_generator(catalog, config, rng)?;
+            let mut generator = word_generator(catalog, config, rng, adaptive)?;
             let words = generate(&mut generator, 40);
             (words, Some(generator))
         }
@@ -519,16 +593,19 @@ fn word_generator(
     catalog: &ContentCatalog,
     config: &tuipe::typing::TestConfig,
     rng: SmallRng,
+    adaptive: &AdaptiveSampler,
 ) -> Result<WordGenerator<SmallRng>> {
     let words = catalog
         .word_pack(&config.language, &config.word_pack)
         .context("configured word pack is unavailable")?;
-    Ok(WordGenerator::new(
-        words,
-        rng,
-        config.punctuation,
-        config.numbers,
-    ))
+    let generator = WordGenerator::new(words, rng, config.punctuation, config.numbers);
+    Ok(
+        if config.adaptive && !matches!(config.mode, TestMode::Quote) {
+            generator.with_adaptive(&config.language, adaptive.clone())
+        } else {
+            generator
+        },
+    )
 }
 
 fn generate(generator: &mut WordGenerator<SmallRng>, count: usize) -> Vec<String> {

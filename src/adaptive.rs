@@ -9,6 +9,7 @@ use rand::{
     Rng,
     distr::{Distribution, weighted::WeightedIndex},
 };
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AdaptivePolicy {
@@ -36,7 +37,7 @@ impl Default for AdaptivePolicy {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct WordSkill {
     pub confirmed_errors: f64,
     pub corrections: f64,
@@ -89,7 +90,7 @@ impl AdaptivePolicy {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct AdaptiveSampler {
     policy: AdaptivePolicy,
     skills: HashMap<(String, String), WordSkill>,
@@ -101,6 +102,33 @@ impl AdaptiveSampler {
             policy,
             skills: HashMap::new(),
         }
+    }
+
+    /// Restaura o estado materializado no SQLite sem expor sua representação
+    /// interna ao restante da aplicação.
+    pub fn from_skills(
+        policy: AdaptivePolicy,
+        skills: impl IntoIterator<Item = (String, String, WordSkill)>,
+    ) -> Self {
+        Self {
+            policy,
+            skills: skills
+                .into_iter()
+                .map(|(language, word, skill)| ((language, word), skill))
+                .collect(),
+        }
+    }
+
+    pub fn policy(&self) -> AdaptivePolicy {
+        self.policy
+    }
+
+    pub fn skills_for_language(&self, language: &str) -> Vec<(String, WordSkill)> {
+        self.skills
+            .iter()
+            .filter(|((skill_language, _), _)| skill_language == language)
+            .map(|((_, word), skill)| (word.clone(), skill.clone()))
+            .collect()
     }
 
     pub fn observe(&mut self, language: &str, word: &str, observation: Observation) {

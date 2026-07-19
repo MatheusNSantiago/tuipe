@@ -2,6 +2,8 @@ use rand::{Rng, seq::IndexedRandom};
 use unicode_normalization::UnicodeNormalization;
 use unicode_segmentation::UnicodeSegmentation;
 
+use crate::adaptive::AdaptiveSampler;
+
 /// Amostragem uniforme com a mesma proteção das duas palavras anteriores do Monkeytype.
 #[derive(Debug, Clone)]
 pub struct UniformWordGenerator<R> {
@@ -48,19 +50,36 @@ impl<R: Rng> UniformWordGenerator<R> {
         candidate
     }
 
+    pub fn next_lexical_adaptive(&mut self, sampler: &AdaptiveSampler, language: &str) -> String {
+        let previous = self
+            .previous
+            .iter()
+            .flatten()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        let candidate = sampler
+            .sample(language, &self.words, &previous, &mut self.rng)
+            .nfc()
+            .collect::<String>();
+        self.previous.rotate_right(1);
+        self.previous[0] = Some(candidate.clone());
+        candidate
+    }
+
     pub fn rng_mut(&mut self) -> &mut R {
         &mut self.rng
     }
 }
 
 /// Aplica os modificadores do Monkeytype suportados pelo tuipe a um fluxo léxico
-/// uniforme. A seleção adaptativa fica intencionalmente em outro sampler.
+/// uniforme ou adaptativo. A escolha léxica continua isolada dos modificadores.
 #[derive(Debug, Clone)]
 pub struct WordGenerator<R> {
     uniform: UniformWordGenerator<R>,
     punctuation: bool,
     numbers: bool,
     sentence_start: bool,
+    adaptive: Option<(String, AdaptiveSampler)>,
 }
 
 impl<R: Rng> WordGenerator<R> {
@@ -70,7 +89,13 @@ impl<R: Rng> WordGenerator<R> {
             punctuation,
             numbers,
             sentence_start: true,
+            adaptive: None,
         }
+    }
+
+    pub fn with_adaptive(mut self, language: impl Into<String>, sampler: AdaptiveSampler) -> Self {
+        self.adaptive = Some((language.into(), sampler));
+        self
     }
 
     pub fn next_word(&mut self) -> String {
@@ -78,7 +103,10 @@ impl<R: Rng> WordGenerator<R> {
             return self.random_number();
         }
 
-        let mut word = self.uniform.next_lexical();
+        let mut word = match &self.adaptive {
+            Some((language, sampler)) => self.uniform.next_lexical_adaptive(sampler, language),
+            None => self.uniform.next_lexical(),
+        };
         if !self.punctuation {
             return word;
         }

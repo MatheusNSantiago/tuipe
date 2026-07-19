@@ -1,8 +1,9 @@
 use std::{fs, path::Path};
 
 use anyhow::Result;
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 
+use crate::adaptive::{Observation, WordSkill};
 use crate::typing::{Metrics, TestConfig, TestStatus};
 
 pub struct Repository {
@@ -27,6 +28,17 @@ pub struct SessionSummary {
     pub accuracy: f64,
 }
 
+/// Evidência consultável de uma palavra observada durante uma sessão terminal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WordObservationRecord {
+    pub language: String,
+    pub word: String,
+    pub confirmed_error: bool,
+    pub corrections: u32,
+    pub active_ms: u64,
+    pub fast_success: bool,
+}
+
 impl Repository {
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
@@ -45,13 +57,26 @@ impl Repository {
         status: &TestStatus,
         metrics: Metrics,
     ) -> Result<i64> {
+        self.save_session_with_observations(config, status, metrics, &[])
+    }
+
+    /// Persiste sessão, evidências brutas e a projeção materializada do modelo
+    /// adaptativo em uma única transação curta.
+    pub fn save_session_with_observations(
+        &self,
+        config: &TestConfig,
+        status: &TestStatus,
+        metrics: Metrics,
+        observations: &[WordObservationRecord],
+    ) -> Result<i64> {
         let terminal_state = match status {
             TestStatus::Ready => "ready",
             TestStatus::Running { .. } => "restart",
             TestStatus::Completed { .. } => "completed",
             TestStatus::Failed { .. } => "failed",
         };
-        self.connection.execute(
+        let transaction = self.connection.unchecked_transaction()?;
+        transaction.execute(
             "INSERT INTO sessions (
                 terminal_state, config_toml, elapsed_ms, wpm, raw_wpm, accuracy,
                 correct_chars, incorrect_chars, extra_chars, missed_chars,
@@ -70,7 +95,87 @@ impl Repository {
                 metrics.characters.missed,
             ],
         )?;
-        Ok(self.connection.last_insert_rowid())
+        let session_id = transaction.last_insert_rowid();
+        for record in observations {
+            transaction.execute(
+                "INSERT INTO word_observations (
+                    session_id, language, word, confirmed_error, corrections,
+                    active_ms, afk_ms, fast_success
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7)",
+                params![
+                    session_id,
+                    record.language,
+                    record.word,
+                    record.confirmed_error,
+                    record.corrections,
+                    record.active_ms as i64,
+                    record.fast_success,
+                ],
+            )?;
+
+            let previous = transaction
+                .query_row(
+                    "SELECT state FROM word_skill WHERE language = ?1 AND word = ?2",
+                    params![record.language, record.word],
+                    |row| row.get::<_, Vec<u8>>(0),
+                )
+                .optional()?
+                .map(|bytes| postcard::from_bytes::<WordSkill>(&bytes))
+                .transpose()?
+                .unwrap_or_default();
+            let mut skill = previous;
+            skill.observe(Observation::regular(
+                record.confirmed_error,
+                record.corrections > 0,
+                record.fast_success,
+            ));
+            let state = postcard::to_allocvec(&skill)?;
+            transaction.execute(
+                "INSERT INTO word_skill (language, word, state) VALUES (?1, ?2, ?3)
+                 ON CONFLICT(language, word) DO UPDATE SET state = excluded.state",
+                params![record.language, record.word, state],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(session_id)
+    }
+
+    pub fn load_word_skills(&self, language: &str) -> Result<Vec<(String, String, WordSkill)>> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT language, word, state FROM word_skill WHERE language = ?1")?;
+        Ok(statement
+            .query_map([language], |row| {
+                let encoded = row.get::<_, Vec<u8>>(2)?;
+                let skill = postcard::from_bytes(&encoded).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        encoded.len(),
+                        rusqlite::types::Type::Blob,
+                        Box::new(error),
+                    )
+                })?;
+                Ok((row.get(0)?, row.get(1)?, skill))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn load_all_word_skills(&self) -> Result<Vec<(String, String, WordSkill)>> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT language, word, state FROM word_skill")?;
+        Ok(statement
+            .query_map([], |row| {
+                let encoded = row.get::<_, Vec<u8>>(2)?;
+                let skill = postcard::from_bytes(&encoded).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        encoded.len(),
+                        rusqlite::types::Type::Blob,
+                        Box::new(error),
+                    )
+                })?;
+                Ok((row.get(0)?, row.get(1)?, skill))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     pub fn statistics_overview(&self) -> Result<StatisticsOverview> {
@@ -133,7 +238,8 @@ fn migrate(connection: &Connection) -> Result<()> {
          CREATE TABLE IF NOT EXISTS word_observations (
            id INTEGER PRIMARY KEY, session_id INTEGER NOT NULL REFERENCES sessions(id),
            language TEXT NOT NULL, word TEXT NOT NULL, confirmed_error INTEGER NOT NULL,
-           corrections INTEGER NOT NULL, active_ms INTEGER NOT NULL, afk_ms INTEGER NOT NULL
+           corrections INTEGER NOT NULL, active_ms INTEGER NOT NULL, afk_ms INTEGER NOT NULL,
+           fast_success INTEGER NOT NULL DEFAULT 0
          );
          CREATE TABLE IF NOT EXISTS word_skill (language TEXT NOT NULL, word TEXT NOT NULL, state BLOB NOT NULL, PRIMARY KEY(language, word));
          CREATE TABLE IF NOT EXISTS ngram_skill (language TEXT NOT NULL, ngram TEXT NOT NULL, state BLOB NOT NULL, PRIMARY KEY(language, ngram));
@@ -144,7 +250,22 @@ fn migrate(connection: &Connection) -> Result<()> {
          CREATE TABLE IF NOT EXISTS raw_events (session_id INTEGER PRIMARY KEY REFERENCES sessions(id), codec_version INTEGER NOT NULL, uncompressed_size INTEGER NOT NULL, blob BLOB NOT NULL);
          COMMIT;",
     )?;
+    if !table_has_column(connection, "word_observations", "fast_success")? {
+        connection.execute(
+            "ALTER TABLE word_observations ADD COLUMN fast_success INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
     Ok(())
+}
+
+fn table_has_column(connection: &Connection, table: &str, column: &str) -> Result<bool> {
+    let mut statement = connection.prepare(&format!("PRAGMA table_info({table})"))?;
+    Ok(statement
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<rusqlite::Result<Vec<_>>>()?
+        .iter()
+        .any(|name| name == column))
 }
 
 #[cfg(test)]
@@ -211,6 +332,44 @@ mod tests {
                     accuracy: 95.0,
                 }],
             }
+        );
+    }
+
+    #[test]
+    fn observacoes_atualizam_e_restauram_a_habilidade_da_palavra() {
+        let temporary = tempfile::tempdir().unwrap();
+        let repository = Repository::open(&temporary.path().join("history.db")).unwrap();
+        repository
+            .save_session_with_observations(
+                &TestConfig::default(),
+                &TestStatus::Failed {
+                    ended_at_ms: 1_000,
+                    word_index: 0,
+                },
+                Metrics::default(),
+                &[WordObservationRecord {
+                    language: "portuguese".into(),
+                    word: "difícil".into(),
+                    confirmed_error: true,
+                    corrections: 2,
+                    active_ms: 320,
+                    fast_success: false,
+                }],
+            )
+            .unwrap();
+
+        assert_eq!(
+            repository.load_word_skills("portuguese").unwrap(),
+            vec![(
+                "portuguese".into(),
+                "difícil".into(),
+                WordSkill {
+                    confirmed_errors: 1.0,
+                    corrections: 1.0,
+                    fast_successes: 0.0,
+                    observations: 1,
+                },
+            )]
         );
     }
 }
