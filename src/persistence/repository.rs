@@ -6,6 +6,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::adaptive::{Observation, WordSkill};
 use crate::gamification::{StreakState, XpGain, XpState, award};
+use crate::persistence::{RawEvent, RawEventCodec};
 use crate::typing::{Metrics, TestConfig, TestStatus};
 
 pub struct Repository {
@@ -94,6 +95,19 @@ impl Repository {
         metrics: Metrics,
         observations: &[WordObservationRecord],
     ) -> Result<i64> {
+        self.save_session_full(config, status, metrics, observations, &[])
+    }
+
+    /// Persiste a sessão, suas projeções consultáveis e a fonte da verdade em
+    /// uma única transação.
+    pub fn save_session_full(
+        &self,
+        config: &TestConfig,
+        status: &TestStatus,
+        metrics: Metrics,
+        observations: &[WordObservationRecord],
+        raw_events: &[RawEvent],
+    ) -> Result<i64> {
         let terminal_state = match status {
             TestStatus::Ready => "ready",
             TestStatus::Running { .. } => "restart",
@@ -106,7 +120,7 @@ impl Repository {
                 terminal_state, config_toml, elapsed_ms, wpm, raw_wpm, accuracy,
                 correct_chars, incorrect_chars, extra_chars, missed_chars,
                 metrics_version, adaptive_version, codec_version
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 1, 1, 1)",
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 1, 1, ?11)",
             params![
                 terminal_state,
                 toml::to_string(config)?,
@@ -118,9 +132,24 @@ impl Repository {
                 metrics.characters.incorrect,
                 metrics.characters.extra,
                 metrics.characters.missed,
+                RawEventCodec::VERSION,
             ],
         )?;
         let session_id = transaction.last_insert_rowid();
+        if !raw_events.is_empty() {
+            let (uncompressed_size, blob) = RawEventCodec::encode(raw_events)?;
+            transaction.execute(
+                "INSERT INTO raw_events (
+                    session_id, codec_version, uncompressed_size, blob
+                 ) VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    session_id,
+                    RawEventCodec::VERSION,
+                    uncompressed_size as i64,
+                    blob,
+                ],
+            )?;
+        }
         for record in observations {
             transaction.execute(
                 "INSERT INTO word_observations (
@@ -171,6 +200,25 @@ impl Repository {
             self.award_completed_session(config, &metrics)?;
         }
         Ok(session_id)
+    }
+
+    pub fn raw_events(&self, session_id: i64) -> Result<Option<Vec<RawEvent>>> {
+        self.connection
+            .query_row(
+                "SELECT codec_version, uncompressed_size, blob
+                 FROM raw_events WHERE session_id = ?1",
+                [session_id],
+                |row| {
+                    Ok((
+                        row.get::<_, u16>(0)?,
+                        row.get::<_, i64>(1)? as usize,
+                        row.get::<_, Vec<u8>>(2)?,
+                    ))
+                },
+            )
+            .optional()?
+            .map(|(version, size, blob)| RawEventCodec::decode(version, size, &blob))
+            .transpose()
     }
 
     /// Baseline robusto (mediana aproximada) por idioma e tamanho. Só entra em

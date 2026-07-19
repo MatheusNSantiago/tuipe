@@ -5,7 +5,7 @@ mod raw_events;
 mod repository;
 
 pub use config::{Preferences, paths};
-pub use raw_events::{RawEvent, RawEventCodec};
+pub use raw_events::{RawEvent, RawEventCodec, RawSessionEnd};
 pub use repository::{
     PriorityWord, Repository, SessionSummary, StatisticsOverview, WordObservationRecord,
 };

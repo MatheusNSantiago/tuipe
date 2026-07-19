@@ -23,8 +23,11 @@ use unicode_segmentation::UnicodeSegmentation;
 use tuipe::{
     adaptive::{AdaptivePolicy, AdaptiveSampler, Observation},
     content::{ContentCatalog, WordGenerator},
-    persistence::{Preferences, Repository, StatisticsOverview, WordObservationRecord, paths},
-    typing::{InputEvent, KeyAction, QuoteLength, TestEngine, TestMode, TestStatus},
+    persistence::{
+        Preferences, RawEventCodec, RawSessionEnd, Repository, StatisticsOverview,
+        WordObservationRecord, paths,
+    },
+    typing::{ExternalEvent, InputEvent, KeyAction, QuoteLength, TestEngine, TestMode, TestStatus},
     ui,
 };
 
@@ -104,7 +107,25 @@ impl App {
         })
     }
 
-    fn restart(&mut self) -> Result<()> {
+    fn persist_interrupted(&mut self, repository: &Repository, end: RawSessionEnd) -> Result<()> {
+        if self.persisted || self.engine.recorded_events().is_empty() {
+            return Ok(());
+        }
+        let raw_events =
+            RawEventCodec::materialize(self.engine.recorded_events(), self.elapsed_ms(), end);
+        repository.save_session_full(
+            self.engine.config(),
+            self.engine.status(),
+            self.engine.metrics(),
+            &[],
+            &raw_events,
+        )?;
+        self.persisted = true;
+        Ok(())
+    }
+
+    fn restart(&mut self, repository: &Repository) -> Result<()> {
+        self.persist_interrupted(repository, RawSessionEnd::Restarted)?;
         self.seed = rand::random();
         let (engine, generator) = new_test(
             &self.catalog,
@@ -120,7 +141,8 @@ impl App {
         Ok(())
     }
 
-    fn repeat(&mut self) -> Result<()> {
+    fn repeat(&mut self, repository: &Repository) -> Result<()> {
+        self.persist_interrupted(repository, RawSessionEnd::Restarted)?;
         let (engine, generator) = new_test(
             &self.catalog,
             &self.preferences.test,
@@ -135,10 +157,14 @@ impl App {
         Ok(())
     }
 
-    fn apply_preference(&mut self, change: impl FnOnce(&mut Preferences)) -> Result<()> {
+    fn apply_preference(
+        &mut self,
+        repository: &Repository,
+        change: impl FnOnce(&mut Preferences),
+    ) -> Result<()> {
         change(&mut self.preferences);
         self.preferences.save(&self.config_path)?;
-        self.restart()
+        self.restart(repository)
     }
 
     fn elapsed_ms(&self) -> u64 {
@@ -309,7 +335,7 @@ fn run(
                     break;
                 }
                 Event::Key(key) if key.kind == KeyEventKind::Press => true,
-                Event::Mouse(mouse) => handle_mouse(app, mouse, terminal.size()?)?,
+                Event::Mouse(mouse) => handle_mouse(app, repository, mouse, terminal.size()?)?,
                 Event::Resize(width, height)
                     if width != last_size.width || height != last_size.height =>
                 {
@@ -317,7 +343,28 @@ fn run(
                     true
                 }
                 Event::Resize(_, _) => false,
-                Event::FocusGained | Event::FocusLost | Event::Paste(_) | Event::Key(_) => false,
+                Event::FocusGained => {
+                    app.update(InputEvent::External {
+                        event: ExternalEvent::Focus { gained: true },
+                        at_ms: app.elapsed_ms(),
+                    });
+                    false
+                }
+                Event::FocusLost => {
+                    app.update(InputEvent::External {
+                        event: ExternalEvent::Focus { gained: false },
+                        at_ms: app.elapsed_ms(),
+                    });
+                    false
+                }
+                Event::Paste(text) => {
+                    app.update(InputEvent::External {
+                        event: ExternalEvent::Paste { text },
+                        at_ms: app.elapsed_ms(),
+                    });
+                    false
+                }
+                Event::Key(_) => false,
             };
             needs_draw |= event_changed_view;
         }
@@ -338,11 +385,25 @@ fn run(
         {
             let baseline = repository.baseline_ms_per_grapheme(&app.engine.config().language)?;
             let observations = app.observations(baseline);
-            repository.save_session_with_observations(
+            let end = if matches!(app.engine.status(), TestStatus::Failed { .. }) {
+                RawSessionEnd::Failed
+            } else {
+                RawSessionEnd::Completed
+            };
+            let ended_at_ms = match app.engine.status() {
+                TestStatus::Completed { ended_at_ms } | TestStatus::Failed { ended_at_ms, .. } => {
+                    *ended_at_ms
+                }
+                _ => unreachable!("estado terminal validado acima"),
+            };
+            let raw_events =
+                RawEventCodec::materialize(app.engine.recorded_events(), ended_at_ms, end);
+            repository.save_session_full(
                 app.engine.config(),
                 app.engine.status(),
                 app.engine.metrics(),
                 &observations,
+                &raw_events,
             )?;
             app.apply_observations(&observations);
             app.persisted = true;
@@ -366,7 +427,12 @@ fn set_cursor_color(value: &str) -> Result<()> {
     Ok(())
 }
 
-fn handle_mouse(app: &mut App, mouse: MouseEvent, terminal: ratatui::layout::Size) -> Result<bool> {
+fn handle_mouse(
+    app: &mut App,
+    repository: &Repository,
+    mouse: MouseEvent,
+    terminal: ratatui::layout::Size,
+) -> Result<bool> {
     if mouse.kind != MouseEventKind::Down(MouseButton::Left)
         || !matches!(app.engine.status(), TestStatus::Ready)
     {
@@ -386,7 +452,7 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, terminal: ratatui::layout::Siz
     let x = mouse.column;
     if (cards[0].x..cards[0].right()).contains(&x) {
         let punctuation = x < cards[0].x + cards[0].width / 2;
-        app.apply_preference(|preferences| {
+        app.apply_preference(repository, |preferences| {
             if punctuation {
                 preferences.test.punctuation = !preferences.test.punctuation;
             } else {
@@ -400,10 +466,10 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, terminal: ratatui::layout::Siz
             1 => TestMode::Words { count: 25 },
             _ => TestMode::Quote,
         };
-        app.apply_preference(|preferences| preferences.test.mode = mode)?;
+        app.apply_preference(repository, |preferences| preferences.test.mode = mode)?;
     } else if (cards[2].x..cards[2].right()).contains(&x) {
         let quarter = ((x - cards[2].x) * 4 / cards[2].width).min(3) as usize;
-        app.apply_preference(|preferences| {
+        app.apply_preference(repository, |preferences| {
             preferences.test.mode = match preferences.test.mode {
                 TestMode::Time { .. } => TestMode::Time {
                     seconds: [15, 30, 60, 120][quarter],
@@ -441,14 +507,14 @@ fn handle_key(
         return Ok(false);
     }
     if app.settings_open {
-        return handle_settings_key(app, code);
+        return handle_settings_key(app, repository, code);
     }
     if matches!(code, KeyCode::Esc) && !matches!(app.engine.status(), TestStatus::Running { .. }) {
         app.settings_open = true;
         return Ok(false);
     }
     if matches!(code, KeyCode::Char('c')) && modifiers.contains(KeyModifiers::CONTROL) {
-        app.repeat()?;
+        app.repeat(repository)?;
         return Ok(false);
     }
     let resultado_recente = app.bloqueia_atalhos_do_resultado();
@@ -459,7 +525,7 @@ fn handle_key(
         return Ok(true);
     }
     if matches!(code, KeyCode::Enter) {
-        app.restart()?;
+        app.restart(repository)?;
         return Ok(false);
     }
     if matches!(code, KeyCode::Char('r'))
@@ -469,7 +535,7 @@ fn handle_key(
         )
         && !resultado_recente
     {
-        app.repeat()?;
+        app.repeat(repository)?;
         return Ok(false);
     }
     if matches!(code, KeyCode::Char('s'))
@@ -515,17 +581,17 @@ fn typing_action(code: KeyCode, modifiers: KeyModifiers) -> Option<KeyAction> {
     }
 }
 
-fn handle_settings_key(app: &mut App, code: KeyCode) -> Result<bool> {
+fn handle_settings_key(app: &mut App, repository: &Repository, code: KeyCode) -> Result<bool> {
     match code {
         KeyCode::Esc | KeyCode::Enter => app.settings_open = false,
-        KeyCode::Char('m') => app.apply_preference(|preferences| {
+        KeyCode::Char('m') => app.apply_preference(repository, |preferences| {
             preferences.test.mode = match preferences.test.mode {
                 TestMode::Time { .. } => TestMode::Words { count: 25 },
                 TestMode::Words { .. } => TestMode::Quote,
                 TestMode::Quote => TestMode::Time { seconds: 30 },
             };
         })?,
-        KeyCode::Char('v') => app.apply_preference(|preferences| {
+        KeyCode::Char('v') => app.apply_preference(repository, |preferences| {
             preferences.test.mode = match preferences.test.mode {
                 TestMode::Time { seconds } => TestMode::Time {
                     seconds: next(&[15, 30, 60, 120], seconds),
@@ -544,30 +610,30 @@ fn handle_settings_key(app: &mut App, code: KeyCode) -> Result<bool> {
                 }
             };
         })?,
-        KeyCode::Char('d') => app.apply_preference(|preferences| {
+        KeyCode::Char('d') => app.apply_preference(repository, |preferences| {
             preferences.test.difficulty = match preferences.test.difficulty {
                 tuipe::typing::Difficulty::Normal => tuipe::typing::Difficulty::Expert,
                 tuipe::typing::Difficulty::Expert => tuipe::typing::Difficulty::Master,
                 tuipe::typing::Difficulty::Master => tuipe::typing::Difficulty::Normal,
             };
         })?,
-        KeyCode::Char('p') => app.apply_preference(|preferences| {
+        KeyCode::Char('p') => app.apply_preference(repository, |preferences| {
             preferences.test.punctuation = !preferences.test.punctuation;
         })?,
-        KeyCode::Char('n') => app.apply_preference(|preferences| {
+        KeyCode::Char('n') => app.apply_preference(repository, |preferences| {
             preferences.test.numbers = !preferences.test.numbers;
         })?,
-        KeyCode::Char('a') => app.apply_preference(|preferences| {
+        KeyCode::Char('a') => app.apply_preference(repository, |preferences| {
             preferences.test.adaptive = !preferences.test.adaptive;
         })?,
-        KeyCode::Char('l') => app.apply_preference(|preferences| {
+        KeyCode::Char('l') => app.apply_preference(repository, |preferences| {
             preferences.test.language = if preferences.test.language == "portuguese" {
                 "english".into()
             } else {
                 "portuguese".into()
             };
         })?,
-        KeyCode::Char('k') => app.apply_preference(|preferences| {
+        KeyCode::Char('k') => app.apply_preference(repository, |preferences| {
             preferences.test.word_pack = match preferences.test.word_pack.as_str() {
                 "common" => "1k",
                 "1k" => "5k",
@@ -582,7 +648,7 @@ fn handle_settings_key(app: &mut App, code: KeyCode) -> Result<bool> {
                 .map(str::to_owned)
                 .collect::<Vec<_>>();
             let current = app.preferences.theme.clone();
-            app.apply_preference(|preferences| {
+            app.apply_preference(repository, |preferences| {
                 let index = names.iter().position(|name| name == &current).unwrap_or(0);
                 preferences.theme = names[(index + 1) % names.len()].clone();
             })?;

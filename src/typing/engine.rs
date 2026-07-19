@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use unicode_segmentation::UnicodeSegmentation;
 
 use super::{CharacterStats, Difficulty, Metrics, TargetWord, TestConfig, TestMode, WordAttempt};
@@ -12,7 +13,16 @@ pub enum KeyAction {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InputEvent {
     Key { action: KeyAction, at_ms: u64 },
+    External { event: ExternalEvent, at_ms: u64 },
     Tick { at_ms: u64 },
+}
+
+/// Eventos do terminal que afetam a interpretação da sessão, mas não inserem
+/// texto no teste.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExternalEvent {
+    Focus { gained: bool },
+    Paste { text: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,6 +39,37 @@ pub enum Transition {
     Advanced { from: usize, to: usize },
     Completed,
     Failed { word_index: usize },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecordedInputEvent {
+    pub at_ms: u64,
+    pub word_index: usize,
+    pub kind: RecordedInputKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RecordedInputKind {
+    Insert {
+        grapheme: String,
+        expected: Option<String>,
+        input_before: String,
+        input_after: String,
+        correct: bool,
+    },
+    Delete {
+        deleted: String,
+        input_before: String,
+        input_after: String,
+        corrected_graphemes: u16,
+        whole_word: bool,
+    },
+    Focus {
+        gained: bool,
+    },
+    Paste {
+        text: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -52,6 +93,7 @@ pub struct TestEngine {
     active_word: usize,
     status: TestStatus,
     character_events: Vec<CharacterEvent>,
+    recorded_events: Vec<RecordedInputEvent>,
     current_at_ms: u64,
 }
 
@@ -74,6 +116,7 @@ impl TestEngine {
             active_word: 0,
             status: TestStatus::Ready,
             character_events: Vec::new(),
+            recorded_events: Vec::new(),
             current_at_ms: 0,
         }
     }
@@ -108,6 +151,10 @@ impl TestEngine {
         &self.status
     }
 
+    pub fn recorded_events(&self) -> &[RecordedInputEvent] {
+        &self.recorded_events
+    }
+
     pub fn update(&mut self, event: InputEvent) -> Vec<Transition> {
         if matches!(
             self.status,
@@ -117,13 +164,31 @@ impl TestEngine {
         }
 
         self.current_at_ms = match &event {
-            InputEvent::Tick { at_ms } | InputEvent::Key { at_ms, .. } => *at_ms,
+            InputEvent::Tick { at_ms }
+            | InputEvent::Key { at_ms, .. }
+            | InputEvent::External { at_ms, .. } => *at_ms,
         };
 
         match event {
             InputEvent::Tick { at_ms } => self.handle_tick(at_ms),
             InputEvent::Key { action, at_ms } => self.handle_key(action, at_ms),
+            InputEvent::External { event, at_ms } => {
+                self.record_external(event, at_ms);
+                Vec::new()
+            }
         }
+    }
+
+    fn record_external(&mut self, event: ExternalEvent, at_ms: u64) {
+        let kind = match event {
+            ExternalEvent::Focus { gained } => RecordedInputKind::Focus { gained },
+            ExternalEvent::Paste { text } => RecordedInputKind::Paste { text },
+        };
+        self.recorded_events.push(RecordedInputEvent {
+            at_ms,
+            word_index: self.active_word,
+            kind,
+        });
     }
 
     fn handle_tick(&mut self, at_ms: u64) -> Vec<Transition> {
@@ -145,11 +210,11 @@ impl TestEngine {
         match action {
             KeyAction::Text(text) => self.insert_text(&text, at_ms),
             KeyAction::Backspace => {
-                self.backspace(false);
+                self.backspace(false, at_ms);
                 Vec::new()
             }
             KeyAction::DeleteWordBackward => {
-                self.backspace(true);
+                self.backspace(true, at_ms);
                 Vec::new()
             }
         }
@@ -181,7 +246,9 @@ impl TestEngine {
         }
 
         let target = self.targets[word_index].with_commit();
-        let correct = grapheme_at(&target, grapheme_count(&input_before))
+        let expected = grapheme_at(&target, grapheme_count(&input_before)).map(str::to_owned);
+        let correct = expected
+            .as_deref()
             .is_some_and(|expected| expected == grapheme);
         let commit = is_separator(grapheme);
 
@@ -202,6 +269,17 @@ impl TestEngine {
             input_after: after.clone(),
             correct,
             at_ms,
+        });
+        self.recorded_events.push(RecordedInputEvent {
+            at_ms,
+            word_index,
+            kind: RecordedInputKind::Insert {
+                grapheme: grapheme.to_owned(),
+                expected,
+                input_before: input_before.clone(),
+                input_after: after.clone(),
+                correct,
+            },
         });
         let can_advance =
             commit && !(input_before.is_empty() && self.config.difficulty != Difficulty::Normal);
@@ -263,7 +341,7 @@ impl TestEngine {
         }
     }
 
-    fn backspace(&mut self, delete_word: bool) {
+    fn backspace(&mut self, delete_word: bool, at_ms: u64) {
         if !matches!(self.status, TestStatus::Running { .. }) {
             return;
         }
@@ -274,31 +352,49 @@ impl TestEngine {
             }
             self.active_word -= 1;
             let attempt = &mut self.attempts[self.active_word];
+            let input_before = attempt.input.clone();
             attempt.committed = false;
             if delete_word {
                 attempt.input.clear();
             } else {
                 attempt.input = attempt.without_commit();
             }
+            self.recorded_events.push(RecordedInputEvent {
+                at_ms,
+                word_index: self.active_word,
+                kind: RecordedInputKind::Delete {
+                    deleted: removed_suffix(&input_before, &attempt.input),
+                    input_before,
+                    input_after: attempt.input.clone(),
+                    corrected_graphemes: 0,
+                    whole_word: delete_word,
+                },
+            });
             return;
         }
 
-        self.record_correction_if_needed();
+        let word_index = self.active_word;
+        let input_before = self.attempts[word_index].input.clone();
         if delete_word {
-            self.attempts[self.active_word].input.clear();
+            self.attempts[word_index].input.clear();
         } else {
-            self.attempts[self.active_word].pop_grapheme();
+            self.attempts[word_index].pop_grapheme();
         }
-    }
-
-    fn record_correction_if_needed(&mut self) {
-        let attempt = &mut self.attempts[self.active_word];
-        let index = grapheme_count(&attempt.input).saturating_sub(1);
-        let typed = grapheme_at(&attempt.input, index);
-        let target = self.targets[self.active_word].with_commit();
-        if typed != grapheme_at(&target, index) {
-            attempt.corrections += 1;
-        }
+        let input_after = self.attempts[word_index].input.clone();
+        let target = self.targets[word_index].with_commit();
+        let corrected_graphemes = corrected_suffix_count(&input_before, &input_after, &target);
+        self.attempts[word_index].corrections += u32::from(corrected_graphemes);
+        self.recorded_events.push(RecordedInputEvent {
+            at_ms,
+            word_index,
+            kind: RecordedInputKind::Delete {
+                deleted: removed_suffix(&input_before, &input_after),
+                input_before,
+                input_after,
+                corrected_graphemes,
+                whole_word: delete_word,
+            },
+        });
     }
 
     fn is_terminal(&self) -> bool {
@@ -412,6 +508,22 @@ impl TestEngine {
             })
             .collect()
     }
+}
+
+fn removed_suffix(before: &str, after: &str) -> String {
+    before.strip_prefix(after).unwrap_or(before).to_owned()
+}
+
+fn corrected_suffix_count(before: &str, after: &str, target: &str) -> u16 {
+    let start = grapheme_count(after);
+    before
+        .graphemes(true)
+        .enumerate()
+        .skip(start)
+        .filter(|(index, grapheme)| grapheme_at(target, *index) != Some(*grapheme))
+        .count()
+        .try_into()
+        .unwrap_or(u16::MAX)
 }
 
 fn correct_word_characters(targets: &[TargetWord], inputs: &[String], active_word: usize) -> u32 {
