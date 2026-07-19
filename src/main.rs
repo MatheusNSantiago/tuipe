@@ -181,7 +181,7 @@ fn run(
                     &app.preferences.theme,
                 );
                 if app.statistics_open {
-                    ui::render_statistics(frame, app.statistics, theme);
+                    ui::render_statistics(frame, &app.statistics, theme);
                 }
             })?;
             last_drawn_second = app.engine.elapsed_ms() / 1_000;

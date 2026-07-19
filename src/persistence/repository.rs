@@ -9,13 +9,22 @@ pub struct Repository {
     connection: Connection,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct StatisticsOverview {
     pub completed_tests: u64,
     pub active_ms: u64,
     pub average_wpm: f64,
     pub average_accuracy: f64,
     pub best_wpm: f64,
+    pub recent_tests: Vec<SessionSummary>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SessionSummary {
+    pub id: u64,
+    pub elapsed_ms: u64,
+    pub wpm: f64,
+    pub accuracy: f64,
 }
 
 impl Repository {
@@ -65,9 +74,8 @@ impl Repository {
     }
 
     pub fn statistics_overview(&self) -> Result<StatisticsOverview> {
-        self.connection
-            .query_row(
-                "SELECT
+        let mut overview = self.connection.query_row(
+            "SELECT
                 COUNT(*),
                 COALESCE(SUM(elapsed_ms), 0),
                 COALESCE(AVG(wpm), 0),
@@ -75,18 +83,37 @@ impl Repository {
                 COALESCE(MAX(wpm), 0)
              FROM sessions
              WHERE terminal_state = 'completed'",
-                [],
-                |row| {
-                    Ok(StatisticsOverview {
-                        completed_tests: row.get(0)?,
-                        active_ms: row.get::<_, i64>(1)? as u64,
-                        average_wpm: row.get(2)?,
-                        average_accuracy: row.get(3)?,
-                        best_wpm: row.get(4)?,
-                    })
-                },
-            )
-            .map_err(Into::into)
+            [],
+            |row| {
+                Ok(StatisticsOverview {
+                    completed_tests: row.get(0)?,
+                    active_ms: row.get::<_, i64>(1)? as u64,
+                    average_wpm: row.get(2)?,
+                    average_accuracy: row.get(3)?,
+                    best_wpm: row.get(4)?,
+                    recent_tests: Vec::new(),
+                })
+            },
+        )?;
+        let mut statement = self.connection.prepare(
+            "SELECT id, elapsed_ms, wpm, accuracy
+             FROM sessions
+             WHERE terminal_state = 'completed'
+             ORDER BY id DESC
+             LIMIT 12",
+        )?;
+        overview.recent_tests = statement
+            .query_map([], |row| {
+                Ok(SessionSummary {
+                    id: row.get::<_, i64>(0)? as u64,
+                    elapsed_ms: row.get::<_, i64>(1)? as u64,
+                    wpm: row.get(2)?,
+                    accuracy: row.get(3)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        overview.recent_tests.reverse();
+        Ok(overview)
     }
 }
 
@@ -177,6 +204,12 @@ mod tests {
                 average_wpm: 80.0,
                 average_accuracy: 95.0,
                 best_wpm: 80.0,
+                recent_tests: vec![SessionSummary {
+                    id: 1,
+                    elapsed_ms: 12_000,
+                    wpm: 80.0,
+                    accuracy: 95.0,
+                }],
             }
         );
     }

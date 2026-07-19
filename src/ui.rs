@@ -17,7 +17,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::{
     content::Theme,
-    persistence::StatisticsOverview,
+    persistence::{SessionSummary, StatisticsOverview},
     typing::{Difficulty, Metrics, QuoteLength, TestEngine, TestMode, TestStatus},
 };
 
@@ -92,44 +92,178 @@ pub fn render(
     );
 }
 
-pub fn render_statistics(frame: &mut Frame, statistics: StatisticsOverview, theme: &Theme) {
+pub fn render_statistics(frame: &mut Frame, statistics: &StatisticsOverview, theme: &Theme) {
     let viewport = frame.area();
     frame.render_widget(
         Block::default().style(Style::default().bg(color(&theme.bg))),
         viewport,
     );
     let content = page_content(viewport);
-    let area = centered_height(content, 13.min(content.height));
-    let title = Line::styled("estatísticas", Style::default().fg(color(&theme.text)));
-    let entries = [
-        ("testes concluídos", statistics.completed_tests.to_string()),
+    if statistics.completed_tests == 0 {
+        frame.render_widget(
+            Paragraph::new(vec![
+                Line::styled("estatísticas", Style::default().fg(color(&theme.text))),
+                Line::from(""),
+                Line::styled(
+                    "ainda não há testes concluídos",
+                    Style::default().fg(color(&theme.sub)),
+                ),
+                Line::from(""),
+                Line::styled("esc voltar", Style::default().fg(color(&theme.sub))),
+            ])
+            .alignment(Alignment::Center),
+            centered_height(content, 7),
+        );
+        return;
+    }
+
+    let sections = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(10.min(content.height.saturating_sub(8))),
+        Constraint::Length(3),
+        Constraint::Min(4),
+        Constraint::Length(1),
+    ])
+    .split(content);
+    frame.render_widget(
+        Paragraph::new("estatísticas").style(Style::default().fg(color(&theme.text))),
+        sections[0],
+    );
+    render_statistics_chart(frame, sections[1], &statistics.recent_tests, theme);
+    render_statistics_summary(frame, sections[2], statistics, theme);
+    render_recent_tests(frame, sections[3], &statistics.recent_tests, theme);
+    frame.render_widget(
+        Paragraph::new("esc voltar").style(Style::default().fg(color(&theme.sub))),
+        sections[4],
+    );
+}
+
+fn render_statistics_chart(
+    frame: &mut Frame,
+    area: Rect,
+    sessions: &[SessionSummary],
+    theme: &Theme,
+) {
+    if area.height < 4 {
+        return;
+    }
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("wpm por teste", Style::default().fg(color(&theme.text))),
+            Span::styled("  ·  últimos 12", Style::default().fg(color(&theme.sub))),
+        ])),
+        Rect::new(area.x, area.y, area.width, 1),
+    );
+    let columns =
+        Layout::horizontal([Constraint::Length(4), Constraint::Min(10)]).split(Rect::new(
+            area.x,
+            area.y.saturating_add(1),
+            area.width,
+            area.height.saturating_sub(2),
+        ));
+    let points = sessions
+        .iter()
+        .enumerate()
+        .map(|(index, session)| (index as f64, session.wpm))
+        .collect::<Vec<_>>();
+    let ceiling =
+        ((points.iter().map(|point| point.1).fold(20.0, f64::max) / 20.0).ceil() * 20.0).max(20.0);
+    render_chart_y_labels(frame, columns[0], columns[1], ceiling, theme);
+    frame.render_widget(
+        Canvas::default()
+            .marker(Marker::Braille)
+            .background_color(color(&theme.bg))
+            .block(
+                Block::default()
+                    .borders(Borders::LEFT | Borders::BOTTOM)
+                    .border_style(Style::default().fg(color(&theme.main))),
+            )
+            .x_bounds([0.0, points.len().saturating_sub(1).max(1) as f64])
+            .y_bounds([0.0, ceiling])
+            .paint(|context| {
+                context.draw(&Points {
+                    coords: &points,
+                    color: color(&theme.main),
+                });
+                for segment in smooth_wpm_points(&points).windows(2) {
+                    context.draw(&CanvasLine {
+                        x1: segment[0].0,
+                        y1: segment[0].1,
+                        x2: segment[1].0,
+                        y2: segment[1].1,
+                        color: color(&theme.main),
+                    });
+                }
+            }),
+        columns[1],
+    );
+}
+
+fn render_statistics_summary(
+    frame: &mut Frame,
+    area: Rect,
+    statistics: &StatisticsOverview,
+    theme: &Theme,
+) {
+    let values = [
+        ("testes", statistics.completed_tests.to_string()),
         ("wpm médio", format!("{:.0}", statistics.average_wpm)),
-        (
-            "precisão média",
-            format!("{:.0}%", statistics.average_accuracy),
-        ),
-        ("melhor wpm", format!("{:.0}", statistics.best_wpm)),
-        ("tempo digitando", format_duration(statistics.active_ms)),
+        ("precisão", format!("{:.0}%", statistics.average_accuracy)),
+        ("melhor", format!("{:.0}", statistics.best_wpm)),
+        ("tempo", format_duration(statistics.active_ms)),
     ];
-    let mut lines = vec![title, Line::from("")];
-    lines.extend(entries.into_iter().map(|(label, value)| {
-        Line::from(vec![
-            Span::styled(
-                format!("{label:<20}"),
-                Style::default().fg(color(&theme.sub)),
-            ),
-            Span::styled(value, Style::default().fg(color(&theme.main))),
-        ])
-    }));
-    lines.push(Line::from(""));
+    for (area, (label, value)) in Layout::horizontal(vec![Constraint::Ratio(1, 5); 5])
+        .spacing(2)
+        .split(area)
+        .iter()
+        .zip(values)
+    {
+        frame.render_widget(
+            Paragraph::new(vec![
+                Line::styled(label, Style::default().fg(color(&theme.sub))),
+                Line::styled(value, Style::default().fg(color(&theme.main))),
+            ]),
+            *area,
+        );
+    }
+}
+
+fn render_recent_tests(frame: &mut Frame, area: Rect, sessions: &[SessionSummary], theme: &Theme) {
+    let mut lines = vec![Line::styled(
+        "histórico recente",
+        Style::default().fg(color(&theme.text)),
+    )];
     lines.push(Line::styled(
-        "esc voltar",
+        "teste     wpm     precisão     tempo",
         Style::default().fg(color(&theme.sub)),
     ));
-    frame.render_widget(
-        Paragraph::new(lines).alignment(Alignment::Center),
-        centered_width(area, 34),
+    lines.extend(
+        sessions
+            .iter()
+            .rev()
+            .take(area.height.saturating_sub(2) as usize)
+            .map(|session| {
+                Line::from(vec![
+                    Span::styled(
+                        format!("#{:<8}", session.id),
+                        Style::default().fg(color(&theme.sub)),
+                    ),
+                    Span::styled(
+                        format!("{:<8.0}", session.wpm),
+                        Style::default().fg(color(&theme.main)),
+                    ),
+                    Span::styled(
+                        format!("{:<13}", format!("{:.0}%", session.accuracy)),
+                        Style::default().fg(color(&theme.main)),
+                    ),
+                    Span::styled(
+                        format_duration(session.elapsed_ms),
+                        Style::default().fg(color(&theme.main)),
+                    ),
+                ])
+            }),
     );
+    frame.render_widget(Paragraph::new(lines), area);
 }
 
 fn render_com_icones(
@@ -1337,12 +1471,20 @@ mod tests {
             .draw(|frame| {
                 render_statistics(
                     frame,
-                    StatisticsOverview {
+                    &StatisticsOverview {
                         completed_tests: 42,
                         active_ms: 3_661_000,
                         average_wpm: 84.0,
                         average_accuracy: 96.0,
                         best_wpm: 112.0,
+                        recent_tests: (1_u16..=12)
+                            .map(|id| SessionSummary {
+                                id: u64::from(id),
+                                elapsed_ms: 15_000,
+                                wpm: 70.0 + f64::from(id),
+                                accuracy: 90.0 + f64::from(id) / 2.0,
+                            })
+                            .collect(),
                     },
                     theme,
                 )
