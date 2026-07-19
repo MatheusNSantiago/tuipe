@@ -2,29 +2,29 @@
 source: src/ui.rs
 expression: "render_engine_at(100, 28, &engine)"
 ---
+
+
+
+
      wpm ao longo do tempo   × erros
        40│
          │
-         │⡀
-       20│⠘⣄                       ⢠⠋⠒⠒⠤⠤⣄⣀⣀⡀
-         │ ⠈⢦⣀                     ⡇        ⠉⠉⠉⠙⠒⠒⠒⠒⠤⠤⠤⠤⠤⣄⣀⣀⣀⣀⣀⣀
-         │   ⠈⠑⠒⠤⢤⣀⣀⣀             ⡜                             ⠉⠉⠉⠉⠉⠉⠉⠉⠙⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠲⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤
-         │          ⠈⠉⠉⠉⠉⠉⠓⠒⠒⠒⠒⠒⠒⠒⠁
+         │
+         │⡄
+       20│⠘⡄                       ⢠⠋⠑⠒⠤⢤⣀⣀
+         │ ⠘⣄                      ⡎       ⠉⠉⠓⠒⠒⠦⠤⠤⣄⣀⣀⣀⡀
+         │  ⠈⠲⢄⡀                  ⢠⠃                   ⠉⠉⠉⠉⠙⠒⠒⠒⠒⠒⠦⠤⠤⠤⠤⠤⠤⣀⣀⣀⣀⣀⣀⣀⣀⣀
+         │     ⠈⠙⠒⠢⠤⢤⣀⣀⣀⣀         ⡎                                             ⠈⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠓⠒⠒
+         │              ⠈⠉⠉⠉⠉⠉⠉⠙⠒⠚
         0└─────────────────────────────────────────────────────────────────────────────────────
          1                                        15.5                                       30
 
-     tipo de teste                  wpm                           precisão
-     tempo 30                       7                             100%
+     tipo de teste     wpm       precisão     bruto     caracteres     consistência    tempo
+     tempo 30          7         100%         7         18/0/0/0       0%              30.0s
      ◎ português
      ★ especialista
 
-     bruto                          caracteres                    consistência
-     7                              18/0/0/0                      0%
 
-
-
-     tempo
-     30.0s
 
 
 

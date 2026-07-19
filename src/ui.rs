@@ -29,7 +29,7 @@ const CONFIG_MODIFIER_WIDTH: u16 = 26;
 const CONFIG_MODE_WIDTH: u16 = 26;
 const CONFIG_COMPACT_VALUE_WIDTH: u16 = 20;
 const CONFIG_QUOTE_VALUE_WIDTH: u16 = 26;
-const RESULT_WIDE_WIDTH: u16 = 120;
+const RESULT_WIDE_WIDTH: u16 = 90;
 const RESULT_MEDIUM_WIDTH: u16 = 54;
 const RESULT_GROUP_HEIGHT: u16 = 4;
 const RESULT_CHART_HEIGHT: u16 = 12;
@@ -777,13 +777,13 @@ fn result_detail_areas(area: Rect, group_count: usize) -> Vec<Rect> {
     if columns == group_count {
         let constraints = if group_count == 7 {
             vec![
-                Constraint::Percentage(20),
-                Constraint::Percentage(10),
-                Constraint::Percentage(10),
-                Constraint::Percentage(9),
-                Constraint::Percentage(18),
-                Constraint::Percentage(17),
-                Constraint::Percentage(16),
+                Constraint::Length(16),
+                Constraint::Length(8),
+                Constraint::Length(11),
+                Constraint::Length(8),
+                Constraint::Length(13),
+                Constraint::Length(14),
+                Constraint::Min(8),
             ]
         } else if group_count == 6 {
             vec![

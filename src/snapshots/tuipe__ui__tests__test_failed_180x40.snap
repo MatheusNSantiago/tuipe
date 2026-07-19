@@ -25,8 +25,8 @@ expression: "render_engine_at(180, 40, &engine)"
             0└─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
              1                                                                                                                                                          1.7
 
-         tipo de teste           wpm               precisão          bruto            caracteres                    consistência                 tempo
-         palavras 4              71                92%               92               10/1/0/1                      46%                          1.7s
+         tipo de teste     wpm       precisão     bruto     caracteres     consistência    tempo
+         palavras 4        71        92%          92        10/1/0/1       46%             1.7s
          ◎ português
          ★ especialista
 
