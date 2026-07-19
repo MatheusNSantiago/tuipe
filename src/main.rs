@@ -932,20 +932,47 @@ fn word_generator(
     adaptive: &AdaptiveSampler,
     session_kind: SessionKind,
 ) -> Result<WordGenerator<SmallRng>> {
-    let words = catalog
+    let configured_words = catalog
         .word_pack(&config.language, &config.word_pack)
         .context("configured word pack is unavailable")?;
+    let partitioned = match session_kind {
+        SessionKind::Transfer => configured_words
+            .iter()
+            .filter(|word| is_transfer_holdout(word))
+            .cloned()
+            .collect::<Vec<_>>(),
+        SessionKind::Practice if config.adaptive => configured_words
+            .iter()
+            .filter(|word| !is_transfer_holdout(word))
+            .cloned()
+            .collect(),
+        SessionKind::Assessment | SessionKind::Practice | SessionKind::Repeat => Vec::new(),
+    };
+    let words = if partitioned.len() >= 3 {
+        partitioned.as_slice()
+    } else {
+        configured_words
+    };
     let generator = WordGenerator::new(words, rng, config.punctuation, config.numbers);
-    Ok(
-        if config.adaptive
-            && !matches!(config.mode, TestMode::Quote)
-            && session_kind != SessionKind::Assessment
-        {
+    Ok(match session_kind {
+        SessionKind::Assessment => generator.with_assessment(),
+        SessionKind::Practice if config.adaptive => {
             generator.with_adaptive(&config.language, adaptive.clone())
-        } else {
-            generator
-        },
-    )
+        }
+        SessionKind::Practice | SessionKind::Transfer | SessionKind::Repeat => generator,
+    })
+}
+
+/// Partição FNV-1a estável: aproximadamente 10% do pack nunca entra na prática
+/// adaptativa e fica reservado para medir transferência.
+fn is_transfer_holdout(word: &str) -> bool {
+    let hash = word
+        .as_bytes()
+        .iter()
+        .fold(0xcbf29ce484222325_u64, |hash, byte| {
+            (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
+        });
+    hash % 10 == 0
 }
 
 fn generate(
@@ -991,5 +1018,17 @@ mod tests {
             typing_action(KeyCode::Char('h'), KeyModifiers::CONTROL),
             Some(KeyAction::DeleteWordBackward)
         );
+    }
+
+    #[test]
+    fn particao_de_transferencia_e_estavel() {
+        let first = (0..1_000)
+            .filter(|index| is_transfer_holdout(&format!("palavra{index}")))
+            .collect::<Vec<_>>();
+        let second = (0..1_000)
+            .filter(|index| is_transfer_holdout(&format!("palavra{index}")))
+            .collect::<Vec<_>>();
+        assert_eq!(first, second);
+        assert!((70..=130).contains(&first.len()));
     }
 }

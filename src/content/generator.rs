@@ -19,6 +19,7 @@ pub struct UniformWordGenerator<R> {
     words: Vec<String>,
     rng: R,
     previous: [Option<String>; 2],
+    anchor_position: usize,
 }
 
 impl<R: Rng> UniformWordGenerator<R> {
@@ -28,6 +29,7 @@ impl<R: Rng> UniformWordGenerator<R> {
             words: words.to_vec(),
             rng,
             previous: [None, None],
+            anchor_position: 0,
         }
     }
 
@@ -55,6 +57,68 @@ impl<R: Rng> UniformWordGenerator<R> {
         let candidate = eligible
             .choose(&mut self.rng)
             .expect("pacote não vazio")
+            .nfc()
+            .collect::<String>();
+        let propensity = 1.0 / eligible.len() as f64;
+        self.previous.rotate_right(1);
+        self.previous[0] = Some(candidate.clone());
+        WordSelection {
+            word: candidate,
+            source: SelectionSource::Representative,
+            propensity,
+        }
+    }
+
+    /// Forma âncora estratificada por faixa de frequência do pack e tamanho.
+    /// O ciclo cobre doze células antes de repetir e nunca consulta habilidade.
+    pub fn next_anchor(&mut self) -> WordSelection {
+        let rank_band = self.anchor_position % 4;
+        let length_band = (self.anchor_position * 2) % 3;
+        self.anchor_position = self.anchor_position.saturating_add(1);
+        let band_start = self.words.len() * rank_band / 4;
+        let band_end = self.words.len() * (rank_band + 1) / 4;
+        let matches_length = |word: &str| match length_band {
+            0 => word.graphemes(true).count() <= 4,
+            1 => (5..=7).contains(&word.graphemes(true).count()),
+            _ => word.graphemes(true).count() >= 8,
+        };
+        let mut eligible = self
+            .words
+            .iter()
+            .enumerate()
+            .filter(|(index, word)| {
+                (band_start..band_end).contains(index)
+                    && matches_length(word)
+                    && !self
+                        .previous
+                        .iter()
+                        .flatten()
+                        .any(|previous| previous == *word)
+            })
+            .map(|(_, word)| word)
+            .collect::<Vec<_>>();
+        if eligible.is_empty() {
+            eligible = self
+                .words
+                .iter()
+                .enumerate()
+                .filter(|(index, word)| {
+                    (band_start..band_end).contains(index)
+                        && !self
+                            .previous
+                            .iter()
+                            .flatten()
+                            .any(|previous| previous == *word)
+                })
+                .map(|(_, word)| word)
+                .collect();
+        }
+        if eligible.is_empty() {
+            return self.next_lexical_with_provenance();
+        }
+        let candidate = eligible
+            .choose(&mut self.rng)
+            .expect("estrato não vazio")
             .nfc()
             .collect::<String>();
         let propensity = 1.0 / eligible.len() as f64;
@@ -104,6 +168,7 @@ pub struct WordGenerator<R> {
     numbers: bool,
     sentence_start: bool,
     adaptive: Option<(String, AdaptiveSampler)>,
+    assessment: bool,
 }
 
 impl<R: Rng> WordGenerator<R> {
@@ -114,11 +179,17 @@ impl<R: Rng> WordGenerator<R> {
             numbers,
             sentence_start: true,
             adaptive: None,
+            assessment: false,
         }
     }
 
     pub fn with_adaptive(mut self, language: impl Into<String>, sampler: AdaptiveSampler) -> Self {
         self.adaptive = Some((language.into(), sampler));
+        self
+    }
+
+    pub fn with_assessment(mut self) -> Self {
+        self.assessment = true;
         self
     }
 
@@ -134,9 +205,12 @@ impl<R: Rng> WordGenerator<R> {
             };
         }
 
-        let selection = match &self.adaptive {
-            Some((language, sampler)) => self.uniform.next_lexical_adaptive(sampler, language),
-            None => self.uniform.next_lexical_with_provenance(),
+        let selection = match (&self.adaptive, self.assessment) {
+            (_, true) => self.uniform.next_anchor(),
+            (Some((language, sampler)), false) => {
+                self.uniform.next_lexical_adaptive(sampler, language)
+            }
+            (None, false) => self.uniform.next_lexical_with_provenance(),
         };
         let mut word = selection.word.clone();
         if !self.punctuation {
@@ -244,6 +318,33 @@ mod tests {
                 assert!((1..=4).contains(&word.len()));
                 assert_ne!(word.chars().next(), Some('0'));
             }
+        }
+    }
+
+    #[test]
+    fn avaliacao_ancora_cobre_frequencia_e_tamanho_sem_habilidade() {
+        let mut words = Vec::new();
+        for band in 0..4 {
+            words.extend((0..4).map(|index| format!("a{band}{index}")));
+            words.extend((0..4).map(|index| format!("medio{band}{index}")));
+            words.extend((0..4).map(|index| format!("comprida{band}{index}")));
+        }
+        let mut generator = UniformWordGenerator::new(&words, SmallRng::seed_from_u64(9));
+        for position in 0..12 {
+            let selected = generator.next_anchor();
+            let index = words
+                .iter()
+                .position(|word| word == &selected.word)
+                .unwrap();
+            assert_eq!(index / 12, position % 4);
+            let expected_length_band = (position * 2) % 3;
+            let length = selected.word.graphemes(true).count();
+            assert!(match expected_length_band {
+                0 => length <= 4,
+                1 => (5..=7).contains(&length),
+                _ => length >= 8,
+            });
+            assert_eq!(selected.source, SelectionSource::Representative);
         }
     }
 }

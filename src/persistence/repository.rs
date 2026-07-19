@@ -468,8 +468,11 @@ impl Repository {
             [],
             |row| row.get::<_, u64>(0),
         )?;
-        Ok(if completed > 0 && (completed + 1).is_multiple_of(8) {
+        let next = completed + 1;
+        Ok(if completed > 0 && next.is_multiple_of(8) {
             SessionKind::Assessment
+        } else if completed > 0 && next.is_multiple_of(4) {
+            SessionKind::Transfer
         } else {
             SessionKind::Practice
         })
@@ -1190,7 +1193,20 @@ mod tests {
             repository.next_session_kind(&config).unwrap(),
             SessionKind::Practice
         );
-        for ended_at_ms in 1..=7 {
+        for ended_at_ms in 1..=3 {
+            repository
+                .save_session(
+                    &config,
+                    &TestStatus::Completed { ended_at_ms },
+                    Metrics::default(),
+                )
+                .unwrap();
+        }
+        assert_eq!(
+            repository.next_session_kind(&config).unwrap(),
+            SessionKind::Transfer
+        );
+        for ended_at_ms in 4..=7 {
             repository
                 .save_session(
                     &config,
