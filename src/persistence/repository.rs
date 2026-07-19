@@ -45,6 +45,7 @@ pub struct StatisticsOverview {
     pub best_wpm: f64,
     pub recent_tests: Vec<SessionSummary>,
     pub priority_words: Vec<PriorityWord>,
+    pub priority_patterns: Vec<PriorityPattern>,
     pub total_xp: u64,
     pub level: u64,
     pub streak: u16,
@@ -75,6 +76,17 @@ pub struct PriorityWord {
     pub uncorrected_error_rate: f64,
     pub corrected_error_rate: f64,
     pub estimated_session_chance: f64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PriorityPattern {
+    pub pattern: String,
+    pub kind: &'static str,
+    pub difficulty: f64,
+    pub effective_exposures: f64,
+    pub uncorrected_error_rate: f64,
+    pub corrected_error_rate: f64,
+    pub distinct_words: usize,
 }
 
 /// Evidência consultável de uma palavra observada durante uma sessão terminal.
@@ -589,22 +601,23 @@ impl Repository {
     }
 
     pub fn statistics_overview(&self) -> Result<StatisticsOverview> {
+        let assessment_count = self.connection.query_row(
+            "SELECT COUNT(*) FROM sessions
+             WHERE terminal_state = 'completed' AND session_kind = 'assessment'",
+            [],
+            |row| row.get::<_, u64>(0),
+        )?;
+        let assessments_only = assessment_count >= 2;
         let mut overview = self.connection.query_row(
             "SELECT
                 COUNT(*),
                 COALESCE(SUM(elapsed_ms), 0),
-                COALESCE(
-                    AVG(CASE WHEN session_kind = 'assessment' THEN wpm END),
-                    AVG(wpm), 0
-                ),
-                COALESCE(
-                    AVG(CASE WHEN session_kind = 'assessment' THEN accuracy END),
-                    AVG(accuracy), 0
-                ),
-                COALESCE(MAX(wpm), 0)
+                COALESCE(AVG(CASE WHEN ?1 = 0 OR session_kind = 'assessment' THEN wpm END), 0),
+                COALESCE(AVG(CASE WHEN ?1 = 0 OR session_kind = 'assessment' THEN accuracy END), 0),
+                COALESCE(MAX(CASE WHEN ?1 = 0 OR session_kind = 'assessment' THEN wpm END), 0)
              FROM sessions
              WHERE terminal_state = 'completed'",
-            [],
+            [assessments_only],
             |row| {
                 Ok(StatisticsOverview {
                     completed_tests: row.get(0)?,
@@ -614,19 +627,13 @@ impl Repository {
                     best_wpm: row.get(4)?,
                     recent_tests: Vec::new(),
                     priority_words: Vec::new(),
+                    priority_patterns: Vec::new(),
                     total_xp: 0,
                     level: 0,
                     streak: 0,
                 })
             },
         )?;
-        let assessment_count = self.connection.query_row(
-            "SELECT COUNT(*) FROM sessions
-             WHERE terminal_state = 'completed' AND session_kind = 'assessment'",
-            [],
-            |row| row.get::<_, u64>(0),
-        )?;
-        let assessments_only = assessment_count >= 2;
         let mut statement = self.connection.prepare(
             "SELECT id, elapsed_ms, wpm, accuracy, raw_wpm, correct_chars,
                     incorrect_chars, extra_chars, config_toml, session_kind
@@ -660,6 +667,7 @@ impl Repository {
             .collect::<rusqlite::Result<Vec<_>>>()?;
         overview.recent_tests.reverse();
         overview.priority_words = self.priority_words()?;
+        overview.priority_patterns = self.priority_patterns()?;
         let (xp, streak) = self.progress()?;
         overview.total_xp = xp.total;
         overview.level = crate::gamification::level_from_total_xp(xp.total);
@@ -705,6 +713,87 @@ impl Repository {
             })
             .take(8)
             .collect())
+    }
+
+    fn priority_patterns(&self) -> Result<Vec<PriorityPattern>> {
+        let policy = crate::adaptive::AdaptivePolicy::default();
+        let mut patterns = Vec::new();
+        for (language, pattern, skill) in self.load_all_ngram_skills()? {
+            let baseline = self.baseline_profile(&language)?.rates;
+            let difficulty = policy.ngram_difficulty(&skill, baseline);
+            if difficulty > 0.0 {
+                patterns.push(pattern_diagnostic(
+                    pattern,
+                    "sequência",
+                    difficulty,
+                    skill.effective_exposures,
+                    skill.uncorrected_error_mass,
+                    skill.corrected_error_mass,
+                    skill.distinct_words.len(),
+                ));
+            }
+        }
+        for (language, pattern, skill) in self.load_all_mechanic_skills()? {
+            let baseline = self.baseline_profile(&language)?.rates;
+            let difficulty = policy.mechanic_difficulty(&skill, baseline);
+            if difficulty > 0.0 {
+                patterns.push(pattern_diagnostic(
+                    mechanic_label(&pattern),
+                    "mecânica",
+                    difficulty,
+                    skill.effective_exposures,
+                    skill.uncorrected_error_mass,
+                    skill.corrected_error_mass,
+                    skill.distinct_words.len(),
+                ));
+            }
+        }
+        patterns.sort_by(|left, right| right.difficulty.total_cmp(&left.difficulty));
+        patterns.truncate(8);
+        Ok(patterns)
+    }
+}
+
+fn pattern_diagnostic(
+    pattern: String,
+    kind: &'static str,
+    difficulty: f64,
+    exposures: f64,
+    uncorrected: f64,
+    corrected: f64,
+    distinct_words: usize,
+) -> PriorityPattern {
+    PriorityPattern {
+        pattern,
+        kind,
+        difficulty,
+        effective_exposures: exposures,
+        uncorrected_error_rate: if exposures > 0.0 {
+            uncorrected / exposures
+        } else {
+            0.0
+        },
+        corrected_error_rate: if exposures > 0.0 {
+            corrected / exposures
+        } else {
+            0.0
+        },
+        distinct_words,
+    }
+}
+
+fn mechanic_label(mechanic: &str) -> String {
+    match mechanic {
+        "capitalizacao" => "maiúsculas".into(),
+        "pontuacao_final" => "pontuação final".into(),
+        "virgula" => "vírgula".into(),
+        "acento_agudo" => "acento agudo".into(),
+        "acento_circunflexo" => "circunflexo".into(),
+        "acento_grave" => "acento grave".into(),
+        "til" => "til".into(),
+        "cedilha" => "cedilha".into(),
+        "trema" => "trema".into(),
+        other => other.replace('_', " "),
     }
 }
 
@@ -893,6 +982,7 @@ mod tests {
                     kind: SessionKind::Practice,
                 }],
                 priority_words: Vec::new(),
+                priority_patterns: Vec::new(),
                 total_xp: 27,
                 level: 1,
                 streak: 1,

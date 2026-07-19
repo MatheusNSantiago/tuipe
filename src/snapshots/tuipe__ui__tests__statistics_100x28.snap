@@ -1,6 +1,6 @@
 ---
 source: src/ui.rs
-assertion_line: 1618
+assertion_line: 1639
 expression: rendered
 ---
      estatísticas
@@ -18,16 +18,16 @@ expression: rendered
      testes            wpm médio          precisão          nível              streak
      42                84                 96%               0                  0 dias
 
-     histórico recente                                           palavras prioritárias
-     teste    wpm  bruto  precisão  caracteres  duração          sem evidência suficiente
-     #12     82   82     96%       100/0/0      15s
-     #11     81   81     96%       100/0/0      15s
-     #10     80   80     95%       100/0/0      15s
-     #9      79   79     94%       100/0/0      15s
-     #8      78   78     94%       100/0/0      15s
-     #7      77   77     94%       100/0/0      15s
-     #6      76   76     93%       100/0/0      15s
-     #5      75   75     92%       100/0/0      15s
-     #4      74   74     92%       100/0/0      15s
-     #3      73   73     92%       100/0/0      15s
+     palavras prioritárias                               padrões que pedem treino
+     palavra       chance   falha   corr   exp           tipo/padrão       falha corr exp ctx
+     através        18.0%     30%    20%   10            mec acento agudo    21%  14%  14 5
+
+
+
+
+
+
+
+
+
      esc voltar

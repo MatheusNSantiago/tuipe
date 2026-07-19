@@ -17,7 +17,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::{
     content::Theme,
-    persistence::{PriorityWord, SessionSummary, StatisticsOverview},
+    persistence::{PriorityPattern, PriorityWord, SessionSummary, StatisticsOverview},
     typing::{Difficulty, Metrics, QuoteLength, TestEngine, TestMode, TestStatus},
 };
 
@@ -132,11 +132,11 @@ pub fn render_statistics(frame: &mut Frame, statistics: &StatisticsOverview, the
     );
     render_statistics_chart(frame, sections[1], &statistics.recent_tests, theme);
     render_statistics_summary(frame, sections[2], statistics, theme);
-    let details = Layout::horizontal([Constraint::Percentage(67), Constraint::Percentage(33)])
+    let details = Layout::horizontal([Constraint::Percentage(58), Constraint::Percentage(42)])
         .spacing(1)
         .split(sections[3]);
-    render_recent_tests(frame, details[0], &statistics.recent_tests, theme);
-    render_priority_words(frame, details[1], &statistics.priority_words, theme);
+    render_priority_words(frame, details[0], &statistics.priority_words, theme);
+    render_priority_patterns(frame, details[1], &statistics.priority_patterns, theme);
     frame.render_widget(
         Paragraph::new("esc voltar").style(Style::default().fg(color(&theme.sub))),
         sections[4],
@@ -272,55 +272,6 @@ fn render_statistics_summary(
     }
 }
 
-fn render_recent_tests(frame: &mut Frame, area: Rect, sessions: &[SessionSummary], theme: &Theme) {
-    let mut lines = vec![Line::styled(
-        "histórico recente",
-        Style::default().fg(color(&theme.text)),
-    )];
-    lines.push(Line::styled(
-        "teste    wpm  bruto  precisão  caracteres  duração",
-        Style::default().fg(color(&theme.sub)),
-    ));
-    lines.extend(
-        sessions
-            .iter()
-            .rev()
-            .take(area.height.saturating_sub(2) as usize)
-            .map(|session| {
-                Line::from(vec![
-                    Span::styled(
-                        format!("#{:<7}", session.id),
-                        Style::default().fg(color(&theme.sub)),
-                    ),
-                    Span::styled(
-                        format!("{:<5.0}", session.wpm),
-                        Style::default().fg(color(&theme.main)),
-                    ),
-                    Span::styled(
-                        format!("{:<7.0}", session.raw_wpm),
-                        Style::default().fg(color(&theme.main)),
-                    ),
-                    Span::styled(
-                        format!("{:<10}", format!("{:.0}%", session.accuracy)),
-                        Style::default().fg(color(&theme.main)),
-                    ),
-                    Span::styled(
-                        format!(
-                            "{}/{}/{}      ",
-                            session.correct_chars, session.incorrect_chars, session.extra_chars
-                        ),
-                        Style::default().fg(color(&theme.main)),
-                    ),
-                    Span::styled(
-                        format_duration(session.elapsed_ms),
-                        Style::default().fg(color(&theme.sub)),
-                    ),
-                ])
-            }),
-    );
-    frame.render_widget(Paragraph::new(lines), area);
-}
-
 fn render_priority_words(frame: &mut Frame, area: Rect, words: &[PriorityWord], theme: &Theme) {
     let mut lines = vec![Line::styled(
         "palavras prioritárias",
@@ -360,6 +311,68 @@ fn render_priority_words(frame: &mut Frame, area: Rect, words: &[PriorityWord], 
                         ),
                         Span::styled(
                             format!("{:>3.0}", word.effective_exposures),
+                            Style::default().fg(color(&theme.sub)),
+                        ),
+                    ])
+                }),
+        );
+    }
+    frame.render_widget(Paragraph::new(lines), area);
+}
+
+fn render_priority_patterns(
+    frame: &mut Frame,
+    area: Rect,
+    patterns: &[PriorityPattern],
+    theme: &Theme,
+) {
+    let mut lines = vec![Line::styled(
+        "padrões que pedem treino",
+        Style::default().fg(color(&theme.text)),
+    )];
+    if patterns.is_empty() {
+        lines.push(Line::styled(
+            "sem evidência em palavras distintas",
+            Style::default().fg(color(&theme.sub)),
+        ));
+    } else {
+        lines.push(Line::styled(
+            "tipo/padrão       falha corr exp ctx",
+            Style::default().fg(color(&theme.sub)),
+        ));
+        lines.extend(
+            patterns
+                .iter()
+                .take(area.height.saturating_sub(2) as usize)
+                .map(|pattern| {
+                    let kind = if pattern.kind == "mecânica" {
+                        "mec"
+                    } else {
+                        "seq"
+                    };
+                    let label = format!("{kind} {}", pattern.pattern)
+                        .graphemes(true)
+                        .take(16)
+                        .collect::<String>();
+                    Line::from(vec![
+                        Span::styled(
+                            format!("{label:<18}"),
+                            Style::default().fg(color(&theme.main)),
+                        ),
+                        Span::styled(
+                            format!("{:>4.0}% ", pattern.uncorrected_error_rate * 100.0),
+                            Style::default().fg(color(&theme.error)),
+                        ),
+                        Span::styled(
+                            format!("{:>3.0}% ", pattern.corrected_error_rate * 100.0),
+                            Style::default().fg(color(&theme.sub)),
+                        ),
+                        Span::styled(
+                            format!("{:>3.0} ", pattern.effective_exposures),
+                            Style::default().fg(color(&theme.sub)),
+                        ),
+                        Span::styled(
+                            pattern.distinct_words.to_string(),
                             Style::default().fg(color(&theme.sub)),
                         ),
                     ])
@@ -1293,17 +1306,6 @@ fn result_descriptor(engine: &TestEngine, icones: Icons) -> String {
     )
 }
 
-fn format_duration(duration_ms: u64) -> String {
-    let total_seconds = duration_ms / 1_000;
-    let minutes = total_seconds / 60;
-    let seconds = total_seconds % 60;
-    if minutes == 0 {
-        format!("{seconds}s")
-    } else {
-        format!("{minutes}m {seconds:02}s")
-    }
-}
-
 fn language_name(language: &str) -> &str {
     match language {
         "portuguese" => "português",
@@ -1595,7 +1597,26 @@ mod tests {
                                 kind: crate::persistence::SessionKind::Assessment,
                             })
                             .collect(),
-                        priority_words: Vec::new(),
+                        priority_words: vec![PriorityWord {
+                            word: "através".into(),
+                            difficulty: 0.4,
+                            confirmed_errors: 3.0,
+                            corrections: 2.0,
+                            observations: 12,
+                            effective_exposures: 10.0,
+                            uncorrected_error_rate: 0.3,
+                            corrected_error_rate: 0.2,
+                            estimated_session_chance: 0.18,
+                        }],
+                        priority_patterns: vec![PriorityPattern {
+                            pattern: "acento agudo".into(),
+                            kind: "mecânica",
+                            difficulty: 0.3,
+                            effective_exposures: 14.0,
+                            uncorrected_error_rate: 0.21,
+                            corrected_error_rate: 0.14,
+                            distinct_words: 5,
+                        }],
                         total_xp: 0,
                         level: 0,
                         streak: 0,
