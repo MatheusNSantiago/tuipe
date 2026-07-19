@@ -94,6 +94,7 @@ pub fn render(
 
 pub fn render_statistics(frame: &mut Frame, statistics: &StatisticsOverview, theme: &Theme) {
     let viewport = frame.area();
+    frame.render_widget(Clear, viewport);
     frame.render_widget(
         Block::default().style(Style::default().bg(color(&theme.bg))),
         viewport,
@@ -1469,6 +1470,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
             .draw(|frame| {
+                frame.render_widget(Paragraph::new("resíduo da tela anterior"), frame.area());
                 render_statistics(
                     frame,
                     &StatisticsOverview {
