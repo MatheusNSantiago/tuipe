@@ -6,23 +6,23 @@ expression: "render_engine_at(100, 28, &engine)"
 
 
 
-                        wpm  7                                   precisão  100%
-
-
      wpm ao longo do tempo   × erros
        40│
          │
-         │⢦                         ⣀⣀⣀
-       20│ ⠱⣄                      ⡜   ⠉⠉⠙⠒⠒⠒⠢⠤⠤⠤⢤⣀⣀⣀⣀⣀⡀
-         │  ⠈⠑⠲⠤⣄⣀⣀               ⡰⠁                   ⠈⠉⠉⠉⠉⠉⠉⠉⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠦⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⢤⣀⣀⣀⣀⣀⣀⣀
-         │        ⠈⠉⠉⠉⠉⠑⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠁
+         │
+         │⡄
+       20│⠘⡄                       ⢠⠋⠑⠒⠤⢤⣀⣀
+         │ ⠘⣄                      ⡎       ⠉⠉⠓⠒⠒⠦⠤⠤⣄⣀⣀⣀⡀
+         │  ⠈⠲⢄⡀                  ⢠⠃                   ⠉⠉⠉⠉⠙⠒⠒⠒⠒⠒⠦⠤⠤⠤⠤⠤⠤⣀⣀⣀⣀⣀⣀⣀⣀⣀
+         │     ⠈⠙⠒⠢⠤⢤⣀⣀⣀⣀         ⡎                                             ⠈⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠓⠒⠒
+         │              ⠈⠉⠉⠉⠉⠉⠉⠙⠒⠚
         0└─────────────────────────────────────────────────────────────────────────────────────
          1                                        15.5                                       30
 
-     tipo de teste          bruto         caracteres         consistência       tempo
-     tempo 30               7             18/0/0/0           0%                 30.0s
-     ◎ português comum
-     ★ especialista
+     tipo de teste         wpm                   bruto     caracteres   consistência  tempo
+     tempo 30              7                     7         18/0/0/0     0%            30.0s
+     ◎ português           precisão
+     ★ especialista        100%
 
 
 

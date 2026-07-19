@@ -14,23 +14,23 @@ expression: "render_engine_at(70, 50, &engine)"
 
 
 
-                wpm  71                      precisão  92%
-
-
    wpm ao longo do tempo   × erros
-    120│⠉⠉⠒⠒⠒⠒⠒⠒⠒⠢⠤⠤⠤⠤⠤⠤⠤⣀⣀⣀⡀
-       │                    ⠈⠉⠉⠉⠉⠉⠉⠉⠒⠒⠒⠒⠒⠒⠒⠤⠤⠤⢄⣀⣀⣀⣀⣀⣀⣀
-       │                                              ⠉⠉⠉⠉⠉⠉⠉⠑⠒⠒⠒⠒×
+    120│⠉⠉⠒⠒⠒⠒⠤⠤⠤⢄⣀⣀⣀
+       │             ⠉⠉⠉⠉⠒⠒⠒⠒⠒⠒⠒⠤⠤⠤⠤⣀⣀⣀⡀
+       │                               ⠈⠉⠉⠉⠒⠒⠒⠢⠤⠤⠤⢄⣀⣀⣀
+       │                                              ⠉⠉⠉⠑⠒⠒⠒⠢⠤⠤⠤⠤×
      60│
+       │
+       │
        │
        │
       0└───────────────────────────────────────────────────────────
        1                                                        1.7
 
-   tipo de teste         outro                 bruto
-   palavras 4            falhou (dificuldade)  92
-   ◎ português comum
-   ★ especialista
+   tipo de teste         wpm                   bruto
+   palavras 4            71                    92
+   ◎ português           precisão
+   ★ especialista        92%
 
    caracteres            consistência          tempo
    10/1/0/1              46%                   1.7s

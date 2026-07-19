@@ -512,8 +512,7 @@ const fn first_visible_line(active_line: usize) -> usize {
 
 fn render_result(frame: &mut Frame, area: Rect, engine: &TestEngine, theme: &Theme, icones: Icons) {
     let metrics = engine.metrics();
-    let failed = matches!(engine.status(), TestStatus::Failed { .. });
-    let group_count = if failed { 6 } else { 5 };
+    let group_count = 6;
     let details_height = result_details_height(area.width, group_count);
     let body = centered_height(
         area,
@@ -525,9 +524,7 @@ fn render_result(frame: &mut Frame, area: Rect, engine: &TestEngine, theme: &The
         .max(5)
         .min(body.height);
     let top = Rect::new(body.x, body.y, body.width, top_height);
-    let resumo_e_grafico = Layout::vertical([Constraint::Length(3), Constraint::Min(4)]).split(top);
-    render_primary_result(frame, resumo_e_grafico[0], &metrics, theme);
-    render_result_chart(frame, resumo_e_grafico[1], &metrics, theme);
+    render_result_chart(frame, top, &metrics, theme);
 
     let details_top = top.bottom().saturating_add(1);
     render_result_details(
@@ -543,38 +540,6 @@ fn render_result(frame: &mut Frame, area: Rect, engine: &TestEngine, theme: &The
         theme,
         icones,
     );
-}
-
-fn render_primary_result(frame: &mut Frame, area: Rect, metrics: &Metrics, theme: &Theme) {
-    let grupos =
-        Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).split(area);
-    render_metric_group(
-        frame,
-        grupos[0],
-        "wpm",
-        format!("{:.0}", metrics.wpm),
-        theme,
-    );
-    render_metric_group(
-        frame,
-        grupos[1],
-        "precisão",
-        format!("{:.0}%", metrics.accuracy),
-        theme,
-    );
-}
-
-fn render_metric_group(frame: &mut Frame, area: Rect, label: &str, value: String, theme: &Theme) {
-    let line = Line::from(vec![
-        Span::styled(format!("{label}  "), Style::default().fg(color(&theme.sub))),
-        Span::styled(
-            value,
-            Style::default()
-                .fg(color(&theme.main))
-                .add_modifier(Modifier::BOLD),
-        ),
-    ]);
-    frame.render_widget(Paragraph::new(line).alignment(Alignment::Center), area);
 }
 
 fn render_result_chart(frame: &mut Frame, area: Rect, metrics: &Metrics, theme: &Theme) {
@@ -758,16 +723,9 @@ fn render_result_details(
     icones: Icons,
 ) {
     let stats = metrics.characters;
-    let failed = matches!(engine.status(), TestStatus::Failed { .. });
-    let mut details = vec![result_group_lines(
-        "tipo de teste",
-        result_descriptor(engine, icones),
-        theme,
-    )];
-    if failed {
-        details.push(failure_group_lines(theme));
-    }
-    details.extend([
+    let details = vec![
+        result_group_lines("tipo de teste", result_descriptor(engine, icones), theme),
+        result_metrics_lines(metrics, theme),
         result_group_lines("bruto", format!("{:.0}", metrics.raw_wpm), theme),
         result_group_lines(
             "caracteres",
@@ -787,7 +745,7 @@ fn render_result_details(
             format!("{:.1}s", metrics.duration_ms as f64 / 1_000.0),
             theme,
         ),
-    ]);
+    ];
 
     for (group_area, lines) in result_detail_areas(area, details.len())
         .into_iter()
@@ -868,12 +826,21 @@ fn result_group_lines(name: &str, result: String, theme: &Theme) -> Vec<Line<'st
     lines
 }
 
-fn failure_group_lines(theme: &Theme) -> Vec<Line<'static>> {
+fn result_metrics_lines(metrics: &Metrics, theme: &Theme) -> Vec<Line<'static>> {
     vec![
-        Line::styled("outro", Style::default().fg(color(&theme.sub))),
+        Line::styled("wpm", Style::default().fg(color(&theme.sub))),
         Line::styled(
-            "falhou (dificuldade)",
-            Style::default().fg(color(&theme.error)),
+            format!("{:.0}", metrics.wpm),
+            Style::default()
+                .fg(color(&theme.main))
+                .add_modifier(Modifier::BOLD),
+        ),
+        Line::styled("precisão", Style::default().fg(color(&theme.sub))),
+        Line::styled(
+            format!("{:.0}%", metrics.accuracy),
+            Style::default()
+                .fg(color(&theme.main))
+                .add_modifier(Modifier::BOLD),
         ),
     ]
 }
@@ -1026,10 +993,9 @@ fn test_descriptor(engine: &TestEngine, icones: Icons) -> String {
         modifiers.push("números");
     }
     format!(
-        "{} {} {} · {} {}",
+        "{} {} · {} {}",
         icones.idioma,
-        language_name(&config.language),
-        word_pack_name(&config.word_pack),
+        language_descriptor(&config.language, &config.word_pack),
         icones.dificuldade,
         modifiers.join(" · ")
     )
@@ -1050,10 +1016,9 @@ fn result_descriptor(engine: &TestEngine, icones: Icons) -> String {
         modifiers.push("números");
     }
     format!(
-        "{mode}\n{} {} {}\n{} {}",
+        "{mode}\n{} {}\n{} {}",
         icones.idioma,
-        language_name(&config.language),
-        word_pack_name(&config.word_pack),
+        language_descriptor(&config.language, &config.word_pack),
         icones.dificuldade,
         modifiers.join(" · ")
     )
@@ -1067,10 +1032,10 @@ fn language_name(language: &str) -> &str {
     }
 }
 
-fn word_pack_name(pack: &str) -> &str {
+fn language_descriptor(language: &str, pack: &str) -> String {
     match pack {
-        "common" => "comum",
-        _ => pack,
+        "common" => language_name(language).into(),
+        _ => format!("{} {pack}", language_name(language)),
     }
 }
 
