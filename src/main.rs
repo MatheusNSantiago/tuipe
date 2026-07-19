@@ -25,7 +25,7 @@ use tuipe::{
     adaptive::{AdaptivePolicy, AdaptiveSampler, Observation},
     content::{ContentCatalog, WordGenerator},
     persistence::{
-        Preferences, RawEventCodec, RawSessionEnd, Repository, StatisticsOverview,
+        Preferences, RawEventCodec, RawSessionEnd, Repository, SessionKind, StatisticsOverview,
         WordObservationRecord, paths,
     },
     typing::{
@@ -80,6 +80,7 @@ struct App {
     adaptive: AdaptiveSampler,
     seed: u64,
     repeated_test: bool,
+    session_kind: SessionKind,
 }
 
 impl App {
@@ -94,11 +95,13 @@ impl App {
             AdaptivePolicy::default(),
             repository.load_all_word_skills()?,
         );
+        adaptive.set_ngram_skills(repository.load_all_ngram_skills()?);
         for language in ["portuguese", "english"] {
             adaptive.set_baseline(language, repository.baseline_profile(language)?.rates);
         }
+        let session_kind = repository.next_session_kind(&preferences.test)?;
         let (engine, generator, selections) =
-            new_test(&catalog, &preferences.test, seed, &adaptive)?;
+            new_test(&catalog, &preferences.test, seed, &adaptive, session_kind)?;
         Ok(Self {
             preferences,
             catalog,
@@ -114,6 +117,7 @@ impl App {
             adaptive,
             seed,
             repeated_test: false,
+            session_kind,
         })
     }
 
@@ -123,12 +127,13 @@ impl App {
         }
         let raw_events =
             RawEventCodec::materialize(self.engine.recorded_events(), self.elapsed_ms(), end);
-        repository.save_session_full(
+        repository.save_session_full_kind(
             self.engine.config(),
             self.engine.status(),
             self.engine.metrics(),
             &[],
             &raw_events,
+            self.session_kind,
         )?;
         self.persisted = true;
         Ok(())
@@ -143,11 +148,13 @@ impl App {
                 .rates,
         );
         self.seed = rand::random();
+        let session_kind = repository.next_session_kind(&self.preferences.test)?;
         let (engine, generator, selections) = new_test(
             &self.catalog,
             &self.preferences.test,
             self.seed,
             &self.adaptive,
+            session_kind,
         )?;
         self.engine = engine;
         self.generator = generator;
@@ -155,6 +162,7 @@ impl App {
         self.started = Instant::now();
         self.persisted = false;
         self.repeated_test = false;
+        self.session_kind = session_kind;
         Ok(())
     }
 
@@ -165,6 +173,7 @@ impl App {
             &self.preferences.test,
             self.seed,
             &self.adaptive,
+            SessionKind::Repeat,
         )?;
         self.engine = engine;
         self.generator = generator;
@@ -172,6 +181,7 @@ impl App {
         self.started = Instant::now();
         self.persisted = false;
         self.repeated_test = true;
+        self.session_kind = SessionKind::Repeat;
         Ok(())
     }
 
@@ -274,12 +284,15 @@ impl App {
                         .is_some_and(|baseline| active_per_grapheme <= baseline * 0.8);
                 let slow = latency_baseline
                     .is_some_and(|baseline| active_per_grapheme >= baseline * 1.5);
-                let evidence_weight = 1.0
-                    / occurrences
+                let evidence_weight = if self.repeated_test {
+                    0.0
+                } else {
+                    1.0 / occurrences
                         .get(&word)
                         .copied()
                         .unwrap_or(1)
-                        .max(1) as f64;
+                        .max(1) as f64
+                };
                 let selection = (!self.repeated_test)
                     .then(|| self.selections.get(word_index).cloned().flatten())
                     .flatten();
@@ -546,12 +559,13 @@ fn run(
             };
             let raw_events =
                 RawEventCodec::materialize(app.engine.recorded_events(), ended_at_ms, end);
-            repository.save_session_full(
+            repository.save_session_full_kind(
                 app.engine.config(),
                 app.engine.status(),
                 app.engine.metrics(),
                 &observations,
                 &raw_events,
+                app.session_kind,
             )?;
             app.apply_observations(&observations);
             app.persisted = true;
@@ -814,16 +828,19 @@ fn next<T: Copy + PartialEq>(values: &[T], current: T) -> T {
     values[(index + 1) % values.len()]
 }
 
+type GeneratedTest = (
+    TestEngine,
+    Option<WordGenerator<SmallRng>>,
+    Vec<Option<tuipe::adaptive::WordSelection>>,
+);
+
 fn new_test(
     catalog: &ContentCatalog,
     config: &tuipe::typing::TestConfig,
     seed: u64,
     adaptive: &AdaptiveSampler,
-) -> Result<(
-    TestEngine,
-    Option<WordGenerator<SmallRng>>,
-    Vec<Option<tuipe::adaptive::WordSelection>>,
-)> {
+    session_kind: SessionKind,
+) -> Result<GeneratedTest> {
     let mut rng = SmallRng::seed_from_u64(seed);
     let (words, generator, selections) = match config.mode {
         TestMode::Quote => {
@@ -838,12 +855,12 @@ fn new_test(
             (without_last_commit(words), None, selections)
         }
         TestMode::Words { count } => {
-            let mut generator = word_generator(catalog, config, rng, adaptive)?;
+            let mut generator = word_generator(catalog, config, rng, adaptive, session_kind)?;
             let (words, selections) = generate(&mut generator, usize::from(count));
             (without_last_commit(words), None, selections)
         }
         TestMode::Time { .. } => {
-            let mut generator = word_generator(catalog, config, rng, adaptive)?;
+            let mut generator = word_generator(catalog, config, rng, adaptive, session_kind)?;
             let (words, selections) = generate(&mut generator, 40);
             (words, Some(generator), selections)
         }
@@ -860,13 +877,17 @@ fn word_generator(
     config: &tuipe::typing::TestConfig,
     rng: SmallRng,
     adaptive: &AdaptiveSampler,
+    session_kind: SessionKind,
 ) -> Result<WordGenerator<SmallRng>> {
     let words = catalog
         .word_pack(&config.language, &config.word_pack)
         .context("configured word pack is unavailable")?;
     let generator = WordGenerator::new(words, rng, config.punctuation, config.numbers);
     Ok(
-        if config.adaptive && !matches!(config.mode, TestMode::Quote) {
+        if config.adaptive
+            && !matches!(config.mode, TestMode::Quote)
+            && session_kind != SessionKind::Assessment
+        {
             generator.with_adaptive(&config.language, adaptive.clone())
         } else {
             generator

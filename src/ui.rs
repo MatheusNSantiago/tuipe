@@ -152,9 +152,20 @@ fn render_statistics_chart(
     if area.height < 4 {
         return;
     }
+    let assessments_only = !sessions.is_empty()
+        && sessions
+            .iter()
+            .all(|session| session.kind == crate::persistence::SessionKind::Assessment);
     frame.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled("wpm por teste", Style::default().fg(color(&theme.text))),
+            Span::styled(
+                if assessments_only {
+                    "wpm em avaliações"
+                } else {
+                    "wpm por teste"
+                },
+                Style::default().fg(color(&theme.text)),
+            ),
             Span::styled(
                 format!("  ·  {} testes mais recentes", sessions.len()),
                 Style::default().fg(color(&theme.sub)),
@@ -1581,6 +1592,7 @@ mod tests {
                                 incorrect_chars: 0,
                                 extra_chars: 0,
                                 config: TestConfig::default(),
+                                kind: crate::persistence::SessionKind::Assessment,
                             })
                             .collect(),
                         priority_words: Vec::new(),

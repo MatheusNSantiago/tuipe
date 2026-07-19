@@ -4,13 +4,35 @@ use anyhow::Result;
 use chrono::{Datelike, Local};
 use rusqlite::{Connection, OptionalExtension, params};
 
-use crate::adaptive::{Observation, PersonalBaseline, SelectionSource, WordSkill};
+use crate::adaptive::{
+    NgramSkill, Observation, PersonalBaseline, SelectionSource, WordSkill, lexical_ngrams,
+};
 use crate::gamification::{StreakState, XpGain, XpState, award};
 use crate::persistence::{RawEvent, RawEventCodec};
 use crate::typing::{Metrics, TestConfig, TestStatus};
 
 pub struct Repository {
     connection: Connection,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SessionKind {
+    #[default]
+    Practice,
+    Assessment,
+    Transfer,
+    Repeat,
+}
+
+impl SessionKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Practice => "practice",
+            Self::Assessment => "assessment",
+            Self::Transfer => "transfer",
+            Self::Repeat => "repeat",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -38,6 +60,7 @@ pub struct SessionSummary {
     pub incorrect_chars: u32,
     pub extra_chars: u32,
     pub config: TestConfig,
+    pub kind: SessionKind,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -143,6 +166,25 @@ impl Repository {
         observations: &[WordObservationRecord],
         raw_events: &[RawEvent],
     ) -> Result<i64> {
+        self.save_session_full_kind(
+            config,
+            status,
+            metrics,
+            observations,
+            raw_events,
+            SessionKind::Practice,
+        )
+    }
+
+    pub fn save_session_full_kind(
+        &self,
+        config: &TestConfig,
+        status: &TestStatus,
+        metrics: Metrics,
+        observations: &[WordObservationRecord],
+        raw_events: &[RawEvent],
+        kind: SessionKind,
+    ) -> Result<i64> {
         let terminal_state = match status {
             TestStatus::Ready => "ready",
             TestStatus::Running { .. } => "restart",
@@ -154,8 +196,8 @@ impl Repository {
             "INSERT INTO sessions (
                 terminal_state, config_toml, elapsed_ms, wpm, raw_wpm, accuracy,
                 correct_chars, incorrect_chars, extra_chars, missed_chars,
-                metrics_version, adaptive_version, codec_version
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 1, 2, ?11)",
+                metrics_version, adaptive_version, codec_version, session_kind
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 1, 2, ?11, ?12)",
             params![
                 terminal_state,
                 toml::to_string(config)?,
@@ -168,6 +210,7 @@ impl Repository {
                 metrics.characters.extra,
                 metrics.characters.missed,
                 RawEventCodec::VERSION,
+                kind.as_str(),
             ],
         )?;
         let session_id = transaction.last_insert_rowid();
@@ -222,21 +265,40 @@ impl Repository {
                 .map(|bytes| WordSkill::decode(&bytes))
                 .transpose()?
                 .unwrap_or_default();
-            let mut skill = previous;
-            skill.observe(Observation {
+            let observation = Observation {
                 confirmed_error: record.confirmed_error,
                 corrected: record.corrections > 0,
                 fast_success: record.fast_success,
                 slow: record.slow,
                 latency_ratio: record.latency_ratio,
                 evidence_weight: record.evidence_weight,
-            });
+            };
+            let mut skill = previous;
+            skill.observe(observation);
             let state = postcard::to_allocvec(&skill)?;
             transaction.execute(
                 "INSERT INTO word_skill (language, word, state) VALUES (?1, ?2, ?3)
                  ON CONFLICT(language, word) DO UPDATE SET state = excluded.state",
                 params![record.language, record.word, state],
             )?;
+            for ngram in lexical_ngrams(&record.word) {
+                let mut ngram_skill = transaction
+                    .query_row(
+                        "SELECT state FROM ngram_skill WHERE language = ?1 AND ngram = ?2",
+                        params![record.language, ngram],
+                        |row| row.get::<_, Vec<u8>>(0),
+                    )
+                    .optional()?
+                    .map(|bytes| postcard::from_bytes::<NgramSkill>(&bytes))
+                    .transpose()?
+                    .unwrap_or_default();
+                ngram_skill.observe(&record.word, observation);
+                transaction.execute(
+                    "INSERT INTO ngram_skill (language, ngram, state) VALUES (?1, ?2, ?3)
+                     ON CONFLICT(language, ngram) DO UPDATE SET state = excluded.state",
+                    params![record.language, ngram, postcard::to_allocvec(&ngram_skill)?,],
+                )?;
+            }
         }
         transaction.commit()?;
         if matches!(status, TestStatus::Completed { .. }) {
@@ -317,6 +379,27 @@ impl Repository {
         ))
     }
 
+    /// Avaliações aparecem automaticamente e nunca dependem de uma escolha na
+    /// interface. A primeira só ocorre depois de sete sessões completas.
+    pub fn next_session_kind(&self, config: &TestConfig) -> Result<SessionKind> {
+        if matches!(config.mode, crate::typing::TestMode::Quote) {
+            return Ok(SessionKind::Transfer);
+        }
+        if !config.adaptive {
+            return Ok(SessionKind::Practice);
+        }
+        let completed = self.connection.query_row(
+            "SELECT COUNT(*) FROM sessions WHERE terminal_state = 'completed'",
+            [],
+            |row| row.get::<_, u64>(0),
+        )?;
+        Ok(if completed > 0 && (completed + 1).is_multiple_of(8) {
+            SessionKind::Assessment
+        } else {
+            SessionKind::Practice
+        })
+    }
+
     fn award_completed_session(&self, config: &TestConfig, metrics: &Metrics) -> Result<XpGain> {
         let (mut xp, mut streak) = self.progress()?;
         let day = Local::now().date_naive().num_days_from_ce();
@@ -385,13 +468,38 @@ impl Repository {
             .collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    pub fn load_all_ngram_skills(&self) -> Result<Vec<(String, String, NgramSkill)>> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT language, ngram, state FROM ngram_skill")?;
+        Ok(statement
+            .query_map([], |row| {
+                let encoded = row.get::<_, Vec<u8>>(2)?;
+                let skill = postcard::from_bytes(&encoded).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        encoded.len(),
+                        rusqlite::types::Type::Blob,
+                        Box::new(error),
+                    )
+                })?;
+                Ok((row.get(0)?, row.get(1)?, skill))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     pub fn statistics_overview(&self) -> Result<StatisticsOverview> {
         let mut overview = self.connection.query_row(
             "SELECT
                 COUNT(*),
                 COALESCE(SUM(elapsed_ms), 0),
-                COALESCE(AVG(wpm), 0),
-                COALESCE(AVG(accuracy), 0),
+                COALESCE(
+                    AVG(CASE WHEN session_kind = 'assessment' THEN wpm END),
+                    AVG(wpm), 0
+                ),
+                COALESCE(
+                    AVG(CASE WHEN session_kind = 'assessment' THEN accuracy END),
+                    AVG(accuracy), 0
+                ),
                 COALESCE(MAX(wpm), 0)
              FROM sessions
              WHERE terminal_state = 'completed'",
@@ -411,16 +519,24 @@ impl Repository {
                 })
             },
         )?;
+        let assessment_count = self.connection.query_row(
+            "SELECT COUNT(*) FROM sessions
+             WHERE terminal_state = 'completed' AND session_kind = 'assessment'",
+            [],
+            |row| row.get::<_, u64>(0),
+        )?;
+        let assessments_only = assessment_count >= 2;
         let mut statement = self.connection.prepare(
             "SELECT id, elapsed_ms, wpm, accuracy, raw_wpm, correct_chars,
-                    incorrect_chars, extra_chars, config_toml
+                    incorrect_chars, extra_chars, config_toml, session_kind
              FROM sessions
              WHERE terminal_state = 'completed'
+               AND (?1 = 0 OR session_kind = 'assessment')
              ORDER BY id DESC
              LIMIT 12",
         )?;
         overview.recent_tests = statement
-            .query_map([], |row| {
+            .query_map([assessments_only], |row| {
                 Ok(SessionSummary {
                     id: row.get::<_, i64>(0)? as u64,
                     elapsed_ms: row.get::<_, i64>(1)? as u64,
@@ -437,6 +553,7 @@ impl Repository {
                             Box::new(error),
                         )
                     })?,
+                    kind: session_kind_from_db(&row.get::<_, String>(9)?),
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -501,7 +618,8 @@ fn migrate(connection: &Connection) -> Result<()> {
            wpm REAL NOT NULL, raw_wpm REAL NOT NULL, accuracy REAL NOT NULL,
            correct_chars INTEGER NOT NULL, incorrect_chars INTEGER NOT NULL,
            extra_chars INTEGER NOT NULL, missed_chars INTEGER NOT NULL,
-           metrics_version INTEGER NOT NULL, adaptive_version INTEGER NOT NULL, codec_version INTEGER NOT NULL
+           metrics_version INTEGER NOT NULL, adaptive_version INTEGER NOT NULL, codec_version INTEGER NOT NULL,
+           session_kind TEXT NOT NULL DEFAULT 'practice'
          );
          CREATE TABLE IF NOT EXISTS word_observations (
            id INTEGER PRIMARY KEY, session_id INTEGER NOT NULL REFERENCES sessions(id),
@@ -545,6 +663,12 @@ fn migrate(connection: &Connection) -> Result<()> {
             [],
         )?;
     }
+    if !table_has_column(connection, "sessions", "session_kind")? {
+        connection.execute(
+            "ALTER TABLE sessions ADD COLUMN session_kind TEXT NOT NULL DEFAULT 'practice'",
+            [],
+        )?;
+    }
     if !table_has_column(connection, "word_observations", "evidence_weight")? {
         connection.execute(
             "ALTER TABLE word_observations ADD COLUMN evidence_weight REAL NOT NULL DEFAULT 1",
@@ -565,6 +689,15 @@ fn migrate(connection: &Connection) -> Result<()> {
     }
     connection.execute("UPDATE schema_version SET version = 2", [])?;
     Ok(())
+}
+
+fn session_kind_from_db(value: &str) -> SessionKind {
+    match value {
+        "assessment" => SessionKind::Assessment,
+        "transfer" => SessionKind::Transfer,
+        "repeat" => SessionKind::Repeat,
+        _ => SessionKind::Practice,
+    }
 }
 
 fn table_has_column(connection: &Connection, table: &str, column: &str) -> Result<bool> {
@@ -643,6 +776,7 @@ mod tests {
                     incorrect_chars: 0,
                     extra_chars: 0,
                     config: TestConfig::default(),
+                    kind: SessionKind::Practice,
                 }],
                 priority_words: Vec::new(),
                 total_xp: 27,
@@ -742,6 +876,30 @@ mod tests {
         assert_eq!(
             repository.baseline_ms_per_grapheme("portuguese").unwrap(),
             Some(200.0)
+        );
+    }
+
+    #[test]
+    fn avaliacao_ancora_e_agendada_sem_escolha_do_usuario() {
+        let temporary = tempfile::tempdir().unwrap();
+        let repository = Repository::open(&temporary.path().join("history.db")).unwrap();
+        let config = TestConfig::default();
+        assert_eq!(
+            repository.next_session_kind(&config).unwrap(),
+            SessionKind::Practice
+        );
+        for ended_at_ms in 1..=7 {
+            repository
+                .save_session(
+                    &config,
+                    &TestStatus::Completed { ended_at_ms },
+                    Metrics::default(),
+                )
+                .unwrap();
+        }
+        assert_eq!(
+            repository.next_session_kind(&config).unwrap(),
+            SessionKind::Assessment
         );
     }
 }

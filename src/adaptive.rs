@@ -89,6 +89,28 @@ pub struct WordSkill {
     pub latency_weight: f64,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct NgramSkill {
+    pub effective_exposures: f64,
+    pub uncorrected_error_mass: f64,
+    pub corrected_error_mass: f64,
+    /// Amostra limitada de palavras distintas que sustenta a generalização.
+    pub distinct_words: Vec<String>,
+}
+
+impl NgramSkill {
+    pub fn observe(&mut self, word: &str, observation: Observation) {
+        if !self.distinct_words.iter().any(|seen| seen == word) && self.distinct_words.len() < 32 {
+            self.distinct_words.push(word.to_owned());
+        }
+        let weight = observation.evidence_weight.clamp(0.0, 1.0);
+        self.effective_exposures += weight;
+        self.uncorrected_error_mass += f64::from(observation.confirmed_error) * weight;
+        self.corrected_error_mass +=
+            f64::from(observation.corrected && !observation.confirmed_error) * weight;
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 struct LegacyWordSkill {
     confirmed_errors: f64,
@@ -201,6 +223,28 @@ impl AdaptivePolicy {
     pub fn weight(&self, skill: Option<&WordSkill>) -> f64 {
         self.weight_with_baseline(skill, PersonalBaseline::default())
     }
+
+    pub fn ngram_difficulty(&self, skill: &NgramSkill, baseline: PersonalBaseline) -> f64 {
+        if skill.distinct_words.len() < 3 || skill.effective_exposures <= 0.0 {
+            return 0.0;
+        }
+        let uncorrected = posterior_excess(
+            baseline.uncorrected_error_rate,
+            self.prior_strength,
+            skill.uncorrected_error_mass,
+            skill.effective_exposures,
+            self.minimum_error_effect,
+        );
+        let corrected = posterior_excess(
+            baseline.corrected_error_rate,
+            self.prior_strength,
+            skill.corrected_error_mass,
+            skill.effective_exposures,
+            self.minimum_correction_effect,
+        ) * self.corrected_error_cost;
+        let confidence = 1.0 - (-skill.effective_exposures / 12.0).exp();
+        1.0 - (-(uncorrected + corrected) * confidence * 10.0).exp()
+    }
 }
 
 fn posterior_excess(
@@ -260,6 +304,7 @@ pub struct AdaptiveSampler {
     policy: AdaptivePolicy,
     skills: HashMap<(String, String), WordSkill>,
     baselines: HashMap<String, PersonalBaseline>,
+    ngram_skills: HashMap<(String, String), NgramSkill>,
 }
 
 impl AdaptiveSampler {
@@ -268,6 +313,7 @@ impl AdaptiveSampler {
             policy,
             skills: HashMap::new(),
             baselines: HashMap::new(),
+            ngram_skills: HashMap::new(),
         }
     }
 
@@ -282,7 +328,18 @@ impl AdaptiveSampler {
                 .map(|(language, word, skill)| ((language, word), skill))
                 .collect(),
             baselines: HashMap::new(),
+            ngram_skills: HashMap::new(),
         }
+    }
+
+    pub fn set_ngram_skills(
+        &mut self,
+        skills: impl IntoIterator<Item = (String, String, NgramSkill)>,
+    ) {
+        self.ngram_skills = skills
+            .into_iter()
+            .map(|(language, ngram, skill)| ((language, ngram), skill))
+            .collect();
     }
 
     pub fn set_baseline(&mut self, language: impl Into<String>, baseline: PersonalBaseline) {
@@ -365,6 +422,12 @@ impl AdaptiveSampler {
             .entry((language.into(), word.into()))
             .or_default()
             .observe(observation);
+        for ngram in lexical_ngrams(word) {
+            self.ngram_skills
+                .entry((language.into(), ngram))
+                .or_default()
+                .observe(word, observation);
+        }
     }
 
     pub fn skill(&self, language: &str, word: &str) -> Option<&WordSkill> {
@@ -403,11 +466,7 @@ impl AdaptiveSampler {
         let targeted = normalized_or_uniform(
             eligible
                 .iter()
-                .map(|word| {
-                    self.skill(language, word).map_or(0.0, |skill| {
-                        self.policy.difficulty_with_baseline(skill, baseline)
-                    })
-                })
+                .map(|word| self.candidate_difficulty(language, word, baseline))
                 .collect(),
             &uniform,
         );
@@ -479,21 +538,27 @@ impl AdaptiveSampler {
         1.0 / (self.policy.prior_strength + skill.effective_exposures).sqrt()
     }
 
+    fn candidate_difficulty(&self, language: &str, word: &str, baseline: PersonalBaseline) -> f64 {
+        let lexical = self.skill(language, word).map_or(0.0, |skill| {
+            self.policy.difficulty_with_baseline(skill, baseline)
+        });
+        let motor = lexical_ngrams(word)
+            .into_iter()
+            .filter_map(|ngram| self.ngram_skills.get(&(language.into(), ngram)))
+            .map(|skill| self.policy.ngram_difficulty(skill, baseline))
+            .fold(0.0, f64::max);
+        (lexical + motor * 0.45).min(1.0)
+    }
+
     fn transfer_weights(&self, language: &str) -> HashMap<String, f64> {
         let baseline = self.baseline(language);
-        let mut difficult = self
-            .skills_for_language(language)
-            .into_iter()
-            .filter_map(|(word, skill)| {
-                let difficulty = self.policy.difficulty_with_baseline(&skill, baseline);
-                (difficulty > 0.0).then_some((word, difficulty))
-            })
-            .collect::<Vec<_>>();
-        difficult.sort_by(|left, right| right.1.total_cmp(&left.1));
         let mut weights = HashMap::new();
-        for (word, difficulty) in difficult.into_iter().take(32) {
-            for ngram in ngrams(&word) {
-                *weights.entry(ngram).or_insert(0.0) += difficulty;
+        for ((skill_language, ngram), skill) in &self.ngram_skills {
+            if skill_language == language {
+                let difficulty = self.policy.ngram_difficulty(skill, baseline);
+                if difficulty > 0.0 {
+                    weights.insert(ngram.clone(), difficulty);
+                }
             }
         }
         weights
@@ -516,13 +581,13 @@ fn normalized_or_uniform(mut values: Vec<f64>, uniform: &[f64]) -> Vec<f64> {
 }
 
 fn transfer_value(word: &str, weights: &HashMap<String, f64>) -> f64 {
-    ngrams(word)
+    lexical_ngrams(word)
         .into_iter()
         .map(|ngram| weights.get(&ngram).copied().unwrap_or(0.0))
         .sum()
 }
 
-fn ngrams(word: &str) -> Vec<String> {
+pub fn lexical_ngrams(word: &str) -> Vec<String> {
     let graphemes = word.graphemes(true).collect::<Vec<_>>();
     (2..=3)
         .flat_map(|size| {
@@ -536,6 +601,7 @@ fn ngrams(word: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
     use rand::{SeedableRng, rngs::SmallRng};
 
     use super::*;
@@ -638,5 +704,48 @@ mod tests {
         let sampler = AdaptiveSampler::default();
         let chance = sampler.estimated_session_chance("english", "a", &words, 2);
         assert!((0.0..=1.0).contains(&chance));
+    }
+
+    #[test]
+    fn ngrama_so_generaliza_depois_de_palavras_distintas() {
+        let policy = AdaptivePolicy::default();
+        let observation = Observation {
+            confirmed_error: true,
+            corrected: false,
+            fast_success: false,
+            slow: false,
+            latency_ratio: None,
+            evidence_weight: 1.0,
+        };
+        let mut skill = NgramSkill::default();
+        for _ in 0..10 {
+            skill.observe("primeiro", observation);
+        }
+        assert_eq!(
+            policy.ngram_difficulty(&skill, PersonalBaseline::default()),
+            0.0
+        );
+        skill.observe("principal", observation);
+        skill.observe("privado", observation);
+        assert!(policy.ngram_difficulty(&skill, PersonalBaseline::default()) > 0.0);
+    }
+
+    proptest! {
+        #[test]
+        fn propensao_e_sempre_finita_e_valida(seed in any::<u64>(), size in 3_usize..80) {
+            let words = (0..size).map(|index| format!("palavra{index}")).collect::<Vec<_>>();
+            let sampler = AdaptiveSampler::default();
+            let mut rng = SmallRng::seed_from_u64(seed);
+            let selected = sampler.sample_with_provenance(
+                "portuguese",
+                &words,
+                &[words[0].as_str(), words[1].as_str()],
+                &mut rng,
+            );
+            prop_assert!(selected.propensity.is_finite());
+            prop_assert!(selected.propensity > 0.0 && selected.propensity <= 1.0);
+            prop_assert_ne!(selected.word, words[0].as_str());
+            prop_assert_ne!(selected.word, words[1].as_str());
+        }
     }
 }

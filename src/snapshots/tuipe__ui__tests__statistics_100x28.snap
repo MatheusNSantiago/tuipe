@@ -1,10 +1,10 @@
 ---
 source: src/ui.rs
-assertion_line: 1599
+assertion_line: 1618
 expression: rendered
 ---
      estatísticas
-     wpm por teste  ·  12 testes mais recentes
+     wpm em avaliações  ·  12 testes mais recentes
       100│
          │                                      ⢀       ⡀       ⡀      ⢀       ⠄       ⠄      ⠠
          │⠂      ⠐       ⠈       ⠁      ⠈
