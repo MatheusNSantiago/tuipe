@@ -62,6 +62,11 @@ pub struct WordAttempt {
     pub first_keypress_ms: Option<u64>,
     pub last_keypress_ms: Option<u64>,
     pub corrections: u32,
+    /// Tempo entre teclas limitado por pausa; nunca inclui o período anterior
+    /// à primeira tecla da palavra.
+    pub active_ms: u64,
+    /// Parte dos intervalos entre teclas tratada como ausência do teclado.
+    pub afk_ms: u64,
 }
 
 impl WordAttempt {

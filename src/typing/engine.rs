@@ -186,6 +186,12 @@ impl TestEngine {
         let commit = is_separator(grapheme);
 
         let attempt = &mut self.attempts[word_index];
+        const AFK_THRESHOLD_MS: u64 = 2_000;
+        if let Some(last_keypress_ms) = attempt.last_keypress_ms {
+            let elapsed = at_ms.saturating_sub(last_keypress_ms);
+            attempt.active_ms += elapsed.min(AFK_THRESHOLD_MS);
+            attempt.afk_ms += elapsed.saturating_sub(AFK_THRESHOLD_MS);
+        }
         attempt.input.push_str(grapheme);
         attempt.first_keypress_ms.get_or_insert(at_ms);
         attempt.last_keypress_ms = Some(at_ms);
@@ -466,6 +472,21 @@ mod tests {
         });
         assert_eq!(engine.attempts()[0].input, "");
         assert!(matches!(engine.status(), TestStatus::Running { .. }));
+    }
+
+    #[test]
+    fn separa_pausa_afk_do_tempo_ativo_da_palavra() {
+        let mut engine = engine(Difficulty::Normal, &["casa "]);
+        engine.update(InputEvent::Key {
+            action: KeyAction::Text("c".into()),
+            at_ms: 10,
+        });
+        engine.update(InputEvent::Key {
+            action: KeyAction::Text("a".into()),
+            at_ms: 4_010,
+        });
+        assert_eq!(engine.attempts()[0].active_ms, 2_000);
+        assert_eq!(engine.attempts()[0].afk_ms, 2_000);
     }
 
     #[test]

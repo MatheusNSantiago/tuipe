@@ -185,10 +185,7 @@ impl App {
                     return None;
                 }
                 let word = lexical_word(&target.text)?;
-                let active_ms = attempt
-                    .first_keypress_ms
-                    .zip(attempt.last_keypress_ms)
-                    .map_or(0, |(first, last)| last.saturating_sub(first));
+                let active_ms = attempt.active_ms;
                 let confirmed_error = matches!(
                     self.engine.status(),
                     TestStatus::Failed { word_index: failed_index, .. } if *failed_index == word_index
@@ -203,6 +200,7 @@ impl App {
                     confirmed_error,
                     corrections: attempt.corrections,
                     active_ms,
+                    afk_ms: attempt.afk_ms,
                     fast_success,
                     repeat_discount: if self.repeated_test { 0.5 } else { 1.0 },
                 })

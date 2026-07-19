@@ -57,6 +57,7 @@ pub struct WordObservationRecord {
     pub confirmed_error: bool,
     pub corrections: u32,
     pub active_ms: u64,
+    pub afk_ms: u64,
     pub fast_success: bool,
     pub repeat_discount: f64,
 }
@@ -123,7 +124,7 @@ impl Repository {
                 "INSERT INTO word_observations (
                     session_id, language, word, confirmed_error, corrections,
                     active_ms, afk_ms, fast_success
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7)",
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                 params![
                     session_id,
                     record.language,
@@ -131,6 +132,7 @@ impl Repository {
                     record.confirmed_error,
                     record.corrections,
                     record.active_ms as i64,
+                    record.afk_ms as i64,
                     record.fast_success,
                 ],
             )?;
@@ -471,6 +473,7 @@ mod tests {
                     confirmed_error: true,
                     corrections: 2,
                     active_ms: 320,
+                    afk_ms: 0,
                     fast_success: false,
                     repeat_discount: 1.0,
                 }],
