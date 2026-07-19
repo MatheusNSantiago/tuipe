@@ -17,6 +17,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::{
     content::Theme,
+    persistence::StatisticsOverview,
     typing::{Difficulty, Metrics, QuoteLength, TestEngine, TestMode, TestStatus},
 };
 
@@ -88,6 +89,46 @@ pub fn render(
         settings_open,
         theme_name,
         icones_do_terminal(),
+    );
+}
+
+pub fn render_statistics(frame: &mut Frame, statistics: StatisticsOverview, theme: &Theme) {
+    let viewport = frame.area();
+    frame.render_widget(
+        Block::default().style(Style::default().bg(color(&theme.bg))),
+        viewport,
+    );
+    let content = page_content(viewport);
+    let area = centered_height(content, 13.min(content.height));
+    let title = Line::styled("estatísticas", Style::default().fg(color(&theme.text)));
+    let entries = [
+        ("testes concluídos", statistics.completed_tests.to_string()),
+        ("wpm médio", format!("{:.0}", statistics.average_wpm)),
+        (
+            "precisão média",
+            format!("{:.0}%", statistics.average_accuracy),
+        ),
+        ("melhor wpm", format!("{:.0}", statistics.best_wpm)),
+        ("tempo digitando", format_duration(statistics.active_ms)),
+    ];
+    let mut lines = vec![title, Line::from("")];
+    lines.extend(entries.into_iter().map(|(label, value)| {
+        Line::from(vec![
+            Span::styled(
+                format!("{label:<20}"),
+                Style::default().fg(color(&theme.sub)),
+            ),
+            Span::styled(value, Style::default().fg(color(&theme.main))),
+        ])
+    }));
+    lines.push(Line::from(""));
+    lines.push(Line::styled(
+        "esc voltar",
+        Style::default().fg(color(&theme.sub)),
+    ));
+    frame.render_widget(
+        Paragraph::new(lines).alignment(Alignment::Center),
+        centered_width(area, 34),
     );
 }
 
@@ -855,7 +896,12 @@ fn render_footer(
         ),
         TestStatus::Running { .. } => return,
         TestStatus::Completed { .. } | TestStatus::Failed { .. } => key_hints(
-            &[("enter", "próximo"), ("r", "repetir"), ("q", "sair")],
+            &[
+                ("enter", "próximo"),
+                ("r", "repetir"),
+                ("s", "estatísticas"),
+                ("q", "sair"),
+            ],
             theme,
         ),
     };
@@ -990,7 +1036,7 @@ fn test_descriptor(engine: &TestEngine, icones: Icons) -> String {
 fn result_descriptor(engine: &TestEngine, icones: Icons) -> String {
     let config = engine.config();
     let mode = match config.mode {
-        TestMode::Time { seconds } => format!("tempo {seconds}"),
+        TestMode::Time { seconds } => format!("{} {seconds} segundos", icones.tempo),
         TestMode::Words { count } => format!("palavras {count}"),
         TestMode::Quote => "citação".into(),
     };
@@ -1008,6 +1054,17 @@ fn result_descriptor(engine: &TestEngine, icones: Icons) -> String {
         icones.dificuldade,
         modifiers.join(" · ")
     )
+}
+
+fn format_duration(duration_ms: u64) -> String {
+    let total_seconds = duration_ms / 1_000;
+    let minutes = total_seconds / 60;
+    let seconds = total_seconds % 60;
+    if minutes == 0 {
+        format!("{seconds}s")
+    } else {
+        format!("{minutes}m {seconds:02}s")
+    }
 }
 
 fn language_name(language: &str) -> &str {
@@ -1268,6 +1325,41 @@ mod tests {
             "settings_100x28",
             render_engine_with_settings(100, 28, &engine, true)
         );
+    }
+
+    #[test]
+    fn statistics_overview_remains_readable() {
+        let catalog = ContentCatalog::bundled().unwrap();
+        let theme = catalog.theme("arch").unwrap();
+        let backend = TestBackend::new(100, 28);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                render_statistics(
+                    frame,
+                    StatisticsOverview {
+                        completed_tests: 42,
+                        active_ms: 3_661_000,
+                        average_wpm: 84.0,
+                        average_accuracy: 96.0,
+                        best_wpm: 112.0,
+                    },
+                    theme,
+                )
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let rendered = (0..28)
+            .map(|y| {
+                (0..100)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_owned()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        insta::assert_snapshot!("statistics_100x28", rendered);
     }
 
     #[test]

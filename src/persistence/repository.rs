@@ -9,6 +9,15 @@ pub struct Repository {
     connection: Connection,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct StatisticsOverview {
+    pub completed_tests: u64,
+    pub active_ms: u64,
+    pub average_wpm: f64,
+    pub average_accuracy: f64,
+    pub best_wpm: f64,
+}
+
 impl Repository {
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
@@ -53,6 +62,31 @@ impl Repository {
             ],
         )?;
         Ok(self.connection.last_insert_rowid())
+    }
+
+    pub fn statistics_overview(&self) -> Result<StatisticsOverview> {
+        self.connection
+            .query_row(
+                "SELECT
+                COUNT(*),
+                COALESCE(SUM(elapsed_ms), 0),
+                COALESCE(AVG(wpm), 0),
+                COALESCE(AVG(accuracy), 0),
+                COALESCE(MAX(wpm), 0)
+             FROM sessions
+             WHERE terminal_state = 'completed'",
+                [],
+                |row| {
+                    Ok(StatisticsOverview {
+                        completed_tests: row.get(0)?,
+                        active_ms: row.get::<_, i64>(1)? as u64,
+                        average_wpm: row.get(2)?,
+                        average_accuracy: row.get(3)?,
+                        best_wpm: row.get(4)?,
+                    })
+                },
+            )
+            .map_err(Into::into)
     }
 }
 
@@ -103,5 +137,47 @@ mod tests {
             )
             .unwrap();
         assert_eq!(id, 1);
+    }
+
+    #[test]
+    fn overview_uses_only_completed_tests() {
+        let temporary = tempfile::tempdir().unwrap();
+        let repository = Repository::open(&temporary.path().join("history.db")).unwrap();
+        let completed = Metrics {
+            duration_ms: 12_000,
+            wpm: 80.0,
+            accuracy: 95.0,
+            ..Metrics::default()
+        };
+        repository
+            .save_session(
+                &TestConfig::default(),
+                &TestStatus::Completed {
+                    ended_at_ms: 12_000,
+                },
+                completed,
+            )
+            .unwrap();
+        repository
+            .save_session(
+                &TestConfig::default(),
+                &TestStatus::Failed {
+                    ended_at_ms: 1_000,
+                    word_index: 0,
+                },
+                Metrics::default(),
+            )
+            .unwrap();
+
+        assert_eq!(
+            repository.statistics_overview().unwrap(),
+            StatisticsOverview {
+                completed_tests: 1,
+                active_ms: 12_000,
+                average_wpm: 80.0,
+                average_accuracy: 95.0,
+                best_wpm: 80.0,
+            }
+        );
     }
 }

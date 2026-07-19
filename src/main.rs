@@ -21,7 +21,7 @@ use termina::{
 
 use tuipe::{
     content::{ContentCatalog, WordGenerator},
-    persistence::{Preferences, Repository, paths},
+    persistence::{Preferences, Repository, StatisticsOverview, paths},
     typing::{InputEvent, KeyAction, QuoteLength, TestEngine, TestMode, TestStatus},
     ui,
 };
@@ -64,6 +64,8 @@ struct App {
     persisted: bool,
     config_path: PathBuf,
     settings_open: bool,
+    statistics_open: bool,
+    statistics: StatisticsOverview,
     generator: Option<WordGenerator<SmallRng>>,
     seed: u64,
 }
@@ -84,6 +86,8 @@ impl App {
             persisted: false,
             config_path,
             settings_open: false,
+            statistics_open: false,
+            statistics: StatisticsOverview::default(),
             generator,
             seed,
         })
@@ -175,7 +179,10 @@ fn run(
                     theme,
                     app.settings_open,
                     &app.preferences.theme,
-                )
+                );
+                if app.statistics_open {
+                    ui::render_statistics(frame, app.statistics, theme);
+                }
             })?;
             last_drawn_second = app.engine.elapsed_ms() / 1_000;
             needs_draw = false;
@@ -185,7 +192,7 @@ fn run(
             let event_changed_view = match event::read()? {
                 Event::Key(key)
                     if key.kind == KeyEventKind::Press
-                        && handle_key(app, key.code, key.modifiers)? =>
+                        && handle_key(app, repository, key.code, key.modifiers)? =>
                 {
                     break;
                 }
@@ -305,7 +312,18 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, terminal: ratatui::layout::Siz
     Ok(true)
 }
 
-fn handle_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> Result<bool> {
+fn handle_key(
+    app: &mut App,
+    repository: &Repository,
+    code: KeyCode,
+    modifiers: KeyModifiers,
+) -> Result<bool> {
+    if app.statistics_open {
+        if matches!(code, KeyCode::Esc | KeyCode::Enter | KeyCode::Char('s')) {
+            app.statistics_open = false;
+        }
+        return Ok(false);
+    }
     if app.settings_open {
         return handle_settings_key(app, code);
     }
@@ -336,6 +354,17 @@ fn handle_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> Result<b
         && !resultado_recente
     {
         app.repeat()?;
+        return Ok(false);
+    }
+    if matches!(code, KeyCode::Char('s'))
+        && matches!(
+            app.engine.status(),
+            TestStatus::Completed { .. } | TestStatus::Failed { .. }
+        )
+        && !resultado_recente
+    {
+        app.statistics = repository.statistics_overview()?;
+        app.statistics_open = true;
         return Ok(false);
     }
 

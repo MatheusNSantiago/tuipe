@@ -20,7 +20,7 @@ expression: "render_engine_at(100, 28, &engine)"
          1                                        15.5                                       30
 
      tipo de teste     wpm       precisão     bruto     caracteres     consistência    tempo
-     tempo 30          7         100%         7         18/0/0/0       0%              30.0s
+     ◷ 30 segundos     7         100%         7         18/0/0/0       0%              30.0s
      ◎ português
      ★ especialista
 
@@ -28,4 +28,4 @@ expression: "render_engine_at(100, 28, &engine)"
 
 
 
-                                enter próximo    r repetir    q sair
+                       enter próximo    r repetir    s estatísticas    q sair
