@@ -115,6 +115,24 @@ pub struct ReviewState {
     pub consecutive_clean_sessions: u16,
 }
 
+impl ReviewState {
+    pub fn value_at(self, as_of_unix_s: i64) -> f64 {
+        if self.consecutive_clean_sessions == 0 || as_of_unix_s <= self.last_seen_unix_s {
+            return 0.0;
+        }
+        let interval_days = 2_u64
+            .saturating_pow(u32::from(
+                self.consecutive_clean_sessions.saturating_sub(1).min(5),
+            ))
+            .min(32) as f64;
+        let age_days = (as_of_unix_s - self.last_seen_unix_s) as f64 / 86_400.0;
+        if age_days <= interval_days {
+            return 0.0;
+        }
+        1.0 - (-(age_days - interval_days) / interval_days.max(1.0)).exp()
+    }
+}
+
 impl MechanicSkill {
     pub fn observe(
         &mut self,
@@ -450,6 +468,18 @@ impl AdaptiveSampler {
         self.as_of_unix_s = self.as_of_unix_s.max(observed_at_unix_s);
     }
 
+    pub fn retention_candidates(&self, language: &str, candidates: &[String]) -> Vec<String> {
+        let mut due = candidates
+            .iter()
+            .filter_map(|word| {
+                let value = self.review_value(language, word);
+                (value > 0.0).then_some((word.clone(), value))
+            })
+            .collect::<Vec<_>>();
+        due.sort_by(|left, right| right.1.total_cmp(&left.1));
+        due.into_iter().map(|(word, _)| word).collect()
+    }
+
     pub fn set_baseline(&mut self, language: impl Into<String>, baseline: PersonalBaseline) {
         self.baselines.insert(language.into(), baseline);
     }
@@ -696,19 +726,7 @@ impl AdaptiveSampler {
         let Some(state) = self.review_states.get(&(language.into(), word.into())) else {
             return 0.0;
         };
-        if state.consecutive_clean_sessions == 0 || self.as_of_unix_s <= state.last_seen_unix_s {
-            return 0.0;
-        }
-        let interval_days = 2_u64
-            .saturating_pow(u32::from(
-                state.consecutive_clean_sessions.saturating_sub(1).min(5),
-            ))
-            .min(32) as f64;
-        let age_days = (self.as_of_unix_s - state.last_seen_unix_s) as f64 / 86_400.0;
-        if age_days <= interval_days {
-            return 0.0;
-        }
-        1.0 - (-(age_days - interval_days) / interval_days.max(1.0)).exp()
+        state.value_at(self.as_of_unix_s)
     }
 
     fn transfer_weights(&self, language: &str) -> HashMap<String, f64> {
@@ -971,6 +989,13 @@ mod tests {
         assert_eq!(sampler.review_value("portuguese", "casa"), 0.0);
         sampler.as_of_unix_s = 1_000 + 3 * 86_400;
         assert!(sampler.review_value("portuguese", "casa") > 0.0);
+        assert_eq!(
+            sampler.retention_candidates(
+                "portuguese",
+                &["casa".into(), "tempo".into(), "mundo".into()]
+            ),
+            vec!["casa"]
+        );
     }
 
     #[test]

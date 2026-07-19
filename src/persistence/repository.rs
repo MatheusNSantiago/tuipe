@@ -42,6 +42,7 @@ pub enum SessionKind {
     Practice,
     Assessment,
     Transfer,
+    Retention,
     Repeat,
 }
 
@@ -51,6 +52,7 @@ impl SessionKind {
             Self::Practice => "practice",
             Self::Assessment => "assessment",
             Self::Transfer => "transfer",
+            Self::Retention => "retention",
             Self::Repeat => "repeat",
         }
     }
@@ -734,8 +736,14 @@ impl Repository {
             |row| row.get::<_, u64>(0),
         )?;
         let next = completed + 1;
+        let has_due_review = self
+            .load_all_review_states()?
+            .into_iter()
+            .any(|(_, _, state)| state.value_at(Local::now().timestamp()) > 0.0);
         Ok(if completed > 0 && next.is_multiple_of(8) {
             SessionKind::Assessment
+        } else if completed > 0 && next.is_multiple_of(12) && has_due_review {
+            SessionKind::Retention
         } else if completed > 0 && next.is_multiple_of(4) {
             SessionKind::Transfer
         } else {
@@ -1202,6 +1210,7 @@ fn session_kind_from_db(value: &str) -> SessionKind {
     match value {
         "assessment" => SessionKind::Assessment,
         "transfer" => SessionKind::Transfer,
+        "retention" => SessionKind::Retention,
         "repeat" => SessionKind::Repeat,
         _ => SessionKind::Practice,
     }
@@ -1581,6 +1590,39 @@ mod tests {
         assert_eq!(
             repository.next_session_kind(&config).unwrap(),
             SessionKind::Assessment
+        );
+    }
+
+    #[test]
+    fn retencao_so_e_agendada_quando_existe_revisao_vencida() {
+        let temporary = tempfile::tempdir().unwrap();
+        let repository = Repository::open(&temporary.path().join("history.db")).unwrap();
+        let config = TestConfig::default();
+        for ended_at_ms in 1..=11 {
+            repository
+                .save_session(
+                    &config,
+                    &TestStatus::Completed { ended_at_ms },
+                    Metrics::default(),
+                )
+                .unwrap();
+        }
+        assert_eq!(
+            repository.next_session_kind(&config).unwrap(),
+            SessionKind::Transfer
+        );
+        repository
+            .connection
+            .execute(
+                "INSERT INTO skill_review (
+                    language, word, last_seen_unix_s, last_session_id, consecutive_clean_sessions
+                 ) VALUES ('portuguese', 'casa', ?1, 11, 1)",
+                [Local::now().timestamp() - 3 * 86_400],
+            )
+            .unwrap();
+        assert_eq!(
+            repository.next_session_kind(&config).unwrap(),
+            SessionKind::Retention
         );
     }
 }

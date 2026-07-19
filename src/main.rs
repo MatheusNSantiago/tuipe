@@ -1015,6 +1015,7 @@ fn word_generator(
             .filter(|word| is_transfer_holdout(word))
             .cloned()
             .collect::<Vec<_>>(),
+        SessionKind::Retention => adaptive.retention_candidates(&config.language, configured_words),
         SessionKind::Practice if config.adaptive => configured_words
             .iter()
             .filter(|word| !is_transfer_holdout(word))
@@ -1033,7 +1034,10 @@ fn word_generator(
         SessionKind::Practice if config.adaptive => {
             generator.with_adaptive(&config.language, adaptive.clone())
         }
-        SessionKind::Practice | SessionKind::Transfer | SessionKind::Repeat => generator,
+        SessionKind::Practice
+        | SessionKind::Transfer
+        | SessionKind::Retention
+        | SessionKind::Repeat => generator,
     })
 }
 
