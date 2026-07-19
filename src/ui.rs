@@ -29,7 +29,7 @@ const CONFIG_MODIFIER_WIDTH: u16 = 26;
 const CONFIG_MODE_WIDTH: u16 = 26;
 const CONFIG_COMPACT_VALUE_WIDTH: u16 = 20;
 const CONFIG_QUOTE_VALUE_WIDTH: u16 = 26;
-const RESULT_WIDE_WIDTH: u16 = 84;
+const RESULT_WIDE_WIDTH: u16 = 120;
 const RESULT_MEDIUM_WIDTH: u16 = 54;
 const RESULT_GROUP_HEIGHT: u16 = 4;
 const RESULT_CHART_HEIGHT: u16 = 12;
@@ -512,7 +512,7 @@ const fn first_visible_line(active_line: usize) -> usize {
 
 fn render_result(frame: &mut Frame, area: Rect, engine: &TestEngine, theme: &Theme, icones: Icons) {
     let metrics = engine.metrics();
-    let group_count = 6;
+    let group_count = 7;
     let details_height = result_details_height(area.width, group_count);
     let body = centered_height(
         area,
@@ -725,7 +725,8 @@ fn render_result_details(
     let stats = metrics.characters;
     let details = vec![
         result_group_lines("tipo de teste", result_descriptor(engine, icones), theme),
-        result_metrics_lines(metrics, theme),
+        result_group_lines("wpm", format!("{:.0}", metrics.wpm), theme),
+        result_group_lines("precisão", format!("{:.0}%", metrics.accuracy), theme),
         result_group_lines("bruto", format!("{:.0}", metrics.raw_wpm), theme),
         result_group_lines(
             "caracteres",
@@ -774,7 +775,17 @@ fn result_details_height(width: u16, group_count: usize) -> u16 {
 fn result_detail_areas(area: Rect, group_count: usize) -> Vec<Rect> {
     let columns = result_detail_columns(area.width, group_count);
     if columns == group_count {
-        let constraints = if group_count == 6 {
+        let constraints = if group_count == 7 {
+            vec![
+                Constraint::Percentage(20),
+                Constraint::Percentage(10),
+                Constraint::Percentage(10),
+                Constraint::Percentage(9),
+                Constraint::Percentage(18),
+                Constraint::Percentage(17),
+                Constraint::Percentage(16),
+            ]
+        } else if group_count == 6 {
             vec![
                 Constraint::Percentage(22),
                 Constraint::Percentage(24),
@@ -826,25 +837,6 @@ fn result_group_lines(name: &str, result: String, theme: &Theme) -> Vec<Line<'st
     lines
 }
 
-fn result_metrics_lines(metrics: &Metrics, theme: &Theme) -> Vec<Line<'static>> {
-    vec![
-        Line::styled("wpm", Style::default().fg(color(&theme.sub))),
-        Line::styled(
-            format!("{:.0}", metrics.wpm),
-            Style::default()
-                .fg(color(&theme.main))
-                .add_modifier(Modifier::BOLD),
-        ),
-        Line::styled("precisão", Style::default().fg(color(&theme.sub))),
-        Line::styled(
-            format!("{:.0}%", metrics.accuracy),
-            Style::default()
-                .fg(color(&theme.main))
-                .add_modifier(Modifier::BOLD),
-        ),
-    ]
-}
-
 fn render_footer(
     frame: &mut Frame,
     area: Rect,
@@ -863,13 +855,7 @@ fn render_footer(
         ),
         TestStatus::Running { .. } => return,
         TestStatus::Completed { .. } | TestStatus::Failed { .. } => key_hints(
-            &[
-                ("enter", "próximo"),
-                ("r", "repetir"),
-                ("h", "palavras"),
-                ("s", "estatísticas"),
-                ("q", "sair"),
-            ],
+            &[("enter", "próximo"), ("r", "repetir"), ("q", "sair")],
             theme,
         ),
     };

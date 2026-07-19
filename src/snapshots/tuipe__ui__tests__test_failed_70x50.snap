@@ -12,8 +12,6 @@ expression: "render_engine_at(70, 50, &engine)"
 
 
 
-
-
    wpm ao longo do tempo   × erros
     120│⠉⠉⠒⠒⠒⠒⠤⠤⠤⢄⣀⣀⣀
        │             ⠉⠉⠉⠉⠒⠒⠒⠒⠒⠒⠒⠤⠤⠤⠤⣀⣀⣀⡀
@@ -27,20 +25,18 @@ expression: "render_engine_at(70, 50, &engine)"
       0└───────────────────────────────────────────────────────────
        1                                                        1.7
 
-   tipo de teste         wpm                   bruto
-   palavras 4            71                    92
-   ◎ português           precisão
-   ★ especialista        92%
+   tipo de teste         wpm                   precisão
+   palavras 4            71                    92%
+   ◎ português
+   ★ especialista
 
-   caracteres            consistência          tempo
-   10/1/0/1              46%                   1.7s
-
-
+   bruto                 caracteres            consistência
+   92                    10/1/0/1              46%
 
 
 
-
-
+   tempo
+   1.7s
 
 
 
@@ -50,4 +46,8 @@ expression: "render_engine_at(70, 50, &engine)"
 
 
 
-   enter próximo    r repetir    h palavras    s estatísticas    q
+
+
+
+
+                 enter próximo    r repetir    q sair
