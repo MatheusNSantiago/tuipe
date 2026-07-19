@@ -1,4 +1,8 @@
-use std::{collections::HashMap, fs, path::Path};
+use std::{
+    collections::{BTreeMap, HashMap},
+    fs,
+    path::Path,
+};
 
 use anyhow::Result;
 use chrono::{Datelike, Local};
@@ -14,6 +18,22 @@ use crate::typing::{Metrics, TestConfig, TestStatus};
 
 pub struct Repository {
     connection: Connection,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SessionProvenance {
+    pub seed: u64,
+    pub stimuli: Vec<String>,
+    pub policy_version: u16,
+    pub kind: SessionKind,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RebuildReport {
+    pub observations: usize,
+    pub words: usize,
+    pub ngrams: usize,
+    pub mechanics: usize,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -206,6 +226,28 @@ impl Repository {
         raw_events: &[RawEvent],
         kind: SessionKind,
     ) -> Result<i64> {
+        self.save_session_with_provenance(
+            config,
+            status,
+            metrics,
+            observations,
+            raw_events,
+            &SessionProvenance {
+                kind,
+                ..SessionProvenance::default()
+            },
+        )
+    }
+
+    pub fn save_session_with_provenance(
+        &self,
+        config: &TestConfig,
+        status: &TestStatus,
+        metrics: Metrics,
+        observations: &[WordObservationRecord],
+        raw_events: &[RawEvent],
+        provenance: &SessionProvenance,
+    ) -> Result<i64> {
         let terminal_state = match status {
             TestStatus::Ready => "ready",
             TestStatus::Running { .. } => "restart",
@@ -217,8 +259,9 @@ impl Repository {
             "INSERT INTO sessions (
                 terminal_state, config_toml, elapsed_ms, wpm, raw_wpm, accuracy,
                 correct_chars, incorrect_chars, extra_chars, missed_chars,
-                metrics_version, adaptive_version, codec_version, session_kind
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 1, 2, ?11, ?12)",
+                metrics_version, adaptive_version, codec_version, session_kind,
+                seed_hex, stimuli_json, policy_version
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 1, 2, ?11, ?12, ?13, ?14, ?15)",
             params![
                 terminal_state,
                 toml::to_string(config)?,
@@ -231,7 +274,10 @@ impl Repository {
                 metrics.characters.extra,
                 metrics.characters.missed,
                 RawEventCodec::VERSION,
-                kind.as_str(),
+                provenance.kind.as_str(),
+                format!("{:016x}", provenance.seed),
+                serde_json::to_string(&provenance.stimuli)?,
+                provenance.policy_version,
             ],
         )?;
         let session_id = transaction.last_insert_rowid();
@@ -399,6 +445,210 @@ impl Repository {
             .optional()?
             .map(|(version, size, blob)| RawEventCodec::decode(version, size, &blob))
             .transpose()
+    }
+
+    pub fn session_provenance(&self, session_id: i64) -> Result<Option<SessionProvenance>> {
+        self.connection
+            .query_row(
+                "SELECT seed_hex, stimuli_json, policy_version, session_kind
+                 FROM sessions WHERE id = ?1",
+                [session_id],
+                |row| {
+                    let seed_hex = row.get::<_, String>(0)?;
+                    let stimuli_json = row.get::<_, String>(1)?;
+                    Ok((
+                        seed_hex,
+                        stimuli_json,
+                        row.get::<_, u16>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                },
+            )
+            .optional()?
+            .map(|(seed_hex, stimuli_json, policy_version, kind)| {
+                Ok(SessionProvenance {
+                    seed: u64::from_str_radix(&seed_hex, 16)?,
+                    stimuli: serde_json::from_str(&stimuli_json)?,
+                    policy_version,
+                    kind: session_kind_from_db(&kind),
+                })
+            })
+            .transpose()
+    }
+
+    /// Recria todas as projeções adaptativas em memória e as troca numa única
+    /// transação. Blobs brutos presentes são decodificados e validados antes
+    /// de qualquer estado existente ser removido.
+    pub fn rebuild_adaptive_projections(&self) -> Result<RebuildReport> {
+        let mut raw_statement = self.connection.prepare(
+            "SELECT codec_version, uncompressed_size, blob FROM raw_events ORDER BY session_id",
+        )?;
+        let raw_rows = raw_statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, u16>(0)?,
+                    row.get::<_, i64>(1)? as usize,
+                    row.get::<_, Vec<u8>>(2)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for (version, size, blob) in raw_rows {
+            RawEventCodec::decode(version, size, &blob)?;
+        }
+
+        #[derive(Debug)]
+        struct StoredObservation {
+            language: String,
+            word: String,
+            observation: Observation,
+            corrections: u32,
+            mechanics: Vec<MechanicObservationRecord>,
+            session_id: i64,
+            observed_at: i64,
+        }
+
+        let mut statement = self.connection.prepare(
+            "SELECT wo.language, wo.word, wo.confirmed_error, wo.corrections,
+                    wo.fast_success, wo.slow, wo.latency_ratio, wo.evidence_weight,
+                    wo.mechanics_json, wo.session_id, unixepoch(s.created_at)
+             FROM word_observations wo
+             JOIN sessions s ON s.id = wo.session_id
+             ORDER BY wo.session_id, wo.id",
+        )?;
+        let observations = statement
+            .query_map([], |row| {
+                let mechanics_json = row.get::<_, String>(8)?;
+                let mechanics = serde_json::from_str(&mechanics_json).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        8,
+                        rusqlite::types::Type::Text,
+                        Box::new(error),
+                    )
+                })?;
+                let corrections = row.get::<_, u32>(3)?;
+                Ok(StoredObservation {
+                    language: row.get(0)?,
+                    word: row.get(1)?,
+                    observation: Observation {
+                        confirmed_error: row.get(2)?,
+                        corrected: corrections > 0,
+                        fast_success: row.get(4)?,
+                        slow: row.get(5)?,
+                        latency_ratio: row.get(6)?,
+                        evidence_weight: row.get(7)?,
+                    },
+                    corrections,
+                    mechanics,
+                    session_id: row.get(9)?,
+                    observed_at: row.get(10)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        let mut words = HashMap::<(String, String), WordSkill>::new();
+        let mut ngrams = HashMap::<(String, String), NgramSkill>::new();
+        let mut mechanics = HashMap::<(String, String), MechanicSkill>::new();
+        let mut reviews = BTreeMap::<(i64, String, String), (bool, i64)>::new();
+        for record in &observations {
+            words
+                .entry((record.language.clone(), record.word.clone()))
+                .or_default()
+                .observe(record.observation);
+            for ngram in lexical_ngrams(&record.word) {
+                ngrams
+                    .entry((record.language.clone(), ngram))
+                    .or_default()
+                    .observe(&record.word, record.observation);
+            }
+            for mechanic in &record.mechanics {
+                mechanics
+                    .entry((record.language.clone(), mechanic.mechanic.clone()))
+                    .or_default()
+                    .observe(
+                        &record.word,
+                        mechanic.confirmed_error,
+                        mechanic.corrected,
+                        record.observation.evidence_weight,
+                    );
+            }
+            if record.observation.evidence_weight > 0.0 {
+                reviews
+                    .entry((
+                        record.session_id,
+                        record.language.clone(),
+                        record.word.clone(),
+                    ))
+                    .and_modify(|(clean, _)| {
+                        *clean &= !record.observation.confirmed_error && record.corrections == 0;
+                    })
+                    .or_insert((
+                        !record.observation.confirmed_error && record.corrections == 0,
+                        record.observed_at,
+                    ));
+            }
+        }
+
+        let report = RebuildReport {
+            observations: observations.len(),
+            words: words.len(),
+            ngrams: ngrams.len(),
+            mechanics: mechanics.len(),
+        };
+        let transaction = self.connection.unchecked_transaction()?;
+        transaction.execute_batch(
+            "DELETE FROM word_skill;
+             DELETE FROM ngram_skill;
+             DELETE FROM mechanic_skill;
+             DELETE FROM skill_review;",
+        )?;
+        for ((language, word), skill) in words {
+            transaction.execute(
+                "INSERT INTO word_skill (language, word, state) VALUES (?1, ?2, ?3)",
+                params![language, word, postcard::to_allocvec(&skill)?],
+            )?;
+        }
+        for ((language, ngram), skill) in ngrams {
+            transaction.execute(
+                "INSERT INTO ngram_skill (language, ngram, state) VALUES (?1, ?2, ?3)",
+                params![language, ngram, postcard::to_allocvec(&skill)?],
+            )?;
+        }
+        for ((language, mechanic), skill) in mechanics {
+            transaction.execute(
+                "INSERT INTO mechanic_skill (language, mechanic, state) VALUES (?1, ?2, ?3)",
+                params![language, mechanic, postcard::to_allocvec(&skill)?],
+            )?;
+        }
+        let mut review_states = HashMap::<(String, String), ReviewState>::new();
+        for ((session_id, language, word), (clean, observed_at)) in reviews {
+            let state = review_states
+                .entry((language.clone(), word.clone()))
+                .or_default();
+            state.last_seen_unix_s = observed_at;
+            state.consecutive_clean_sessions = if clean {
+                state.consecutive_clean_sessions.saturating_add(1)
+            } else {
+                0
+            };
+            transaction.execute(
+                "INSERT INTO skill_review (
+                    language, word, last_seen_unix_s, last_session_id, consecutive_clean_sessions
+                 ) VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(language, word) DO UPDATE SET
+                    last_seen_unix_s = excluded.last_seen_unix_s,
+                    last_session_id = excluded.last_session_id,
+                    consecutive_clean_sessions = excluded.consecutive_clean_sessions",
+                params![
+                    language,
+                    word,
+                    observed_at,
+                    session_id,
+                    state.consecutive_clean_sessions,
+                ],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(report)
     }
 
     /// Baseline robusto (mediana aproximada) por idioma e tamanho. Só entra em
@@ -812,7 +1062,10 @@ fn migrate(connection: &Connection) -> Result<()> {
            correct_chars INTEGER NOT NULL, incorrect_chars INTEGER NOT NULL,
            extra_chars INTEGER NOT NULL, missed_chars INTEGER NOT NULL,
            metrics_version INTEGER NOT NULL, adaptive_version INTEGER NOT NULL, codec_version INTEGER NOT NULL,
-           session_kind TEXT NOT NULL DEFAULT 'practice'
+           session_kind TEXT NOT NULL DEFAULT 'practice',
+           seed_hex TEXT NOT NULL DEFAULT '0000000000000000',
+           stimuli_json TEXT NOT NULL DEFAULT '[]',
+           policy_version INTEGER NOT NULL DEFAULT 0
          );
          CREATE TABLE IF NOT EXISTS word_observations (
            id INTEGER PRIMARY KEY, session_id INTEGER NOT NULL REFERENCES sessions(id),
@@ -893,7 +1146,19 @@ fn migrate(connection: &Connection) -> Result<()> {
             [],
         )?;
     }
-    connection.execute("UPDATE schema_version SET version = 4", [])?;
+    for (column, definition) in [
+        ("seed_hex", "TEXT NOT NULL DEFAULT '0000000000000000'"),
+        ("stimuli_json", "TEXT NOT NULL DEFAULT '[]'"),
+        ("policy_version", "INTEGER NOT NULL DEFAULT 0"),
+    ] {
+        if !table_has_column(connection, "sessions", column)? {
+            connection.execute(
+                &format!("ALTER TABLE sessions ADD COLUMN {column} {definition}"),
+                [],
+            )?;
+        }
+    }
+    connection.execute("UPDATE schema_version SET version = 5", [])?;
     Ok(())
 }
 
@@ -932,6 +1197,29 @@ mod tests {
             )
             .unwrap();
         assert_eq!(id, 1);
+    }
+
+    #[test]
+    fn sessao_congela_seed_estimulos_politica_e_tipo() {
+        let temporary = tempfile::tempdir().unwrap();
+        let repository = Repository::open(&temporary.path().join("history.db")).unwrap();
+        let provenance = SessionProvenance {
+            seed: u64::MAX - 3,
+            stimuli: vec!["ação".into(), "casa".into()],
+            policy_version: 2,
+            kind: SessionKind::Assessment,
+        };
+        let id = repository
+            .save_session_with_provenance(
+                &TestConfig::default(),
+                &TestStatus::Completed { ended_at_ms: 1 },
+                Metrics::default(),
+                &[],
+                &[],
+                &provenance,
+            )
+            .unwrap();
+        assert_eq!(repository.session_provenance(id).unwrap(), Some(provenance));
     }
 
     #[test]
@@ -1048,6 +1336,21 @@ mod tests {
         assert_eq!(priority.len(), 1);
         assert_eq!(priority[0].word, "difícil");
         assert_eq!(priority[0].confirmed_errors, 1.0);
+
+        let expected = repository.load_word_skills("portuguese").unwrap();
+        repository
+            .connection
+            .execute_batch(
+                "DELETE FROM word_skill;
+                 DELETE FROM ngram_skill;
+                 DELETE FROM mechanic_skill;
+                 DELETE FROM skill_review;",
+            )
+            .unwrap();
+        let report = repository.rebuild_adaptive_projections().unwrap();
+        assert_eq!(report.observations, 1);
+        assert_eq!(report.words, 1);
+        assert_eq!(repository.load_word_skills("portuguese").unwrap(), expected);
     }
 
     #[test]

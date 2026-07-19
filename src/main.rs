@@ -26,7 +26,7 @@ use tuipe::{
     content::{ContentCatalog, WordGenerator},
     persistence::{
         MechanicObservationRecord, Preferences, RawEventCodec, RawSessionEnd, Repository,
-        SessionKind, StatisticsOverview, WordObservationRecord, paths,
+        SessionKind, SessionProvenance, StatisticsOverview, WordObservationRecord, paths,
     },
     typing::{
         ExternalEvent, InputEvent, KeyAction, QuoteLength, RecordedInputKind, TestEngine, TestMode,
@@ -132,13 +132,13 @@ impl App {
         }
         let raw_events =
             RawEventCodec::materialize(self.engine.recorded_events(), self.elapsed_ms(), end);
-        repository.save_session_full_kind(
+        repository.save_session_with_provenance(
             self.engine.config(),
             self.engine.status(),
             self.engine.metrics(),
             &[],
             &raw_events,
-            self.session_kind,
+            &self.provenance(),
         )?;
         self.persisted = true;
         Ok(())
@@ -206,6 +206,20 @@ impl App {
             .as_millis()
             .try_into()
             .unwrap_or(u64::MAX)
+    }
+
+    fn provenance(&self) -> SessionProvenance {
+        SessionProvenance {
+            seed: self.seed,
+            stimuli: self
+                .engine
+                .targets()
+                .iter()
+                .map(|target| target.text.clone())
+                .collect(),
+            policy_version: 2,
+            kind: self.session_kind,
+        }
     }
 
     fn bloqueia_atalhos_do_resultado(&self) -> bool {
@@ -612,13 +626,13 @@ fn run(
             };
             let raw_events =
                 RawEventCodec::materialize(app.engine.recorded_events(), ended_at_ms, end);
-            repository.save_session_full_kind(
+            repository.save_session_with_provenance(
                 app.engine.config(),
                 app.engine.status(),
                 app.engine.metrics(),
                 &observations,
                 &raw_events,
-                app.session_kind,
+                &app.provenance(),
             )?;
             app.apply_observations(&observations);
             app.persisted = true;
