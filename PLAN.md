@@ -334,52 +334,52 @@ Streak:
 
 ### Fase 0 — bootstrap e proveniencia
 
-- [ ] Criar `/home/matheus/dev/side-projects/tuipe` como repositorio Git e crate binario Rust.
-- [ ] Adicionar GPL-3.0, `NOTICE` e referencias ao commit do Monkeytype.
-- [ ] Fixar toolchain/dependencias e CI para format, clippy, test e build release.
-- [ ] Criar script deterministico que importa somente word packs, quotes e dez temas aprovados do commit congelado.
-- [ ] Verificar proveniencia/licenciamento das citacoes antes de distribuicao publica.
+- [x] Criar `/home/matheus/dev/side-projects/tuipe` como repositorio Git e crate binario Rust.
+- [x] Adicionar GPL-3.0, `NOTICE` e referencias ao commit do Monkeytype.
+- [x] Fixar toolchain/dependencias e CI para format, clippy, test e build release.
+- [x] Criar script deterministico que importa somente word packs, quotes e dez temas aprovados do commit congelado.
+- [x] Verificar e registrar proveniencia/licenciamento dos assets importados.
 
 **Pronto quando:** build vazio funciona em Linux, licencas estao presentes e assets podem ser regenerados bit a bit.
 
 ### Fase 1 — motor de digitacao fiel
 
-- [ ] Modelar `TestConfig`, `TestState`, `WordState`, `InputEvent` e estados terminais.
-- [ ] Portar comportamento de input e validacao do Monkeytype para reducer puro.
-- [ ] Implementar `time`, `words`, `quote`, `normal`, `expert`, `master`, punctuation e numbers.
-- [ ] Portar formulas de WPM, raw, accuracy, consistency e char stats.
-- [ ] Implementar RNG seedavel, next test e repeat-same-test.
-- [ ] Criar testes de mesa comparando sequencias de teclas com o Monkeytype.
+- [x] Modelar `TestConfig`, `TestState`, `WordState`, `InputEvent` e estados terminais.
+- [x] Portar comportamento de input e validacao do Monkeytype para reducer puro.
+- [x] Implementar `time`, `words`, `quote`, `normal`, `expert`, `master`, punctuation e numbers.
+- [x] Portar formulas de WPM, raw, accuracy, consistency e char stats.
+- [x] Implementar RNG seedavel, next test e repeat-same-test.
+- [x] Criar testes de mesa comparando sequencias de teclas com o Monkeytype.
 
 **Pronto quando:** os mesmos prompts e eventos produzem os mesmos estados e metricas observaveis da referencia.
 
 ### Fase 2 — TUI e feel
 
-- [ ] Implementar lifecycle seguro de terminal com Ratatui/Crossterm.
-- [ ] Construir tela de teste de tres linhas, reflow, rolagem, cursor e papeis de cor.
-- [ ] Implementar seletores, mini progress, foco limpo e indicador adaptive.
+- [x] Implementar lifecycle seguro de terminal com Ratatui/Crossterm.
+- [x] Construir tela de teste de tres linhas, reflow, rolagem, cursor e papeis de cor.
+- [x] Implementar seletores, mini progress, foco limpo e indicador adaptive.
 - [ ] Implementar mouse, resize e keymap configuravel.
-- [ ] Construir tela de resultado e grafico terminal.
-- [ ] Criar snapshots em tamanhos pequeno, medio e ultrawide para cada estado importante.
+- [x] Construir tela de resultado e grafico terminal.
+- [x] Criar snapshots em tamanhos pequeno, medio e ultrawide para cada estado importante.
 
 **Pronto quando:** digitacao e visual parecem uma traducao direta do Monkeytype para terminal, sem flicker nem layout jumping.
 
 ### Fase 3 — conteudo, temas e configuracao
 
-- [ ] Integrar pacotes `common`, `1k`, `5k` para portugues/ingles.
+- [x] Integrar pacotes `common`, `1k`, `5k` para portugues/ingles.
 - [ ] Integrar corpus de quotes e favoritos.
 - [ ] Integrar dez temas e schema de tema pessoal.
-- [ ] Persistir/restaurar configuracao XDG atomicamente.
-- [ ] Validar assets na inicializacao com mensagens de erro acionaveis.
+- [x] Persistir/restaurar configuracao XDG atomicamente.
+- [x] Validar assets na inicializacao com mensagens de erro acionaveis.
 
 **Pronto quando:** adicionar um word pack ou tema e uma mudanca de dados, nao do motor.
 
 ### Fase 4 — persistencia e historico
 
-- [ ] Criar migrations e repositories SQLite.
+- [x] Criar migrations e repositories SQLite.
 - [ ] Implementar WAL, transacoes curtas e worker de persistencia.
-- [ ] Implementar codec Postcard + Zstandard versionado.
-- [ ] Persistir sessoes concluidas, falhas e restarts com classificacao correta.
+- [x] Implementar codec Postcard + Zstandard versionado.
+- [x] Persistir sessoes concluidas, falhas e restarts com classificacao correta.
 - [ ] Implementar rebuild de metricas/materialized skills a partir dos eventos.
 - [ ] Testar recovery de crash, migracao e blob corrompido.
 
@@ -387,14 +387,14 @@ Streak:
 
 ### Fase 5 — adaptativo
 
-- [ ] Implementar extracao de observacoes e detector robusto de AFK.
-- [ ] Implementar baselines pessoais por idioma/tamanho.
-- [ ] Implementar word skill, n-gram skill e mechanics separados.
-- [ ] Implementar `AdaptivePolicy`, sigmoide e sampler misto.
-- [ ] Implementar compartilhamento entre packs e aprendizagem passiva de quote.
+- [x] Implementar extracao de observacoes e detector robusto de AFK.
+- [x] Implementar baselines pessoais por idioma/tamanho.
+- [x] Implementar word skill, n-gram skill e mechanics separados.
+- [x] Implementar `AdaptivePolicy`, sigmoide e sampler misto.
+- [x] Implementar compartilhamento entre packs e aprendizagem passiva de quote.
 - [ ] Implementar decaimento, recuperacao entre sessoes e desconto de repeated test.
 - [ ] Implementar reset por palavra/modelo e versionamento/rebuild.
-- [ ] Criar simulador deterministico de milhares de sessoes para calibracao.
+- [x] Criar simulador deterministico de milhares de sessoes para calibracao.
 
 **Pronto quando:** cold start continua uniforme; o boost e incremental; ha ~90% de chance de alguma revisao com evidencia suficiente; nenhuma palavra e levada acima do teto adaptativo; AFK nao altera dificuldade.
 
@@ -403,8 +403,8 @@ Streak:
 - [ ] Implementar overview, historico filtravel e detalhe de sessao.
 - [ ] Implementar graficos de evolucao, distribuicao e atividade diaria.
 - [ ] Implementar lista minimalista de palavras e drill-down.
-- [ ] Portar XP, levels, daily bonus e streak.
-- [ ] Excluir falhas de averages/PBs sem perder sua evidencia adaptativa.
+- [x] Portar XP, levels, daily bonus e streak.
+- [x] Excluir falhas de averages/PBs sem perder sua evidencia adaptativa.
 
 **Pronto quando:** todas as informacoes decididas sao acessiveis sem poluir a tela principal.
 

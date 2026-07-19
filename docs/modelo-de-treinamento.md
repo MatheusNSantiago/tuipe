@@ -1,6 +1,7 @@
 # Modelo de treinamento adaptativo do tuipe
 
-Status: especificação de pesquisa, 19 de julho de 2026.
+Status: especificação de pesquisa e registro de implementação, 19 de julho de
+2026.
 
 Este documento define como o tuipe deve medir habilidade, escolher exercícios e
 demonstrar progresso. Ele substitui a heurística provisória da seção 6 de
@@ -519,74 +520,87 @@ Métodos de validação:
 - avaliação prospectiva; propensão ajuda análise offline, mas não substitui um
   teste real quando a política muda muito.
 
-## Diferenças para a implementação atual
+## Estado da implementação
 
-A implementação existente é uma primeira integração funcional, não este modelo:
+O modelo ativo já possui:
 
-- `WordSkill` soma erros, correções, sucessos e lentidões; não mantém
-  denominadores contextuais nem posterior;
-- ignorar as duas primeiras correções e elevar as seguintes a `1,35` continua
-  sendo uma regra de contagem absoluta e deve ser removida;
-- o baseline chamado “por idioma e tamanho” consulta, na prática, uma única
-  mediana por idioma;
-- `active_ms / grapheme_count` descarta a latência até a primeira tecla e
-  mistura todas as transições seguintes com o custo de correção;
-- o limiar fixo de 2 s para AFK contradiz a distribuição observada de IKIs;
-- `corrections` reduz a edição à quantidade de grafemas divergentes apagados;
-  perde operação, caminho, posição, tempo e correções atravessando tokens;
-- `RawEventCodec` existe, mas o fluxo bruto ainda não é persistido;
-- `raw_events`, `ngram_skill` e `mechanic_skill` existem no schema, porém não
-  alimentam o modelo;
-- o sampler apenas pondera palavras e não separa componentes do currículo;
-- `estimated_session_chance` assume sorteios independentes que o próprio sampler
-  invalida;
-- estatísticas agregam testes concluídos heterogêneos e não têm protocolo
-  âncora;
-- `repeat_discount = 0,5` não substitui propensão nem diversidade de contexto.
+- eventos brutos v2 com caminho de inserção/remoção, foco, paste e causa
+  terminal, persistidos também em restart e saída;
+- seed, estímulos, tipo de sessão, versão da política, componente de seleção e
+  propensão congelados por sessão;
+- validação semântica do replay antes da reconstrução transacional das projeções;
+- censura explícita e tempos separados de planejamento, execução fluente,
+  correção e interrupção;
+- posterior beta por exposição, prior pessoal, efeito mínimo relevante e
+  baseline de latência por comprimentos próximos;
+- habilidade lexical, n-gramas e mecânicas materializados separadamente;
+- generalização de padrão somente depois de palavras distintas;
+- currículo misto 55/25/10/10, piso representativo, exploração de incerteza,
+  propensão final e simulação do sequenciador real;
+- espaçamento longitudinal separado da dificuldade, sem restaurar erro antigo;
+- holdout de transferência, avaliações-âncora estratificadas e sondas de
+  retenção, todos agendados automaticamente;
+- estatísticas de progresso baseadas em avaliações comparáveis e diagnóstico de
+  palavras e padrões;
+- simulador determinístico de 2.000 sessões cobrindo aprendizado, diversidade e
+  teto de exposição.
 
-Essas limitações não devem ser remendadas com novos pesos. O banco já tem boas
-fronteiras para evoluir, mas precisa capturar a evidência necessária primeiro.
+Limitações ainda abertas:
+
+- o rebuild valida os eventos brutos, mas refaz as habilidades a partir das
+  observações consultáveis; ainda não rematerializa essas observações somente do
+  blob bruto;
+- ativação e primeira visibilidade do token não são eventos do motor, portanto o
+  planejamento anterior à primeira palavra não é observável;
+- repeat/IME/key-up dependem do que o terminal entrega e ainda não possuem flags
+  portáteis completas;
+- aquecimento e fadiga ainda não são um estado latente separado; pausas são
+  classificadas robustamente, mas uma degradação contínua pode alcançar a
+  posterior;
+- não há perfil físico automático, pois terminais não expõem o teclado real;
+- calibração prospectiva, intervalos de incerteza no painel, fronteira
+  velocidade–precisão e rollback de política ainda não estão prontos.
 
 ## Plano de implementação
 
 ### Fase 1 — fonte da verdade
 
-- versionar `RawEvent` v2 com operação, posição, origem e contexto;
-- persistir eventos em todos os estados terminais, inclusive restart e saída;
-- congelar estímulos, seed, perfil e política por sessão;
-- registrar token, componente e propensão por seleção;
-- manter o adaptativo v1 sem alteração enquanto os dados novos são validados.
+- [x] Versionar `RawEvent` v2 com operação, posição, origem e contexto disponível.
+- [x] Persistir eventos em todos os estados terminais, inclusive restart e saída.
+- [x] Congelar estímulos, seed, tipo e política por sessão.
+- [x] Registrar token, componente e propensão por seleção.
+- [ ] Registrar perfil de ambiente e flags portáteis de repeat/IME.
 
 ### Fase 2 — reconstrução e métricas de entrada
 
-- reconstruir caminhos de edição de modo determinístico;
-- classificar erros corrigidos/não corrigidos e censura;
-- separar primeira tecla, IKI fluente, hesitação e custo de correção;
-- implementar métricas de eficiência e testes Unicode/IME/paste/`Ctrl+W`;
-- recalcular projeções a partir do evento bruto.
+- [x] Reconstruir e validar caminhos de edição de modo determinístico.
+- [x] Classificar erros corrigidos/não corrigidos e censura.
+- [x] Separar planejamento, IKI fluente, interrupção e custo de correção.
+- [x] Cobrir Unicode, paste e `Ctrl+W` sem inventar eventos indisponíveis.
+- [ ] Rematerializar observações consultáveis somente a partir do evento bruto.
 
 ### Fase 3 — baselines e modelo em shadow mode
 
-- criar perfis de ambiente e baselines contextuais robustos;
-- materializar posterior de palavra, n-grama e mecânica;
-- separar estado temporário da habilidade longitudinal;
-- produzir previsões sem influenciar a geração;
-- validar calibração, estabilidade e valor preditivo.
+- [ ] Criar perfis de ambiente sem exigir configuração manual do usuário.
+- [x] Materializar posterior de palavra, n-grama e mecânica.
+- [ ] Separar aquecimento/fadiga da habilidade longitudinal.
+- [x] Preservar dados v1 sem atribuir evidência fictícia ao modelo v2.
+- [ ] Validar calibração e valor preditivo prospectivamente.
 
 ### Fase 4 — avaliação e estatísticas
 
-- introduzir sessões-âncora equivalentes, retenção e transferência;
-- separar séries de prática e avaliação;
-- mostrar fronteira velocidade–precisão e incerteza;
-- substituir “palavras prioritárias” por diagnóstico explicável de habilidades.
+- [x] Introduzir sessões-âncora equivalentes, retenção e transferência.
+- [x] Separar séries de prática e avaliação.
+- [ ] Mostrar fronteira velocidade–precisão e intervalos de incerteza.
+- [x] Exibir diagnóstico explicável de palavras, n-gramas e mecânicas.
 
 ### Fase 5 — currículo adaptativo v2
 
-- implementar a mistura representativa/direcionada/exploração/transferência;
-- aplicar espaçamento, diversidade e limites de cobertura;
-- calcular chance de sessão com o sequenciador real;
-- ativar gradualmente após shadow mode, mantendo rollback por versão;
-- calibrar parâmetros pelo ganho retido e transferido, não pelo WPM da sessão.
+- [x] Implementar a mistura representativa/direcionada/exploração/transferência.
+- [x] Aplicar espaçamento, diversidade, holdout e limites de cobertura.
+- [x] Calcular chance de sessão com o sequenciador real.
+- [ ] Manter shadow mode e rollback operacional por versão.
+- [ ] Calibrar parâmetros por ganho retido e transferido com dados prospectivos.
 
 Dados históricos do adaptativo v1 podem continuar visíveis, mas não possuem
 informação suficiente para reconstruir a posterior completa. Não devem ganhar
