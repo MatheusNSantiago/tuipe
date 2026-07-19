@@ -10,7 +10,7 @@ use ratatui::{
     },
 };
 use spline1d::pchip;
-use std::{env, sync::OnceLock};
+use std::env;
 
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
@@ -68,23 +68,10 @@ const ICONES_NERD: Icons = Icons {
 };
 
 fn icones_do_terminal() -> Icons {
-    static ICONES: OnceLock<Icons> = OnceLock::new();
-    *ICONES.get_or_init(|| match env::var("TUIPE_ICONS").ok().as_deref() {
-        Some("unicode") => ICONES_UNICODE,
+    match env::var("TUIPE_ICONS").ok().as_deref() {
         Some("nerd") => ICONES_NERD,
-        _ if nerd_font_instalada() => ICONES_NERD,
         _ => ICONES_UNICODE,
-    })
-}
-
-fn nerd_font_instalada() -> bool {
-    let mut fontes = fontdb::Database::new();
-    fontes.load_system_fonts();
-    fontes.faces().any(|face| {
-        face.families
-            .iter()
-            .any(|(familia, _)| familia.to_ascii_lowercase().contains("nerd font"))
-    })
+    }
 }
 
 pub fn render(
