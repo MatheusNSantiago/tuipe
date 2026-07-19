@@ -225,6 +225,12 @@ Usar SQLite em WAL mode e transacoes curtas. A documentacao oficial explica conc
 
 ## 6. Modelo adaptativo
 
+> A pesquisa e a especificação de implementação deste modelo estão em
+> [`docs/modelo-de-treinamento.md`](docs/modelo-de-treinamento.md). O documento
+> substitui a estratégia heurística inicial abaixo quando houver divergência,
+> especialmente contagens absolutas, limiar fixo de AFK e avaliação no próprio
+> material adaptativo.
+
 ### Comportamento externo fechado
 
 - `adaptive` e um modificador de `time` e `words`; nao funciona em `quote`.
