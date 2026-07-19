@@ -2,7 +2,10 @@ use rand::{Rng, seq::IndexedRandom};
 use unicode_normalization::UnicodeNormalization;
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::adaptive::{AdaptiveSampler, SelectionSource, WordSelection};
+use crate::adaptive::{
+    AdaptiveSampler, MECHANIC_CAPITALIZATION, MECHANIC_COMMA, MECHANIC_FINAL_PUNCTUATION,
+    SelectionSource, WordSelection,
+};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct GeneratedWord {
@@ -147,18 +150,32 @@ impl<R: Rng> WordGenerator<R> {
             word = capitalize_first_grapheme(&word);
         }
 
+        let (final_boost, comma_boost) =
+            self.adaptive
+                .as_ref()
+                .map_or((1.0, 1.0), |(language, sampler)| {
+                    (
+                        sampler
+                            .mechanic_boost(language, MECHANIC_FINAL_PUNCTUATION)
+                            .max(sampler.mechanic_boost(language, MECHANIC_CAPITALIZATION)),
+                        sampler.mechanic_boost(language, MECHANIC_COMMA),
+                    )
+                });
+        let final_chance = (0.1 * final_boost).min(0.15);
+        let comma_chance = (0.01 * comma_boost).min(0.015);
         let roll: f64 = self.uniform.rng_mut().random();
-        if roll < 0.1 {
-            let punctuation = if roll <= 0.08 {
+        if roll < final_chance {
+            let position = roll / final_chance;
+            let punctuation = if position <= 0.8 {
                 '.'
-            } else if roll < 0.09 {
+            } else if position < 0.9 {
                 '?'
             } else {
                 '!'
             };
             word.push(punctuation);
             self.sentence_start = true;
-        } else if roll < 0.11 {
+        } else if roll < final_chance + comma_chance {
             word.push(',');
             self.sentence_start = false;
         } else {

@@ -22,11 +22,11 @@ use termina::{
 use unicode_segmentation::UnicodeSegmentation;
 
 use tuipe::{
-    adaptive::{AdaptivePolicy, AdaptiveSampler, Observation},
+    adaptive::{AdaptivePolicy, AdaptiveSampler, Observation, mechanics_for_token},
     content::{ContentCatalog, WordGenerator},
     persistence::{
-        Preferences, RawEventCodec, RawSessionEnd, Repository, SessionKind, StatisticsOverview,
-        WordObservationRecord, paths,
+        MechanicObservationRecord, Preferences, RawEventCodec, RawSessionEnd, Repository,
+        SessionKind, StatisticsOverview, WordObservationRecord, paths,
     },
     typing::{
         ExternalEvent, InputEvent, KeyAction, QuoteLength, RecordedInputKind, TestEngine, TestMode,
@@ -96,6 +96,7 @@ impl App {
             repository.load_all_word_skills()?,
         );
         adaptive.set_ngram_skills(repository.load_all_ngram_skills()?);
+        adaptive.set_mechanic_skills(repository.load_all_mechanic_skills()?);
         for language in ["portuguese", "english"] {
             adaptive.set_baseline(language, repository.baseline_profile(language)?.rates);
         }
@@ -296,6 +297,29 @@ impl App {
                 let selection = (!self.repeated_test)
                     .then(|| self.selections.get(word_index).cloned().flatten())
                     .flatten();
+                let final_mechanics = mechanics_for_token(&attempt.without_commit());
+                let mechanics = mechanics_for_token(&target.text)
+                    .into_iter()
+                    .map(|mechanic| {
+                        let had_mistake = self.engine.recorded_events().iter().any(|event| {
+                            event.word_index == word_index
+                                && matches!(
+                                    &event.kind,
+                                    RecordedInputKind::Insert {
+                                        expected: Some(expected),
+                                        correct: false,
+                                        ..
+                                    } if mechanics_for_token(expected).contains(&mechanic)
+                                )
+                        });
+                        let present_at_end = final_mechanics.contains(&mechanic);
+                        MechanicObservationRecord {
+                            mechanic,
+                            confirmed_error: !present_at_end,
+                            corrected: had_mistake && present_at_end,
+                        }
+                    })
+                    .collect();
                 Some(WordObservationRecord {
                     language: self.engine.config().language.clone(),
                     word,
@@ -310,6 +334,7 @@ impl App {
                     evidence_weight,
                     selection_source: selection.as_ref().map(|selection| selection.source),
                     selection_propensity: selection.map(|selection| selection.propensity),
+                    mechanics,
                 })
             })
             .collect()
@@ -400,6 +425,16 @@ impl App {
                     evidence_weight: record.evidence_weight,
                 },
             );
+            for mechanic in &record.mechanics {
+                self.adaptive.observe_mechanic(
+                    &record.language,
+                    &record.word,
+                    &mechanic.mechanic,
+                    mechanic.confirmed_error,
+                    mechanic.corrected,
+                    record.evidence_weight,
+                );
+            }
         }
     }
 

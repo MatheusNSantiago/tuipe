@@ -5,7 +5,8 @@ use chrono::{Datelike, Local};
 use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::adaptive::{
-    NgramSkill, Observation, PersonalBaseline, SelectionSource, WordSkill, lexical_ngrams,
+    MechanicSkill, NgramSkill, Observation, PersonalBaseline, SelectionSource, WordSkill,
+    lexical_ngrams,
 };
 use crate::gamification::{StreakState, XpGain, XpState, award};
 use crate::persistence::{RawEvent, RawEventCodec};
@@ -92,6 +93,14 @@ pub struct WordObservationRecord {
     pub evidence_weight: f64,
     pub selection_source: Option<SelectionSource>,
     pub selection_propensity: Option<f64>,
+    pub mechanics: Vec<MechanicObservationRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct MechanicObservationRecord {
+    pub mechanic: String,
+    pub confirmed_error: bool,
+    pub corrected: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -233,8 +242,9 @@ impl Repository {
                 "INSERT INTO word_observations (
                     session_id, language, word, confirmed_error, corrections,
                     active_ms, afk_ms, fast_success, grapheme_count, slow,
-                    latency_ratio, evidence_weight, selection_source, selection_propensity
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                    latency_ratio, evidence_weight, selection_source, selection_propensity,
+                    mechanics_json
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
                 params![
                     session_id,
                     record.language,
@@ -252,6 +262,7 @@ impl Repository {
                         .selection_source
                         .map(|source| format!("{source:?}").to_lowercase()),
                     record.selection_propensity,
+                    serde_json::to_string(&record.mechanics)?,
                 ],
             )?;
 
@@ -297,6 +308,33 @@ impl Repository {
                     "INSERT INTO ngram_skill (language, ngram, state) VALUES (?1, ?2, ?3)
                      ON CONFLICT(language, ngram) DO UPDATE SET state = excluded.state",
                     params![record.language, ngram, postcard::to_allocvec(&ngram_skill)?,],
+                )?;
+            }
+            for mechanic in &record.mechanics {
+                let mut skill = transaction
+                    .query_row(
+                        "SELECT state FROM mechanic_skill WHERE language = ?1 AND mechanic = ?2",
+                        params![record.language, mechanic.mechanic],
+                        |row| row.get::<_, Vec<u8>>(0),
+                    )
+                    .optional()?
+                    .map(|bytes| postcard::from_bytes::<MechanicSkill>(&bytes))
+                    .transpose()?
+                    .unwrap_or_default();
+                skill.observe(
+                    &record.word,
+                    mechanic.confirmed_error,
+                    mechanic.corrected,
+                    record.evidence_weight,
+                );
+                transaction.execute(
+                    "INSERT INTO mechanic_skill (language, mechanic, state) VALUES (?1, ?2, ?3)
+                     ON CONFLICT(language, mechanic) DO UPDATE SET state = excluded.state",
+                    params![
+                        record.language,
+                        mechanic.mechanic,
+                        postcard::to_allocvec(&skill)?,
+                    ],
                 )?;
             }
         }
@@ -487,6 +525,25 @@ impl Repository {
             .collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    pub fn load_all_mechanic_skills(&self) -> Result<Vec<(String, String, MechanicSkill)>> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT language, mechanic, state FROM mechanic_skill")?;
+        Ok(statement
+            .query_map([], |row| {
+                let state = row.get::<_, Vec<u8>>(2)?;
+                let skill = postcard::from_bytes(&state).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        2,
+                        rusqlite::types::Type::Blob,
+                        Box::new(error),
+                    )
+                })?;
+                Ok((row.get(0)?, row.get(1)?, skill))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     pub fn statistics_overview(&self) -> Result<StatisticsOverview> {
         let mut overview = self.connection.query_row(
             "SELECT
@@ -628,7 +685,8 @@ fn migrate(connection: &Connection) -> Result<()> {
            fast_success INTEGER NOT NULL DEFAULT 0, grapheme_count INTEGER NOT NULL DEFAULT 0,
            slow INTEGER NOT NULL DEFAULT 0, latency_ratio REAL,
            evidence_weight REAL NOT NULL DEFAULT 1,
-           selection_source TEXT, selection_propensity REAL
+           selection_source TEXT, selection_propensity REAL,
+           mechanics_json TEXT NOT NULL DEFAULT '[]'
          );
          CREATE TABLE IF NOT EXISTS word_skill (language TEXT NOT NULL, word TEXT NOT NULL, state BLOB NOT NULL, PRIMARY KEY(language, word));
          CREATE TABLE IF NOT EXISTS ngram_skill (language TEXT NOT NULL, ngram TEXT NOT NULL, state BLOB NOT NULL, PRIMARY KEY(language, ngram));
@@ -687,7 +745,13 @@ fn migrate(connection: &Connection) -> Result<()> {
             [],
         )?;
     }
-    connection.execute("UPDATE schema_version SET version = 2", [])?;
+    if !table_has_column(connection, "word_observations", "mechanics_json")? {
+        connection.execute(
+            "ALTER TABLE word_observations ADD COLUMN mechanics_json TEXT NOT NULL DEFAULT '[]'",
+            [],
+        )?;
+    }
+    connection.execute("UPDATE schema_version SET version = 3", [])?;
     Ok(())
 }
 
@@ -812,6 +876,7 @@ mod tests {
                     evidence_weight: 1.0,
                     selection_source: None,
                     selection_propensity: None,
+                    mechanics: Vec::new(),
                 }],
             )
             .unwrap();
@@ -869,6 +934,7 @@ mod tests {
                         evidence_weight: 1.0,
                         selection_source: None,
                         selection_propensity: None,
+                        mechanics: Vec::new(),
                     }],
                 )
                 .unwrap();
@@ -877,6 +943,46 @@ mod tests {
             repository.baseline_ms_per_grapheme("portuguese").unwrap(),
             Some(200.0)
         );
+    }
+
+    #[test]
+    fn mecanica_e_materializada_separada_da_palavra() {
+        let temporary = tempfile::tempdir().unwrap();
+        let repository = Repository::open(&temporary.path().join("history.db")).unwrap();
+        repository
+            .save_session_with_observations(
+                &TestConfig::default(),
+                &TestStatus::Completed { ended_at_ms: 900 },
+                Metrics::default(),
+                &[WordObservationRecord {
+                    language: "portuguese".into(),
+                    word: "ação".into(),
+                    confirmed_error: false,
+                    corrections: 1,
+                    active_ms: 900,
+                    afk_ms: 0,
+                    grapheme_count: 4,
+                    fast_success: false,
+                    slow: false,
+                    latency_ratio: None,
+                    evidence_weight: 1.0,
+                    selection_source: None,
+                    selection_propensity: None,
+                    mechanics: vec![MechanicObservationRecord {
+                        mechanic: "til".into(),
+                        confirmed_error: false,
+                        corrected: true,
+                    }],
+                }],
+            )
+            .unwrap();
+
+        let skills = repository.load_all_mechanic_skills().unwrap();
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].0, "portuguese");
+        assert_eq!(skills[0].1, "til");
+        assert_eq!(skills[0].2.corrected_error_mass, 1.0);
+        assert_eq!(skills[0].2.distinct_words, vec!["ação"]);
     }
 
     #[test]

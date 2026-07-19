@@ -15,6 +15,7 @@ use rand::{
 };
 use serde::{Deserialize, Serialize};
 use statrs::distribution::{Beta, ContinuousCDF};
+use unicode_normalization::UnicodeNormalization;
 use unicode_segmentation::UnicodeSegmentation;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -96,6 +97,34 @@ pub struct NgramSkill {
     pub corrected_error_mass: f64,
     /// Amostra limitada de palavras distintas que sustenta a generalização.
     pub distinct_words: Vec<String>,
+}
+
+/// Evidência de uma operação ortográfica que atravessa palavras diferentes.
+/// Ela permanece separada da habilidade lexical e dos n-gramas motores.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct MechanicSkill {
+    pub effective_exposures: f64,
+    pub uncorrected_error_mass: f64,
+    pub corrected_error_mass: f64,
+    pub distinct_words: Vec<String>,
+}
+
+impl MechanicSkill {
+    pub fn observe(
+        &mut self,
+        word: &str,
+        confirmed_error: bool,
+        corrected: bool,
+        evidence_weight: f64,
+    ) {
+        if !self.distinct_words.iter().any(|seen| seen == word) && self.distinct_words.len() < 32 {
+            self.distinct_words.push(word.to_owned());
+        }
+        let weight = evidence_weight.clamp(0.0, 1.0);
+        self.effective_exposures += weight;
+        self.uncorrected_error_mass += f64::from(confirmed_error) * weight;
+        self.corrected_error_mass += f64::from(corrected && !confirmed_error) * weight;
+    }
 }
 
 impl NgramSkill {
@@ -245,6 +274,28 @@ impl AdaptivePolicy {
         let confidence = 1.0 - (-skill.effective_exposures / 12.0).exp();
         1.0 - (-(uncorrected + corrected) * confidence * 10.0).exp()
     }
+
+    pub fn mechanic_difficulty(&self, skill: &MechanicSkill, baseline: PersonalBaseline) -> f64 {
+        if skill.distinct_words.len() < 3 || skill.effective_exposures <= 0.0 {
+            return 0.0;
+        }
+        let uncorrected = posterior_excess(
+            baseline.uncorrected_error_rate,
+            self.prior_strength,
+            skill.uncorrected_error_mass,
+            skill.effective_exposures,
+            self.minimum_error_effect,
+        );
+        let corrected = posterior_excess(
+            baseline.corrected_error_rate,
+            self.prior_strength,
+            skill.corrected_error_mass,
+            skill.effective_exposures,
+            self.minimum_correction_effect,
+        ) * self.corrected_error_cost;
+        let confidence = 1.0 - (-skill.effective_exposures / 12.0).exp();
+        1.0 - (-(uncorrected + corrected) * confidence * 8.0).exp()
+    }
 }
 
 fn posterior_excess(
@@ -305,6 +356,7 @@ pub struct AdaptiveSampler {
     skills: HashMap<(String, String), WordSkill>,
     baselines: HashMap<String, PersonalBaseline>,
     ngram_skills: HashMap<(String, String), NgramSkill>,
+    mechanic_skills: HashMap<(String, String), MechanicSkill>,
 }
 
 impl AdaptiveSampler {
@@ -314,6 +366,7 @@ impl AdaptiveSampler {
             skills: HashMap::new(),
             baselines: HashMap::new(),
             ngram_skills: HashMap::new(),
+            mechanic_skills: HashMap::new(),
         }
     }
 
@@ -329,6 +382,7 @@ impl AdaptiveSampler {
                 .collect(),
             baselines: HashMap::new(),
             ngram_skills: HashMap::new(),
+            mechanic_skills: HashMap::new(),
         }
     }
 
@@ -339,6 +393,16 @@ impl AdaptiveSampler {
         self.ngram_skills = skills
             .into_iter()
             .map(|(language, ngram, skill)| ((language, ngram), skill))
+            .collect();
+    }
+
+    pub fn set_mechanic_skills(
+        &mut self,
+        skills: impl IntoIterator<Item = (String, String, MechanicSkill)>,
+    ) {
+        self.mechanic_skills = skills
+            .into_iter()
+            .map(|(language, mechanic, skill)| ((language, mechanic), skill))
             .collect();
     }
 
@@ -428,6 +492,34 @@ impl AdaptiveSampler {
                 .or_default()
                 .observe(word, observation);
         }
+    }
+
+    pub fn observe_mechanic(
+        &mut self,
+        language: &str,
+        word: &str,
+        mechanic: &str,
+        confirmed_error: bool,
+        corrected: bool,
+        evidence_weight: f64,
+    ) {
+        self.mechanic_skills
+            .entry((language.into(), mechanic.into()))
+            .or_default()
+            .observe(word, confirmed_error, corrected, evidence_weight);
+    }
+
+    /// Multiplicador deliberadamente pequeno para formatadores opcionais. O
+    /// currículo continua majoritariamente representativo.
+    pub fn mechanic_boost(&self, language: &str, mechanic: &str) -> f64 {
+        let difficulty = self
+            .mechanic_skills
+            .get(&(language.into(), mechanic.into()))
+            .map_or(0.0, |skill| {
+                self.policy
+                    .mechanic_difficulty(skill, self.baseline(language))
+            });
+        1.0 + 0.5 * difficulty
     }
 
     pub fn skill(&self, language: &str, word: &str) -> Option<&WordSkill> {
@@ -547,7 +639,12 @@ impl AdaptiveSampler {
             .filter_map(|ngram| self.ngram_skills.get(&(language.into(), ngram)))
             .map(|skill| self.policy.ngram_difficulty(skill, baseline))
             .fold(0.0, f64::max);
-        (lexical + motor * 0.45).min(1.0)
+        let mechanics = mechanics_for_token(word)
+            .into_iter()
+            .filter_map(|mechanic| self.mechanic_skills.get(&(language.into(), mechanic)))
+            .map(|skill| self.policy.mechanic_difficulty(skill, baseline))
+            .fold(0.0, f64::max);
+        (lexical + motor * 0.45 + mechanics * 0.25).min(1.0)
     }
 
     fn transfer_weights(&self, language: &str) -> HashMap<String, f64> {
@@ -597,6 +694,45 @@ pub fn lexical_ngrams(word: &str) -> Vec<String> {
                 .collect::<Vec<_>>()
         })
         .collect()
+}
+
+pub const MECHANIC_CAPITALIZATION: &str = "capitalizacao";
+pub const MECHANIC_FINAL_PUNCTUATION: &str = "pontuacao_final";
+pub const MECHANIC_COMMA: &str = "virgula";
+
+/// Extrai somente operações que podem generalizar entre palavras. A palavra
+/// acentuada continua sendo uma identidade lexical própria.
+pub fn mechanics_for_token(token: &str) -> Vec<String> {
+    let mut mechanics = Vec::<String>::new();
+    if token.chars().any(char::is_uppercase) {
+        mechanics.push(MECHANIC_CAPITALIZATION.into());
+    }
+    if token
+        .chars()
+        .any(|character| matches!(character, '.' | '?' | '!'))
+    {
+        mechanics.push(MECHANIC_FINAL_PUNCTUATION.into());
+    }
+    if token.contains(',') {
+        mechanics.push(MECHANIC_COMMA.into());
+    }
+    for character in token.nfd() {
+        let mechanic = match character {
+            '\u{0301}' => Some("acento_agudo"),
+            '\u{0302}' => Some("acento_circunflexo"),
+            '\u{0303}' => Some("til"),
+            '\u{0300}' => Some("acento_grave"),
+            '\u{0327}' => Some("cedilha"),
+            '\u{0308}' => Some("trema"),
+            _ => None,
+        };
+        if let Some(mechanic) = mechanic
+            && !mechanics.iter().any(|existing| existing == mechanic)
+        {
+            mechanics.push(mechanic.into());
+        }
+    }
+    mechanics
 }
 
 #[cfg(test)]
@@ -728,6 +864,30 @@ mod tests {
         skill.observe("principal", observation);
         skill.observe("privado", observation);
         assert!(policy.ngram_difficulty(&skill, PersonalBaseline::default()) > 0.0);
+    }
+
+    #[test]
+    fn mecanicas_sao_extraidas_sem_apagar_a_identidade_lexical() {
+        assert_eq!(
+            mechanics_for_token("Árvore,"),
+            vec![
+                MECHANIC_CAPITALIZATION.to_owned(),
+                MECHANIC_COMMA.to_owned(),
+                "acento_agudo".to_owned(),
+            ]
+        );
+        assert!(mechanics_for_token("arvore").is_empty());
+    }
+
+    #[test]
+    fn mecanica_so_inclina_o_curriculo_apos_contextos_distintos() {
+        let mut sampler = AdaptiveSampler::default();
+        for word in ["ação", "coração", "atenção"] {
+            sampler.observe_mechanic("portuguese", word, "til", true, false, 1.0);
+        }
+        let boost = sampler.mechanic_boost("portuguese", "til");
+        assert!(boost > 1.0);
+        assert!(boost <= 1.5);
     }
 
     proptest! {
