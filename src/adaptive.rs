@@ -18,6 +18,10 @@ use statrs::distribution::{Beta, ContinuousCDF};
 use unicode_normalization::UnicodeNormalization;
 use unicode_segmentation::UnicodeSegmentation;
 
+#[cfg(test)]
+#[path = "adaptive/simulation.rs"]
+mod simulation;
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AdaptivePolicy {
     /// Força do prior pessoal em exposições equivalentes.
@@ -383,6 +387,9 @@ pub struct AdaptiveSampler {
     mechanic_skills: HashMap<(String, String), MechanicSkill>,
     review_states: HashMap<(String, String), ReviewState>,
     as_of_unix_s: i64,
+    word_difficulties: HashMap<(String, String), f64>,
+    ngram_difficulties: HashMap<(String, String), f64>,
+    mechanic_difficulties: HashMap<(String, String), f64>,
 }
 
 impl AdaptiveSampler {
@@ -395,6 +402,9 @@ impl AdaptiveSampler {
             mechanic_skills: HashMap::new(),
             review_states: HashMap::new(),
             as_of_unix_s: 0,
+            word_difficulties: HashMap::new(),
+            ngram_difficulties: HashMap::new(),
+            mechanic_difficulties: HashMap::new(),
         }
     }
 
@@ -402,7 +412,7 @@ impl AdaptiveSampler {
         policy: AdaptivePolicy,
         skills: impl IntoIterator<Item = (String, String, WordSkill)>,
     ) -> Self {
-        Self {
+        let mut sampler = Self {
             policy,
             skills: skills
                 .into_iter()
@@ -413,7 +423,12 @@ impl AdaptiveSampler {
             mechanic_skills: HashMap::new(),
             review_states: HashMap::new(),
             as_of_unix_s: 0,
-        }
+            word_difficulties: HashMap::new(),
+            ngram_difficulties: HashMap::new(),
+            mechanic_difficulties: HashMap::new(),
+        };
+        sampler.rebuild_difficulty_cache();
+        sampler
     }
 
     pub fn set_ngram_skills(
@@ -424,6 +439,7 @@ impl AdaptiveSampler {
             .into_iter()
             .map(|(language, ngram, skill)| ((language, ngram), skill))
             .collect();
+        self.rebuild_difficulty_cache();
     }
 
     pub fn set_mechanic_skills(
@@ -434,6 +450,7 @@ impl AdaptiveSampler {
             .into_iter()
             .map(|(language, mechanic, skill)| ((language, mechanic), skill))
             .collect();
+        self.rebuild_difficulty_cache();
     }
 
     pub fn set_review_states(
@@ -482,6 +499,7 @@ impl AdaptiveSampler {
 
     pub fn set_baseline(&mut self, language: impl Into<String>, baseline: PersonalBaseline) {
         self.baselines.insert(language.into(), baseline);
+        self.rebuild_difficulty_cache();
     }
 
     pub fn policy(&self) -> AdaptivePolicy {
@@ -566,6 +584,10 @@ impl AdaptiveSampler {
                 .or_default()
                 .observe(word, observation);
         }
+        self.refresh_word_difficulty(language, word);
+        for ngram in lexical_ngrams(word) {
+            self.refresh_ngram_difficulty(language, &ngram);
+        }
     }
 
     pub fn observe_mechanic(
@@ -581,18 +603,17 @@ impl AdaptiveSampler {
             .entry((language.into(), mechanic.into()))
             .or_default()
             .observe(word, confirmed_error, corrected, evidence_weight);
+        self.refresh_mechanic_difficulty(language, mechanic);
     }
 
     /// Multiplicador deliberadamente pequeno para formatadores opcionais. O
     /// currículo continua majoritariamente representativo.
     pub fn mechanic_boost(&self, language: &str, mechanic: &str) -> f64 {
         let difficulty = self
-            .mechanic_skills
+            .mechanic_difficulties
             .get(&(language.into(), mechanic.into()))
-            .map_or(0.0, |skill| {
-                self.policy
-                    .mechanic_difficulty(skill, self.baseline(language))
-            });
+            .copied()
+            .unwrap_or(0.0);
         1.0 + 0.5 * difficulty
     }
 
@@ -627,12 +648,13 @@ impl AdaptiveSampler {
         } else {
             eligible
         };
-        let baseline = self.baseline(language);
         let uniform = vec![1.0 / eligible.len() as f64; eligible.len()];
         let targeted = normalized_or_uniform(
             eligible
                 .iter()
-                .map(|word| self.candidate_priority(language, word, baseline))
+                .map(|word| {
+                    1.0 + self.policy.maximum_boost * self.candidate_priority(language, word)
+                })
                 .collect(),
             &uniform,
         );
@@ -647,7 +669,10 @@ impl AdaptiveSampler {
         let transfer = normalized_or_uniform(
             eligible
                 .iter()
-                .map(|word| transfer_value(word, &transfer_weights))
+                .map(|word| {
+                    1.0 + self.policy.maximum_boost
+                        * transfer_value(word, &transfer_weights).min(1.0)
+                })
                 .collect(),
             &uniform,
         );
@@ -695,28 +720,34 @@ impl AdaptiveSampler {
     }
 
     fn exploration_value(&self, language: &str, word: &str) -> f64 {
-        let Some(skill) = self.skill(language, word) else {
-            return 0.0;
-        };
-        if skill.model_version < 2 {
-            return 0.0;
-        }
-        1.0 / (self.policy.prior_strength + skill.effective_exposures).sqrt()
+        let exposures = self
+            .skill(language, word)
+            .filter(|skill| skill.model_version >= 2)
+            .map_or(0.0, |skill| skill.effective_exposures);
+        1.0 / (self.policy.prior_strength + exposures).sqrt()
     }
 
-    fn candidate_priority(&self, language: &str, word: &str, baseline: PersonalBaseline) -> f64 {
-        let lexical = self.skill(language, word).map_or(0.0, |skill| {
-            self.policy.difficulty_with_baseline(skill, baseline)
-        });
+    fn candidate_priority(&self, language: &str, word: &str) -> f64 {
+        let lexical = self
+            .word_difficulties
+            .get(&(language.into(), word.into()))
+            .copied()
+            .unwrap_or(0.0);
         let motor = lexical_ngrams(word)
             .into_iter()
-            .filter_map(|ngram| self.ngram_skills.get(&(language.into(), ngram)))
-            .map(|skill| self.policy.ngram_difficulty(skill, baseline))
+            .filter_map(|ngram| {
+                self.ngram_difficulties
+                    .get(&(language.into(), ngram))
+                    .copied()
+            })
             .fold(0.0, f64::max);
         let mechanics = mechanics_for_token(word)
             .into_iter()
-            .filter_map(|mechanic| self.mechanic_skills.get(&(language.into(), mechanic)))
-            .map(|skill| self.policy.mechanic_difficulty(skill, baseline))
+            .filter_map(|mechanic| {
+                self.mechanic_difficulties
+                    .get(&(language.into(), mechanic))
+                    .copied()
+            })
             .fold(0.0, f64::max);
         let review = self.review_value(language, word);
         (lexical + motor * 0.45 + mechanics * 0.25 + review * 0.20).min(1.0)
@@ -730,17 +761,66 @@ impl AdaptiveSampler {
     }
 
     fn transfer_weights(&self, language: &str) -> HashMap<String, f64> {
-        let baseline = self.baseline(language);
         let mut weights = HashMap::new();
-        for ((skill_language, ngram), skill) in &self.ngram_skills {
-            if skill_language == language {
-                let difficulty = self.policy.ngram_difficulty(skill, baseline);
-                if difficulty > 0.0 {
-                    weights.insert(ngram.clone(), difficulty);
-                }
+        for ((skill_language, ngram), difficulty) in &self.ngram_difficulties {
+            if skill_language == language && *difficulty > 0.0 {
+                weights.insert(ngram.clone(), *difficulty);
             }
         }
         weights
+    }
+
+    fn rebuild_difficulty_cache(&mut self) {
+        self.word_difficulties.clear();
+        self.ngram_difficulties.clear();
+        self.mechanic_difficulties.clear();
+        let words = self.skills.keys().cloned().collect::<Vec<_>>();
+        let ngrams = self.ngram_skills.keys().cloned().collect::<Vec<_>>();
+        let mechanics = self.mechanic_skills.keys().cloned().collect::<Vec<_>>();
+        for (language, word) in words {
+            self.refresh_word_difficulty(&language, &word);
+        }
+        for (language, ngram) in ngrams {
+            self.refresh_ngram_difficulty(&language, &ngram);
+        }
+        for (language, mechanic) in mechanics {
+            self.refresh_mechanic_difficulty(&language, &mechanic);
+        }
+    }
+
+    fn refresh_word_difficulty(&mut self, language: &str, word: &str) {
+        let difficulty = self
+            .skills
+            .get(&(language.into(), word.into()))
+            .map_or(0.0, |skill| {
+                self.policy
+                    .difficulty_with_baseline(skill, self.baseline(language))
+            });
+        self.word_difficulties
+            .insert((language.into(), word.into()), difficulty);
+    }
+
+    fn refresh_ngram_difficulty(&mut self, language: &str, ngram: &str) {
+        let difficulty = self
+            .ngram_skills
+            .get(&(language.into(), ngram.into()))
+            .map_or(0.0, |skill| {
+                self.policy.ngram_difficulty(skill, self.baseline(language))
+            });
+        self.ngram_difficulties
+            .insert((language.into(), ngram.into()), difficulty);
+    }
+
+    fn refresh_mechanic_difficulty(&mut self, language: &str, mechanic: &str) {
+        let difficulty = self
+            .mechanic_skills
+            .get(&(language.into(), mechanic.into()))
+            .map_or(0.0, |skill| {
+                self.policy
+                    .mechanic_difficulty(skill, self.baseline(language))
+            });
+        self.mechanic_difficulties
+            .insert((language.into(), mechanic.into()), difficulty);
     }
 }
 
