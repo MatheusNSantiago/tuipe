@@ -214,6 +214,31 @@ impl App {
             );
         }
     }
+
+    fn load_statistics(&mut self, repository: &Repository) -> Result<()> {
+        let mut statistics = repository.statistics_overview()?;
+        let config = self.engine.config();
+        if let Some(candidates) = self.catalog.word_pack(&config.language, &config.word_pack) {
+            let draws = match config.mode {
+                TestMode::Words { count } => usize::from(count),
+                TestMode::Time { seconds } => {
+                    ((statistics.average_wpm.max(30.0) * f64::from(seconds) / 60.0).ceil() as usize)
+                        .max(1)
+                }
+                TestMode::Quote => 0,
+            };
+            for word in &mut statistics.priority_words {
+                word.estimated_session_chance = self.adaptive.estimated_session_chance(
+                    &config.language,
+                    &word.word,
+                    candidates,
+                    draws,
+                );
+            }
+        }
+        self.statistics = statistics;
+        Ok(())
+    }
 }
 
 fn lexical_word(value: &str) -> Option<String> {
@@ -436,7 +461,7 @@ fn handle_key(
         )
         && !resultado_recente
     {
-        app.statistics = repository.statistics_overview()?;
+        app.load_statistics(repository)?;
         app.statistics_open = true;
         return Ok(false);
     }

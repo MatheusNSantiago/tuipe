@@ -1,32 +1,33 @@
 ---
 source: src/ui.rs
+assertion_line: 1599
 expression: rendered
 ---
      estatísticas
-     wpm por teste  ·  últimos 12
+     wpm por teste  ·  12 testes mais recentes
       100│
-         │         ⢀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠴⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒
-         │⠉⠉⠉⠉⠉⠉⠉⠉⠉⠁
+         │                                      ⢀       ⡀       ⡀      ⢀       ⠄       ⠄      ⠠
+         │⠂      ⠐       ⠈       ⠁      ⠈
+         │
        50│
          │
          │
          │
         0└─────────────────────────────────────────────────────────────────────────────────────
-
+         #1                                        #7                                       #12
      testes            wpm médio          precisão          melhor             tempo
      42                84                 96%               112                61m 01s
 
-     histórico recente
-     teste     wpm     precisão     tempo
-     #12      82      96%          15s
-     #11      81      96%          15s
-     #10      80      95%          15s
-     #9       79      94%          15s
-     #8       78      94%          15s
-     #7       77      94%          15s
-     #6       76      93%          15s
-     #5       75      92%          15s
-     #4       74      92%          15s
-     #3       73      92%          15s
-     #2       72      91%          15s
+     histórico recente                                           palavras prioritárias
+     teste    wpm  bruto  precisão  caracteres  duração          sem evidência suficiente
+     #12     82   82     96%       100/0/0      15s
+     #11     81   81     96%       100/0/0      15s
+     #10     80   80     95%       100/0/0      15s
+     #9      79   79     94%       100/0/0      15s
+     #8      78   78     94%       100/0/0      15s
+     #7      77   77     94%       100/0/0      15s
+     #6      76   76     93%       100/0/0      15s
+     #5      75   75     92%       100/0/0      15s
+     #4      74   74     92%       100/0/0      15s
+     #3      73   73     92%       100/0/0      15s
      esc voltar

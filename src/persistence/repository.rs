@@ -18,14 +18,30 @@ pub struct StatisticsOverview {
     pub average_accuracy: f64,
     pub best_wpm: f64,
     pub recent_tests: Vec<SessionSummary>,
+    pub priority_words: Vec<PriorityWord>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SessionSummary {
     pub id: u64,
     pub elapsed_ms: u64,
     pub wpm: f64,
     pub accuracy: f64,
+    pub raw_wpm: f64,
+    pub correct_chars: u32,
+    pub incorrect_chars: u32,
+    pub extra_chars: u32,
+    pub config: TestConfig,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PriorityWord {
+    pub word: String,
+    pub difficulty: f64,
+    pub confirmed_errors: f64,
+    pub corrections: f64,
+    pub observations: u32,
+    pub estimated_session_chance: f64,
 }
 
 /// Evidência consultável de uma palavra observada durante uma sessão terminal.
@@ -197,11 +213,13 @@ impl Repository {
                     average_accuracy: row.get(3)?,
                     best_wpm: row.get(4)?,
                     recent_tests: Vec::new(),
+                    priority_words: Vec::new(),
                 })
             },
         )?;
         let mut statement = self.connection.prepare(
-            "SELECT id, elapsed_ms, wpm, accuracy
+            "SELECT id, elapsed_ms, wpm, accuracy, raw_wpm, correct_chars,
+                    incorrect_chars, extra_chars, config_toml
              FROM sessions
              WHERE terminal_state = 'completed'
              ORDER BY id DESC
@@ -214,11 +232,48 @@ impl Repository {
                     elapsed_ms: row.get::<_, i64>(1)? as u64,
                     wpm: row.get(2)?,
                     accuracy: row.get(3)?,
+                    raw_wpm: row.get(4)?,
+                    correct_chars: row.get::<_, i64>(5)? as u32,
+                    incorrect_chars: row.get::<_, i64>(6)? as u32,
+                    extra_chars: row.get::<_, i64>(7)? as u32,
+                    config: toml::from_str(&row.get::<_, String>(8)?).map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            8,
+                            rusqlite::types::Type::Text,
+                            Box::new(error),
+                        )
+                    })?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         overview.recent_tests.reverse();
+        overview.priority_words = self.priority_words()?;
         Ok(overview)
+    }
+
+    fn priority_words(&self) -> Result<Vec<PriorityWord>> {
+        let policy = crate::adaptive::AdaptivePolicy::default();
+        let mut skills = self.load_all_word_skills()?;
+        skills.sort_by(|left, right| {
+            policy
+                .difficulty(&right.2)
+                .total_cmp(&policy.difficulty(&left.2))
+        });
+        Ok(skills
+            .into_iter()
+            .filter_map(|(_, word, skill)| {
+                let difficulty = policy.difficulty(&skill);
+                (difficulty > 0.0).then_some(PriorityWord {
+                    word,
+                    difficulty,
+                    confirmed_errors: skill.confirmed_errors,
+                    corrections: skill.corrections,
+                    observations: skill.observations,
+                    estimated_session_chance: 0.0,
+                })
+            })
+            .take(8)
+            .collect())
     }
 }
 
@@ -330,7 +385,13 @@ mod tests {
                     elapsed_ms: 12_000,
                     wpm: 80.0,
                     accuracy: 95.0,
+                    raw_wpm: 0.0,
+                    correct_chars: 0,
+                    incorrect_chars: 0,
+                    extra_chars: 0,
+                    config: TestConfig::default(),
                 }],
+                priority_words: Vec::new(),
             }
         );
     }
@@ -371,5 +432,9 @@ mod tests {
                 },
             )]
         );
+        let priority = repository.statistics_overview().unwrap().priority_words;
+        assert_eq!(priority.len(), 1);
+        assert_eq!(priority[0].word, "difícil");
+        assert_eq!(priority[0].confirmed_errors, 1.0);
     }
 }

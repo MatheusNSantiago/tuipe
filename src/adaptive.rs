@@ -131,6 +131,27 @@ impl AdaptiveSampler {
             .collect()
     }
 
+    /// Aproxima a chance de a palavra aparecer em uma sessão. O cálculo parte
+    /// da distribuição ponderada de cada sorteio; a proteção contra repetição
+    /// só reduz levemente essa estimativa e não altera a ordem de prioridade.
+    pub fn estimated_session_chance(
+        &self,
+        language: &str,
+        word: &str,
+        candidates: &[String],
+        draws: usize,
+    ) -> f64 {
+        let total = candidates
+            .iter()
+            .map(|candidate| self.policy.weight(self.skill(language, candidate)))
+            .sum::<f64>();
+        if total == 0.0 || draws == 0 || !candidates.iter().any(|candidate| candidate == word) {
+            return 0.0;
+        }
+        let per_draw = self.policy.weight(self.skill(language, word)) / total;
+        1.0 - (1.0 - per_draw).powi(draws.min(i32::MAX as usize) as i32)
+    }
+
     pub fn observe(&mut self, language: &str, word: &str, observation: Observation) {
         self.skills
             .entry((language.into(), word.into()))
