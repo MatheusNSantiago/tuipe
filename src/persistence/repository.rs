@@ -1,9 +1,11 @@
 use std::{fs, path::Path};
 
 use anyhow::Result;
+use chrono::{Datelike, Local};
 use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::adaptive::{Observation, WordSkill};
+use crate::gamification::{StreakState, XpGain, XpState, award};
 use crate::typing::{Metrics, TestConfig, TestStatus};
 
 pub struct Repository {
@@ -155,7 +157,47 @@ impl Repository {
             )?;
         }
         transaction.commit()?;
+        if matches!(status, TestStatus::Completed { .. }) {
+            self.award_completed_session(config, &metrics)?;
+        }
         Ok(session_id)
+    }
+
+    pub fn progress(&self) -> Result<(XpState, StreakState)> {
+        Ok((
+            self.load_state("xp_state")?,
+            self.load_state("streak_state")?,
+        ))
+    }
+
+    fn award_completed_session(&self, config: &TestConfig, metrics: &Metrics) -> Result<XpGain> {
+        let (mut xp, mut streak) = self.progress()?;
+        let day = Local::now().date_naive().num_days_from_ce();
+        let gain = award(&mut xp, &mut streak, config, metrics, day);
+        self.save_state("xp_state", &xp)?;
+        self.save_state("streak_state", &streak)?;
+        Ok(gain)
+    }
+
+    fn load_state<T: serde::de::DeserializeOwned + Default>(&self, table: &str) -> Result<T> {
+        let sql = format!("SELECT state FROM {table} WHERE id = 1");
+        let encoded = self
+            .connection
+            .query_row(&sql, [], |row| row.get::<_, Vec<u8>>(0))
+            .optional()?;
+        Ok(encoded
+            .map(|data| postcard::from_bytes(&data))
+            .transpose()?
+            .unwrap_or_default())
+    }
+
+    fn save_state<T: serde::Serialize>(&self, table: &str, state: &T) -> Result<()> {
+        let sql = format!(
+            "INSERT INTO {table} (id, state) VALUES (1, ?1) ON CONFLICT(id) DO UPDATE SET state = excluded.state"
+        );
+        self.connection
+            .execute(&sql, [postcard::to_allocvec(state)?])?;
+        Ok(())
     }
 
     pub fn load_word_skills(&self, language: &str) -> Result<Vec<(String, String, WordSkill)>> {

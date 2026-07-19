@@ -5,6 +5,7 @@
 
 pub mod adaptive;
 pub mod content;
+pub mod gamification;
 pub mod persistence;
 pub mod typing;
 pub mod ui;
