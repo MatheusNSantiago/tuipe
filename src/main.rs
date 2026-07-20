@@ -2,6 +2,8 @@ use std::{
     collections::HashMap,
     io::Write,
     path::PathBuf,
+    sync::mpsc::{self, Receiver, SyncSender, TryRecvError},
+    thread,
     time::{Duration, Instant},
 };
 
@@ -26,7 +28,7 @@ use tuipe::{
     adaptive::{AdaptivePolicy, AdaptiveSampler, Observation, mechanics_for_token},
     content::{ContentCatalog, WordGenerator},
     persistence::{
-        MechanicObservationRecord, Preferences, RawEventCodec, RawSessionEnd, Repository,
+        MechanicObservationRecord, Preferences, RawEvent, RawEventCodec, RawSessionEnd, Repository,
         SessionKind, SessionProvenance, StatisticsOverview, WordObservationRecord, paths,
     },
     typing::{
@@ -41,6 +43,7 @@ fn main() -> Result<()> {
     let preferences = Preferences::load(&config_path)?;
     let catalog = ContentCatalog::bundled()?;
     let repository = Repository::open(&database_path)?;
+    let mut persistence = PersistenceWorker::start(database_path)?;
     let mut app = App::new(preferences, catalog, config_path, &repository)?;
 
     ratatui::run(|terminal| {
@@ -66,7 +69,7 @@ fn main() -> Result<()> {
             EnableMouseCapture,
             SetCursorStyle::BlinkingBar
         )?;
-        run(terminal, &mut app, &repository)
+        run(terminal, &mut app, &repository, &mut persistence)
     })
 }
 
@@ -76,6 +79,8 @@ struct App {
     engine: TestEngine,
     started: Instant,
     persisted: bool,
+    persistence_pending: bool,
+    persistence_error: Option<String>,
     config_path: PathBuf,
     settings_open: bool,
     statistics_open: bool,
@@ -86,6 +91,89 @@ struct App {
     seed: u64,
     repeated_test: bool,
     session_kind: SessionKind,
+    session_baseline: tuipe::persistence::PersonalBaselineProfile,
+}
+
+struct PersistJob {
+    config: tuipe::typing::TestConfig,
+    status: TestStatus,
+    metrics: tuipe::typing::Metrics,
+    observations: Vec<WordObservationRecord>,
+    raw_events: Vec<RawEvent>,
+    provenance: SessionProvenance,
+}
+
+enum PersistResult {
+    Saved(Vec<WordObservationRecord>),
+    Failed(String),
+}
+
+struct PersistenceWorker {
+    sender: SyncSender<PersistJob>,
+    receiver: Receiver<PersistResult>,
+}
+
+impl PersistenceWorker {
+    fn start(database_path: PathBuf) -> Result<Self> {
+        let (jobs_tx, jobs_rx) = mpsc::sync_channel::<PersistJob>(1);
+        let (results_tx, results_rx) = mpsc::channel();
+        let (ready_tx, ready_rx) = mpsc::sync_channel(0);
+        thread::Builder::new()
+            .name("tuipe-persistencia".into())
+            .spawn(move || {
+                let repository = match Repository::open(&database_path) {
+                    Ok(repository) => {
+                        let _ = ready_tx.send(Ok(()));
+                        repository
+                    }
+                    Err(error) => {
+                        let _ = ready_tx.send(Err(error.to_string()));
+                        return;
+                    }
+                };
+                for job in jobs_rx {
+                    let result = repository.save_session_with_provenance(
+                        &job.config,
+                        &job.status,
+                        job.metrics,
+                        &job.observations,
+                        &job.raw_events,
+                        &job.provenance,
+                    );
+                    let response = match result {
+                        Ok(_) => PersistResult::Saved(job.observations),
+                        Err(error) => PersistResult::Failed(error.to_string()),
+                    };
+                    if results_tx.send(response).is_err() {
+                        break;
+                    }
+                }
+            })?;
+        ready_rx
+            .recv()
+            .context("worker de persistência encerrou durante a inicialização")?
+            .map_err(anyhow::Error::msg)?;
+        Ok(Self {
+            sender: jobs_tx,
+            receiver: results_rx,
+        })
+    }
+
+    fn save(&self, job: PersistJob) -> Result<()> {
+        self.sender
+            .send(job)
+            .context("worker de persistência não está disponível")
+    }
+
+    fn try_result(&self) -> Result<Option<PersistResult>> {
+        match self.receiver.try_recv() {
+            Ok(result) => Ok(Some(result)),
+            Err(TryRecvError::Empty) => Ok(None),
+            Err(TryRecvError::Disconnected) => {
+                anyhow::bail!("worker de persistência encerrou inesperadamente")
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -122,8 +210,13 @@ impl App {
             repository.load_all_review_states()?,
             chrono::Utc::now().timestamp(),
         );
+        let mut session_baseline = tuipe::persistence::PersonalBaselineProfile::default();
         for language in ["portuguese", "english"] {
-            adaptive.set_baseline(language, repository.baseline_profile(language)?.rates);
+            let baseline = repository.baseline_profile(language)?;
+            if language == preferences.test.language {
+                session_baseline = baseline.clone();
+            }
+            adaptive.set_baseline(language, baseline.rates);
         }
         let session_kind = repository.next_session_kind(&preferences.test)?;
         let (engine, generator, selections) =
@@ -134,6 +227,8 @@ impl App {
             engine,
             started: Instant::now(),
             persisted: false,
+            persistence_pending: false,
+            persistence_error: None,
             config_path,
             settings_open: false,
             statistics_open: false,
@@ -144,6 +239,7 @@ impl App {
             seed,
             repeated_test: false,
             session_kind,
+            session_baseline,
         })
     }
 
@@ -167,11 +263,10 @@ impl App {
 
     fn restart(&mut self, repository: &Repository) -> Result<()> {
         self.persist_interrupted(repository, RawSessionEnd::Restarted)?;
+        self.session_baseline = repository.baseline_profile(&self.preferences.test.language)?;
         self.adaptive.set_baseline(
             self.preferences.test.language.clone(),
-            repository
-                .baseline_profile(&self.preferences.test.language)?
-                .rates,
+            self.session_baseline.rates,
         );
         self.seed = rand::random();
         let session_kind = repository.next_session_kind(&self.preferences.test)?;
@@ -187,6 +282,8 @@ impl App {
         self.selections = selections;
         self.started = Instant::now();
         self.persisted = false;
+        self.persistence_pending = false;
+        self.persistence_error = None;
         self.repeated_test = false;
         self.session_kind = session_kind;
         Ok(())
@@ -206,6 +303,8 @@ impl App {
         self.selections = selections.into_iter().map(|_| None).collect();
         self.started = Instant::now();
         self.persisted = false;
+        self.persistence_pending = false;
+        self.persistence_error = None;
         self.repeated_test = true;
         self.session_kind = SessionKind::Repeat;
         Ok(())
@@ -251,6 +350,39 @@ impl App {
             TestStatus::Ready | TestStatus::Running { .. } => return false,
         };
         self.elapsed_ms().saturating_sub(terminou_em) < 300
+    }
+
+    fn persistence_ui_state(&self) -> ui::PersistenceUiState {
+        if self.persistence_pending {
+            ui::PersistenceUiState::Saving
+        } else if self.persistence_error.is_some() {
+            ui::PersistenceUiState::Failed
+        } else {
+            ui::PersistenceUiState::Saved
+        }
+    }
+
+    fn persistence_job(&self) -> PersistJob {
+        let observations = self.observations(&self.session_baseline);
+        let end = if matches!(self.engine.status(), TestStatus::Failed { .. }) {
+            RawSessionEnd::Failed
+        } else {
+            RawSessionEnd::Completed
+        };
+        let ended_at_ms = match self.engine.status() {
+            TestStatus::Completed { ended_at_ms } | TestStatus::Failed { ended_at_ms, .. } => {
+                *ended_at_ms
+            }
+            _ => unreachable!("job só é criado para uma sessão terminada"),
+        };
+        PersistJob {
+            config: self.engine.config().clone(),
+            status: self.engine.status().clone(),
+            metrics: self.engine.metrics(),
+            observations,
+            raw_events: RawEventCodec::materialize(self.engine.recorded_events(), ended_at_ms, end),
+            provenance: self.provenance(),
+        }
     }
 
     fn update(&mut self, event: InputEvent) {
@@ -599,12 +731,25 @@ fn run(
     terminal: &mut ratatui::DefaultTerminal,
     app: &mut App,
     repository: &Repository,
+    persistence: &mut PersistenceWorker,
 ) -> Result<()> {
     let mut needs_draw = true;
     let mut last_drawn_second = 0;
     let mut last_size = terminal.size()?;
     let mut last_cursor_color = String::new();
     loop {
+        if let Some(result) = persistence.try_result()? {
+            app.persistence_pending = false;
+            match result {
+                PersistResult::Saved(observations) => {
+                    app.apply_observations(&observations);
+                    app.persisted = true;
+                    app.persistence_error = None;
+                }
+                PersistResult::Failed(error) => app.persistence_error = Some(error),
+            }
+            needs_draw = true;
+        }
         if needs_draw {
             let theme = app
                 .catalog
@@ -622,6 +767,7 @@ fn run(
                     app.settings_open,
                     &app.preferences.theme,
                     app.session_kind,
+                    app.persistence_ui_state(),
                 );
                 if app.statistics_open {
                     ui::render_statistics(frame, &app.statistics, theme);
@@ -629,6 +775,20 @@ fn run(
             })?;
             last_drawn_second = app.engine.elapsed_ms() / 1_000;
             needs_draw = false;
+        }
+
+        if !app.persisted
+            && !app.persistence_pending
+            && app.persistence_error.is_none()
+            && matches!(
+                app.engine.status(),
+                TestStatus::Completed { .. } | TestStatus::Failed { .. }
+            )
+        {
+            persistence.save(app.persistence_job())?;
+            app.persistence_pending = true;
+            needs_draw = true;
+            continue;
         }
 
         if event::poll(Duration::from_millis(16))? {
@@ -682,38 +842,6 @@ fn run(
         needs_draw |= app.engine.status() != &previous_status
             || (matches!(app.engine.status(), TestStatus::Running { .. })
                 && current_second != last_drawn_second);
-        if !app.persisted
-            && matches!(
-                app.engine.status(),
-                TestStatus::Completed { .. } | TestStatus::Failed { .. }
-            )
-        {
-            let baseline = repository.baseline_profile(&app.engine.config().language)?;
-            let observations = app.observations(&baseline);
-            let end = if matches!(app.engine.status(), TestStatus::Failed { .. }) {
-                RawSessionEnd::Failed
-            } else {
-                RawSessionEnd::Completed
-            };
-            let ended_at_ms = match app.engine.status() {
-                TestStatus::Completed { ended_at_ms } | TestStatus::Failed { ended_at_ms, .. } => {
-                    *ended_at_ms
-                }
-                _ => unreachable!("estado terminal validado acima"),
-            };
-            let raw_events =
-                RawEventCodec::materialize(app.engine.recorded_events(), ended_at_ms, end);
-            repository.save_session_with_provenance(
-                app.engine.config(),
-                app.engine.status(),
-                app.engine.metrics(),
-                &observations,
-                &raw_events,
-                &app.provenance(),
-            )?;
-            app.apply_observations(&observations);
-            app.persisted = true;
-        }
     }
     Ok(())
 }
@@ -812,6 +940,19 @@ fn handle_key(
     if app.statistics_open {
         if matches!(code, KeyCode::Esc | KeyCode::Enter | KeyCode::Char('s')) {
             app.statistics_open = false;
+        }
+        return Ok(false);
+    }
+    let terminal = matches!(
+        app.engine.status(),
+        TestStatus::Completed { .. } | TestStatus::Failed { .. }
+    );
+    if terminal && app.persistence_pending {
+        return Ok(false);
+    }
+    if terminal && app.persistence_error.is_some() {
+        if matches!(code, KeyCode::Char('r')) {
+            app.persistence_error = None;
         }
         return Ok(false);
     }
@@ -1160,6 +1301,59 @@ mod tests {
         assert!(!deve_sair);
         assert!(matches!(app.engine.status(), TestStatus::Running { .. }));
         assert_eq!(app.engine.attempts()[0].input, "q");
+    }
+
+    #[test]
+    fn worker_persiste_sem_bloquear_o_estado_da_interface() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("worker.db");
+        let worker = PersistenceWorker::start(path.clone()).unwrap();
+        worker
+            .save(PersistJob {
+                config: tuipe::typing::TestConfig::default(),
+                status: TestStatus::Completed { ended_at_ms: 1 },
+                metrics: tuipe::typing::Metrics::default(),
+                observations: Vec::new(),
+                raw_events: Vec::new(),
+                provenance: SessionProvenance::default(),
+            })
+            .unwrap();
+
+        assert!(matches!(
+            worker
+                .receiver
+                .recv_timeout(Duration::from_secs(2))
+                .unwrap(),
+            PersistResult::Saved(_)
+        ));
+        let repository = Repository::open(&path).unwrap();
+        assert_eq!(repository.statistics_overview().unwrap().completed_tests, 1);
+    }
+
+    #[test]
+    fn falha_ao_salvar_exige_retry_antes_de_qualquer_atalho_do_resultado() {
+        let temporary = tempfile::tempdir().unwrap();
+        let repository = Repository::open(&temporary.path().join("history.db")).unwrap();
+        let mut app = app_de_teste(tuipe::typing::TestConfig::default(), &["que "]);
+        app.engine.update(InputEvent::Key {
+            action: KeyAction::Text("que ".into()),
+            at_ms: 10,
+        });
+        app.engine.update(InputEvent::Tick { at_ms: 30_010 });
+        app.persistence_error = Some("disco cheio".into());
+
+        assert!(!handle_key(&mut app, &repository, KeyCode::Enter, KeyModifiers::NONE).unwrap());
+        assert!(app.persistence_error.is_some());
+        assert!(
+            !handle_key(
+                &mut app,
+                &repository,
+                KeyCode::Char('r'),
+                KeyModifiers::NONE
+            )
+            .unwrap()
+        );
+        assert!(app.persistence_error.is_none());
     }
 
     #[test]

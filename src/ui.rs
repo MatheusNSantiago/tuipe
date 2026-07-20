@@ -105,6 +105,23 @@ fn icones_do_terminal() -> Icons {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PersistenceUiState {
+    #[default]
+    Saved,
+    Saving,
+    Failed,
+}
+
+#[derive(Clone, Copy)]
+struct RenderContext<'a> {
+    settings_open: bool,
+    theme_name: &'a str,
+    session_kind: SessionKind,
+    persistence: PersistenceUiState,
+    icones: Icons,
+}
+
 pub fn render(
     frame: &mut Frame,
     engine: &TestEngine,
@@ -112,15 +129,19 @@ pub fn render(
     settings_open: bool,
     theme_name: &str,
     session_kind: SessionKind,
+    persistence: PersistenceUiState,
 ) {
     render_com_icones(
         frame,
         engine,
         theme,
-        settings_open,
-        theme_name,
-        session_kind,
-        icones_do_terminal(),
+        RenderContext {
+            settings_open,
+            theme_name,
+            session_kind,
+            persistence,
+            icones: icones_do_terminal(),
+        },
     );
 }
 
@@ -632,11 +653,15 @@ fn render_com_icones(
     frame: &mut Frame,
     engine: &TestEngine,
     theme: &Theme,
-    settings_open: bool,
-    theme_name: &str,
-    session_kind: SessionKind,
-    icones: Icons,
+    context: RenderContext<'_>,
 ) {
+    let RenderContext {
+        settings_open,
+        theme_name,
+        session_kind,
+        persistence,
+        icones,
+    } = context;
     let viewport = frame.area();
     frame.render_widget(
         Block::default().style(Style::default().bg(color(&theme.bg))),
@@ -712,6 +737,7 @@ fn render_com_icones(
             ),
             engine,
             theme,
+            persistence,
             icones,
         );
     }
@@ -1565,8 +1591,35 @@ fn render_footer(
     area: Rect,
     engine: &TestEngine,
     theme: &Theme,
+    persistence: PersistenceUiState,
     _icones: Icons,
 ) {
+    if matches!(
+        engine.status(),
+        TestStatus::Completed { .. } | TestStatus::Failed { .. }
+    ) {
+        match persistence {
+            PersistenceUiState::Saving => {
+                frame.render_widget(
+                    Paragraph::new("salvando resultado…")
+                        .alignment(Alignment::Center)
+                        .style(Style::default().fg(theme_color(theme, &theme.sub, 2.0))),
+                    area,
+                );
+                return;
+            }
+            PersistenceUiState::Failed => {
+                frame.render_widget(
+                    Paragraph::new("não foi possível salvar · r tentar novamente")
+                        .alignment(Alignment::Center)
+                        .style(Style::default().fg(theme_color(theme, &theme.error, 3.0))),
+                    area,
+                );
+                return;
+            }
+            PersistenceUiState::Saved => {}
+        }
+    }
     let lines = match engine.status() {
         TestStatus::Ready => vec![key_hints(
             &[("comece", "a digitar"), ("esc", "configurações")],
@@ -2125,6 +2178,24 @@ mod tests {
         settings_open: bool,
         session_kind: SessionKind,
     ) -> String {
+        render_engine_with_persistence(
+            width,
+            height,
+            engine,
+            settings_open,
+            session_kind,
+            PersistenceUiState::Saved,
+        )
+    }
+
+    fn render_engine_with_persistence(
+        width: u16,
+        height: u16,
+        engine: &TestEngine,
+        settings_open: bool,
+        session_kind: SessionKind,
+        persistence: PersistenceUiState,
+    ) -> String {
         let catalog = ContentCatalog::bundled().unwrap();
         let theme = catalog.theme("arch").unwrap();
         let backend = TestBackend::new(width, height);
@@ -2135,10 +2206,13 @@ mod tests {
                     frame,
                     engine,
                     theme,
-                    settings_open,
-                    "arch",
-                    session_kind,
-                    ICONES_UNICODE,
+                    RenderContext {
+                        settings_open,
+                        theme_name: "arch",
+                        session_kind,
+                        persistence,
+                        icones: ICONES_UNICODE,
+                    },
                 )
             })
             .unwrap();
@@ -2353,6 +2427,36 @@ mod tests {
             assert!(!rendered.contains("wpm ao longo do tempo"));
             insta::assert_snapshot!(format!("test_result_{width}x{height}"), rendered);
         }
+    }
+
+    #[test]
+    fn resultado_explica_salvamento_e_retry() {
+        let mut engine = TestEngine::new(TestConfig::default(), ["olá ".into()]);
+        engine.update(InputEvent::Key {
+            action: KeyAction::Text("olá ".into()),
+            at_ms: 10,
+        });
+        engine.update(InputEvent::Tick { at_ms: 30_010 });
+
+        let saving = render_engine_with_persistence(
+            100,
+            28,
+            &engine,
+            false,
+            SessionKind::Practice,
+            PersistenceUiState::Saving,
+        );
+        let failed = render_engine_with_persistence(
+            100,
+            28,
+            &engine,
+            false,
+            SessionKind::Practice,
+            PersistenceUiState::Failed,
+        );
+
+        assert!(saving.contains("salvando resultado"));
+        assert!(failed.contains("r tentar novamente"));
     }
 
     #[test]
