@@ -215,6 +215,22 @@ ignoradas nessa reconstrução. Um bloqueio de escrita impede que outra instânc
 altere o histórico durante a troca. Nada derivado é substituído antes que todas
 as sessões reconstruíveis tenham sido validadas.
 
+Se uma política adaptativa causar um problema operacional, ela pode ser trocada
+atomicamente pela distribuição uniforme segura, sem apagar configuração ou
+histórico. O mesmo comando restaura a versão anterior depois da investigação:
+
+```sh
+tuipe policy status
+tuipe policy rollback
+```
+
+O aplicativo explica na abertura quando está no modo seguro. Essa operação é um
+recurso de recuperação; o usuário não escolhe exercícios nem pesos do modelo.
+Enquanto a distribuição uniforme está ativa, a política adaptativa anterior
+continua sendo executada em shadow mode com a mesma seed. Estímulos, decisões e
+propensões candidatos são persistidos separadamente e nunca alteram o teste
+mostrado ao usuário.
+
 ## Desenvolvimento
 
 A referência comportamental congelada é o commit

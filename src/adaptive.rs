@@ -22,6 +22,9 @@ use unicode_segmentation::UnicodeSegmentation;
 #[path = "adaptive/simulation.rs"]
 mod simulation;
 
+pub const UNIFORM_POLICY_VERSION: u16 = 0;
+pub const CURRENT_POLICY_VERSION: u16 = 2;
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AdaptivePolicy {
     /// Força do prior pessoal em exposições equivalentes.

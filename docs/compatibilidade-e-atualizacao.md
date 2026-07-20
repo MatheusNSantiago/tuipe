@@ -4,7 +4,7 @@
 
 A versão 0.1 usa:
 
-- schema SQLite 8;
+- schema SQLite 9;
 - codec de eventos brutos 3, com leitura das versões 1 a 3;
 - métricas 2;
 - modelo adaptativo 2;
@@ -31,6 +31,14 @@ legadas sem estímulos continuam preservadas. A reconstrução adquire um bloque
 de escrita antes de ler o histórico, rematerializa métricas e observações e só
 então troca as habilidades derivadas; uma instância aberta nunca produz uma
 projeção parcial.
+
+A política adaptativa ativa e sua alternativa de rollback ficam versionadas no
+banco. Em caso de regressão operacional, `tuipe policy rollback` troca as duas
+atomicamente; `tuipe policy status` permite confirmar o estado antes e depois.
+O fallback uniforme preserva a coleta de evidências e nunca apaga o histórico.
+Nesse estado, a política alternativa roda em shadow mode: suas escolhas e
+propensões ficam registradas separadamente na sessão, sem influenciar o texto
+exibido. Isso permite comparar a candidata antes de restaurá-la.
 
 ## Reversão
 

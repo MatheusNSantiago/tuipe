@@ -14,6 +14,8 @@ os dados existentes.
 - estatísticas de progresso, histórico e diagnóstico de dificuldades;
 - temas embutidos e pessoais, Nerd Font e fallback Unicode;
 - banco SQLite privado, eventos compactados, backup, diagnóstico e reconstrução;
+- rollback reversível da política adaptativa para um modo uniforme seguro;
+- shadow mode que registra decisões candidatas sem alterar o teste apresentado;
 - atalhos configuráveis, mouse, terminais compactos e recuperação segura do
   terminal em saída, erro e sinais do sistema.
 

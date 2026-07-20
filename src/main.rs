@@ -34,7 +34,7 @@ use termina::{
     style::RgbColor,
 };
 use tuipe::{
-    adaptive::{AdaptivePolicy, AdaptiveSampler, Observation},
+    adaptive::{AdaptivePolicy, AdaptiveSampler, CURRENT_POLICY_VERSION, Observation},
     content::{ContentCatalog, Quote, WordGenerator},
     persistence::{
         Preferences, RawEvent, RawEventCodec, RawSessionEnd, Repository, SessionDetail,
@@ -95,6 +95,13 @@ fn run_main() -> Result<()> {
         ));
     }
     let repository = opened.repository;
+    let policy_state = repository.adaptive_policy_state()?;
+    if preferences.test.adaptive && policy_state.active_version != CURRENT_POLICY_VERSION {
+        notices.push(
+            "currículo adaptativo em modo seguro; seleções uniformes até a política ser restaurada"
+                .into(),
+        );
+    }
     let startup_notice = (!notices.is_empty()).then(|| notices.join(" · "));
     let mut persistence = PersistenceWorker::start(database_path)?;
     let mut app = App::new(
@@ -213,7 +220,7 @@ fn handle_cli() -> Result<bool> {
     match command.as_str() {
         "-h" | "--help" | "help" => {
             println!(
-                "tuipe — treinador de digitação adaptativo e offline\n\nUSO:\n    tuipe\n    tuipe doctor\n    tuipe backup [DESTINO]\n    tuipe rebuild\n    tuipe --version\n\nCOMANDOS:\n    doctor           valida configuração, banco e eventos sem alterar dados\n    backup [DESTINO] cria uma cópia SQLite consistente e privada\n    rebuild          recalcula métricas e o modelo usando os eventos brutos\n\nDentro do aplicativo, pressione esc para configurações e q para sair."
+                "tuipe — treinador de digitação adaptativo e offline\n\nUSO:\n    tuipe\n    tuipe doctor\n    tuipe backup [DESTINO]\n    tuipe rebuild\n    tuipe policy status\n    tuipe policy rollback\n    tuipe --version\n\nCOMANDOS:\n    doctor           valida configuração, banco e eventos sem alterar dados\n    backup [DESTINO] cria uma cópia SQLite consistente e privada\n    rebuild          recalcula métricas e o modelo usando os eventos brutos\n    policy status    mostra a política adaptativa ativa e a alternativa segura\n    policy rollback troca atomicamente a política ativa pela alternativa\n\nDentro do aplicativo, pressione esc para configurações e q para sair."
             );
         }
         "-V" | "--version" | "version" => println!("tuipe {}", env!("CARGO_PKG_VERSION")),
@@ -267,9 +274,48 @@ fn handle_cli() -> Result<bool> {
                 report.metrics, report.observations, report.words, report.ngrams, report.mechanics
             );
         }
+        "policy" => {
+            let action = arguments
+                .next()
+                .context("policy exige status ou rollback")?;
+            anyhow::ensure!(
+                arguments.next().is_none(),
+                "policy recebeu argumentos demais"
+            );
+            let (_, database_path) = paths();
+            anyhow::ensure!(
+                database_path.exists(),
+                "o banco ainda não existe: {}",
+                database_path.display()
+            );
+            let repository = Repository::open(&database_path)
+                .with_context(|| format!("abrir banco em {}", database_path.display()))?;
+            let state = match action.as_str() {
+                "status" => repository.adaptive_policy_state()?,
+                "rollback" => repository.rollback_adaptive_policy()?,
+                _ => anyhow::bail!("ação de policy desconhecida: {action}"),
+            };
+            println!(
+                "política ativa: {}\nalternativa: {}\nshadow: {}",
+                policy_name(state.active_version),
+                policy_name(state.fallback_version),
+                state
+                    .shadow_version
+                    .map(policy_name)
+                    .unwrap_or_else(|| "nenhuma candidata".into())
+            );
+        }
         _ => anyhow::bail!("comando desconhecido: {command}. Use tuipe --help"),
     }
     Ok(true)
+}
+
+fn policy_name(version: u16) -> String {
+    match version {
+        0 => "uniforme (modo seguro)".into(),
+        CURRENT_POLICY_VERSION => format!("adaptativa v{CURRENT_POLICY_VERSION}"),
+        _ => format!("desconhecida v{version}"),
+    }
 }
 
 struct App {
@@ -295,6 +341,11 @@ struct App {
     generator: Option<WordGenerator<SmallRng>>,
     selections: Vec<Option<tuipe::adaptive::WordSelection>>,
     adaptive: AdaptiveSampler,
+    policy_version: u16,
+    shadow_policy_version: Option<u16>,
+    shadow_generator: Option<WordGenerator<SmallRng>>,
+    shadow_stimuli: Vec<String>,
+    shadow_selections: Vec<Option<tuipe::adaptive::WordSelection>>,
     seed: u64,
     repeated_test: bool,
     session_kind: SessionKind,
@@ -432,8 +483,24 @@ impl App {
                 .word_pack(&preferences.test.language, &preferences.test.word_pack)
                 .context("o pacote de palavras configurado não está disponível")?,
         )?;
-        let (engine, generator, selections, current_quote) =
-            new_test(&catalog, &preferences.test, seed, &adaptive, session_kind)?;
+        let policy_state = repository.adaptive_policy_state()?;
+        let policy_version = policy_state.active_version;
+        let (engine, generator, selections, current_quote) = new_test(
+            &catalog,
+            &preferences.test,
+            seed,
+            &adaptive,
+            session_kind,
+            policy_version,
+        )?;
+        let shadow = shadow_test(
+            &catalog,
+            &preferences.test,
+            seed,
+            &adaptive,
+            session_kind,
+            policy_state.shadow_version,
+        )?;
         let quote_favorite = current_quote
             .as_ref()
             .map(|quote| repository.is_quote_favorite(quote.id))
@@ -462,6 +529,11 @@ impl App {
             generator,
             selections,
             adaptive,
+            policy_version,
+            shadow_policy_version: policy_state.shadow_version,
+            shadow_generator: shadow.generator,
+            shadow_stimuli: shadow.stimuli,
+            shadow_selections: shadow.selections,
             seed,
             repeated_test: false,
             session_kind,
@@ -520,10 +592,22 @@ impl App {
             self.seed,
             &self.adaptive,
             session_kind,
+            self.policy_version,
+        )?;
+        let shadow = shadow_test(
+            &self.catalog,
+            &self.preferences.test,
+            self.seed,
+            &self.adaptive,
+            session_kind,
+            self.shadow_policy_version,
         )?;
         self.engine = engine;
         self.generator = generator;
         self.selections = selections;
+        self.shadow_generator = shadow.generator;
+        self.shadow_stimuli = shadow.stimuli;
+        self.shadow_selections = shadow.selections;
         self.quote_favorite = current_quote
             .as_ref()
             .map(|quote| repository.is_quote_favorite(quote.id))
@@ -547,10 +631,14 @@ impl App {
             self.seed,
             &self.adaptive,
             SessionKind::Repeat,
+            self.policy_version,
         )?;
         self.engine = engine;
         self.generator = generator;
         self.selections = selections.into_iter().map(|_| None).collect();
+        self.shadow_generator = None;
+        self.shadow_stimuli.clear();
+        self.shadow_selections.clear();
         self.quote_favorite = current_quote
             .as_ref()
             .map(|quote| repository.is_quote_favorite(quote.id))
@@ -601,7 +689,12 @@ impl App {
                 .map(|target| target.text.clone())
                 .collect(),
             selections: self.selections.clone(),
-            policy_version: 2,
+            policy_version: self.policy_version,
+            shadow_stimuli: self.shadow_stimuli.clone(),
+            shadow_selections: self.shadow_selections.clone(),
+            shadow_policy_version: (!self.shadow_stimuli.is_empty())
+                .then_some(self.shadow_policy_version)
+                .flatten(),
             kind: self.session_kind,
         }
     }
@@ -670,6 +763,15 @@ impl App {
                 .extend(generated.iter().map(|word| word.selection.clone()));
             self.engine
                 .append_words(generated.into_iter().map(|word| format!("{} ", word.text)));
+            if let Some(generator) = &mut self.shadow_generator {
+                let generated = (0..40)
+                    .map(|_| generator.next_generated())
+                    .collect::<Vec<_>>();
+                self.shadow_stimuli
+                    .extend(generated.iter().map(|word| format!("{} ", word.text)));
+                self.shadow_selections
+                    .extend(generated.into_iter().map(|word| word.selection));
+            }
         }
     }
 
@@ -755,7 +857,10 @@ impl App {
             let next_kind = repository.next_session_kind(config, configured_words)?;
             let chances = if matches!(config.mode, TestMode::Quote) {
                 HashMap::new()
-            } else if next_kind == SessionKind::Practice && config.adaptive {
+            } else if next_kind == SessionKind::Practice
+                && config.adaptive
+                && self.policy_version == CURRENT_POLICY_VERSION
+            {
                 let (candidates, _) =
                     session_word_pool(configured_words, config, &self.adaptive, next_kind);
                 self.adaptive
@@ -774,6 +879,7 @@ impl App {
                     next_kind,
                     &targets,
                     draws,
+                    self.policy_version,
                 )?
             };
             for word in &mut statistics.priority_words {
@@ -1811,12 +1917,19 @@ type GeneratedTest = (
     Option<Quote>,
 );
 
+struct ShadowTest {
+    generator: Option<WordGenerator<SmallRng>>,
+    stimuli: Vec<String>,
+    selections: Vec<Option<tuipe::adaptive::WordSelection>>,
+}
+
 fn new_test(
     catalog: &ContentCatalog,
     config: &tuipe::typing::TestConfig,
     seed: u64,
     adaptive: &AdaptiveSampler,
     session_kind: SessionKind,
+    policy_version: u16,
 ) -> Result<GeneratedTest> {
     let mut rng = SmallRng::seed_from_u64(seed);
     let (words, generator, selections, quote) = match config.mode {
@@ -1835,12 +1948,14 @@ fn new_test(
             (without_last_commit(words), None, selections, Some(quote))
         }
         TestMode::Words { count } => {
-            let mut generator = word_generator(catalog, config, rng, adaptive, session_kind)?;
+            let mut generator =
+                word_generator(catalog, config, rng, adaptive, session_kind, policy_version)?;
             let (words, selections) = generate(&mut generator, usize::from(count));
             (without_last_commit(words), None, selections, None)
         }
         TestMode::Time { .. } => {
-            let mut generator = word_generator(catalog, config, rng, adaptive, session_kind)?;
+            let mut generator =
+                word_generator(catalog, config, rng, adaptive, session_kind, policy_version)?;
             // O buffer inicial precisa preencher três linhas reais também em
             // terminais ultrawide, como o gerador contínuo do Monkeytype.
             let (words, selections) = generate(&mut generator, 120);
@@ -1855,12 +1970,58 @@ fn new_test(
     ))
 }
 
+fn shadow_test(
+    catalog: &ContentCatalog,
+    config: &tuipe::typing::TestConfig,
+    seed: u64,
+    adaptive: &AdaptiveSampler,
+    session_kind: SessionKind,
+    shadow_version: Option<u16>,
+) -> Result<ShadowTest> {
+    let Some(shadow_version) = shadow_version else {
+        return Ok(ShadowTest {
+            generator: None,
+            stimuli: Vec::new(),
+            selections: Vec::new(),
+        });
+    };
+    if !config.adaptive
+        || session_kind != SessionKind::Practice
+        || matches!(config.mode, TestMode::Quote)
+    {
+        return Ok(ShadowTest {
+            generator: None,
+            stimuli: Vec::new(),
+            selections: Vec::new(),
+        });
+    }
+    let (engine, generator, selections, _) = new_test(
+        catalog,
+        config,
+        seed,
+        adaptive,
+        session_kind,
+        shadow_version,
+    )?;
+    let stimuli = engine
+        .targets()
+        .iter()
+        .map(|target| target.text.clone())
+        .collect();
+    Ok(ShadowTest {
+        generator,
+        stimuli,
+        selections,
+    })
+}
+
 fn word_generator(
     catalog: &ContentCatalog,
     config: &tuipe::typing::TestConfig,
     rng: SmallRng,
     adaptive: &AdaptiveSampler,
     session_kind: SessionKind,
+    policy_version: u16,
 ) -> Result<WordGenerator<SmallRng>> {
     let configured_words = catalog
         .word_pack(&config.language, &config.word_pack)
@@ -1870,7 +2031,7 @@ fn word_generator(
     let generator = WordGenerator::new(&words, rng, config.punctuation, config.numbers);
     Ok(match session_kind {
         SessionKind::Assessment => generator.with_assessment(),
-        SessionKind::Practice if config.adaptive => {
+        SessionKind::Practice if config.adaptive && policy_version == CURRENT_POLICY_VERSION => {
             generator.with_adaptive(&config.language, adaptive.clone())
         }
         SessionKind::Retention => generator.with_forced_words(retention_words),
@@ -1929,6 +2090,7 @@ fn estimated_generator_chances(
     session_kind: SessionKind,
     targets: &[String],
     draws: usize,
+    policy_version: u16,
 ) -> Result<HashMap<String, f64>> {
     if targets.is_empty() || draws == 0 {
         return Ok(HashMap::new());
@@ -1944,6 +2106,7 @@ fn estimated_generator_chances(
             SmallRng::seed_from_u64(seed),
             adaptive,
             session_kind,
+            policy_version,
         )?;
         let mut seen = HashSet::<String>::new();
         for _ in 0..draws {
@@ -2045,6 +2208,36 @@ mod tests {
         app.engine = TestEngine::new(config, words.iter().map(|word| (*word).to_owned()));
         app.selections = vec![None; words.len()];
         app
+    }
+
+    #[test]
+    fn modo_seguro_desativa_o_sorteio_adaptativo_sem_mudar_a_preferencia() {
+        let temporary = tempfile::tempdir().unwrap();
+        let repository = Repository::open(&temporary.path().join("history.db")).unwrap();
+        repository.rollback_adaptive_policy().unwrap();
+        let preferences = Preferences::default();
+        assert!(preferences.test.adaptive);
+
+        let app = App::new(
+            preferences,
+            ContentCatalog::bundled().unwrap(),
+            temporary.path().join("config.toml"),
+            None,
+            &repository,
+        )
+        .unwrap();
+        assert_eq!(app.policy_version, 0);
+        assert!(app.selections.iter().flatten().all(|selection| {
+            selection.source == tuipe::adaptive::SelectionSource::Representative
+        }));
+        assert_eq!(app.provenance().policy_version, 0);
+        assert_eq!(app.shadow_policy_version, Some(CURRENT_POLICY_VERSION));
+        assert_eq!(app.shadow_stimuli.len(), app.engine.targets().len());
+        assert_eq!(app.shadow_selections.len(), app.selections.len());
+        assert_eq!(
+            app.provenance().shadow_policy_version,
+            Some(CURRENT_POLICY_VERSION)
+        );
     }
 
     #[test]
@@ -2368,6 +2561,7 @@ mod tests {
             SessionKind::Retention,
             &["casa".into(), "tempo".into()],
             1,
+            CURRENT_POLICY_VERSION,
         )
         .unwrap();
 

@@ -598,7 +598,8 @@ Limitações ainda abertas:
 - [x] Implementar a mistura representativa/direcionada/exploração/transferência.
 - [x] Aplicar espaçamento, diversidade, holdout e limites de cobertura.
 - [x] Calcular chance de sessão com o sequenciador real.
-- [ ] Manter shadow mode e rollback operacional por versão.
+- [x] Manter uma política candidata em shadow mode antes da promoção.
+- [x] Manter rollback operacional e reversível por versão.
 - [ ] Calibrar parâmetros por ganho retido e transferido com dados prospectivos.
 
 Dados históricos do adaptativo v1 podem continuar visíveis, mas não possuem

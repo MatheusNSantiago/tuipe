@@ -15,8 +15,8 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, pa
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::adaptive::{
-    MechanicSkill, NgramSkill, Observation, PersonalBaseline, ReviewState, SelectionSource,
-    WordSelection, WordSkill, lexical_ngrams,
+    CURRENT_POLICY_VERSION, MechanicSkill, NgramSkill, Observation, PersonalBaseline, ReviewState,
+    SelectionSource, UNIFORM_POLICY_VERSION, WordSelection, WordSkill, lexical_ngrams,
 };
 use crate::gamification::{StreakState, XpState, award};
 use crate::persistence::{
@@ -55,7 +55,17 @@ pub struct SessionProvenance {
     pub stimuli: Vec<String>,
     pub selections: Vec<Option<WordSelection>>,
     pub policy_version: u16,
+    pub shadow_stimuli: Vec<String>,
+    pub shadow_selections: Vec<Option<WordSelection>>,
+    pub shadow_policy_version: Option<u16>,
     pub kind: SessionKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AdaptivePolicyState {
+    pub active_version: u16,
+    pub fallback_version: u16,
+    pub shadow_version: Option<u16>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -366,6 +376,28 @@ impl Repository {
                 usize::try_from(size).context("tamanho negativo nos eventos brutos persistidos")?;
             RawEventCodec::decode(version, size, &blob)?;
         }
+        let mut statement = connection.prepare(
+            "SELECT id, stimuli_json, selections_json, shadow_stimuli_json,
+                    shadow_selections_json, shadow_policy_version
+             FROM sessions ORDER BY id",
+        )?;
+        let mut rows = statement.query([])?;
+        while let Some(row) = rows.next()? {
+            let session_id = row.get::<_, i64>(0)?;
+            let stimuli = serde_json::from_str::<Vec<String>>(&row.get::<_, String>(1)?)?;
+            let selections =
+                serde_json::from_str::<Vec<Option<WordSelection>>>(&row.get::<_, String>(2)?)?;
+            let shadow_stimuli = serde_json::from_str::<Vec<String>>(&row.get::<_, String>(3)?)?;
+            let shadow_selections =
+                serde_json::from_str::<Vec<Option<WordSelection>>>(&row.get::<_, String>(4)?)?;
+            let shadow_version = row.get::<_, Option<u16>>(5)?;
+            validate_selection_trace(session_id, "ativa", &stimuli, &selections)?;
+            validate_selection_trace(session_id, "shadow", &shadow_stimuli, &shadow_selections)?;
+            anyhow::ensure!(
+                shadow_version.is_some() == !shadow_stimuli.is_empty(),
+                "sessão #{session_id}: versão e estímulos shadow divergem"
+            );
+        }
         Ok(())
     }
 
@@ -473,6 +505,54 @@ impl Repository {
         self.save_session_with_observations(config, status, metrics, &[])
     }
 
+    pub fn adaptive_policy_state(&self) -> Result<AdaptivePolicyState> {
+        self.connection
+            .query_row(
+                "SELECT active_version, fallback_version, shadow_version
+                 FROM adaptive_policy_state WHERE id = 1",
+                [],
+                |row| {
+                    Ok(AdaptivePolicyState {
+                        active_version: row.get(0)?,
+                        fallback_version: row.get(1)?,
+                        shadow_version: row.get(2)?,
+                    })
+                },
+            )
+            .map_err(Into::into)
+    }
+
+    /// Troca atomicamente a política ativa pela última alternativa conhecida.
+    /// A operação é reversível: uma segunda chamada restaura a versão anterior.
+    pub fn rollback_adaptive_policy(&self) -> Result<AdaptivePolicyState> {
+        let transaction = self.connection.unchecked_transaction()?;
+        let current = transaction.query_row(
+            "SELECT active_version, fallback_version FROM adaptive_policy_state WHERE id = 1",
+            [],
+            |row| Ok((row.get::<_, u16>(0)?, row.get::<_, u16>(1)?)),
+        )?;
+        for version in [current.0, current.1] {
+            anyhow::ensure!(
+                matches!(version, UNIFORM_POLICY_VERSION | CURRENT_POLICY_VERSION),
+                "versão de política adaptativa não suportada: {version}"
+            );
+        }
+        transaction.execute(
+            "UPDATE adaptive_policy_state
+             SET active_version = ?1, fallback_version = ?2,
+                 shadow_version = CASE WHEN ?1 = 0 THEN ?2 ELSE NULL END,
+                 changed_at = CURRENT_TIMESTAMP
+             WHERE id = 1",
+            params![current.1, current.0],
+        )?;
+        transaction.commit()?;
+        Ok(AdaptivePolicyState {
+            active_version: current.1,
+            fallback_version: current.0,
+            shadow_version: (current.1 == UNIFORM_POLICY_VERSION).then_some(current.0),
+        })
+    }
+
     /// Persiste sessão, evidências brutas e a projeção materializada do modelo
     /// adaptativo em uma única transação curta.
     pub fn save_session_with_observations(
@@ -551,8 +631,9 @@ impl Repository {
                 terminal_state, config_toml, elapsed_ms, wpm, raw_wpm, accuracy,
                 correct_chars, incorrect_chars, extra_chars, missed_chars,
                 metrics_version, adaptive_version, codec_version, session_kind,
-                seed_hex, stimuli_json, selections_json, policy_version
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 2, 2, ?11, ?12, ?13, ?14, ?15, ?16)",
+                seed_hex, stimuli_json, selections_json, policy_version,
+                shadow_stimuli_json, shadow_selections_json, shadow_policy_version
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 2, 2, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
             params![
                 terminal_state,
                 toml::to_string(config)?,
@@ -570,6 +651,9 @@ impl Repository {
                 serde_json::to_string(&provenance.stimuli)?,
                 serde_json::to_string(&provenance.selections)?,
                 provenance.policy_version,
+                serde_json::to_string(&provenance.shadow_stimuli)?,
+                serde_json::to_string(&provenance.shadow_selections)?,
+                provenance.shadow_policy_version,
             ],
         )?;
         let session_id = transaction.last_insert_rowid();
@@ -725,7 +809,8 @@ impl Repository {
     pub fn session_provenance(&self, session_id: i64) -> Result<Option<SessionProvenance>> {
         self.connection
             .query_row(
-                "SELECT seed_hex, stimuli_json, selections_json, policy_version, session_kind
+                "SELECT seed_hex, stimuli_json, selections_json, policy_version, session_kind,
+                        shadow_stimuli_json, shadow_selections_json, shadow_policy_version
                  FROM sessions WHERE id = ?1",
                 [session_id],
                 |row| {
@@ -737,17 +822,32 @@ impl Repository {
                         row.get::<_, String>(2)?,
                         row.get::<_, u16>(3)?,
                         row.get::<_, String>(4)?,
+                        row.get::<_, String>(5)?,
+                        row.get::<_, String>(6)?,
+                        row.get::<_, Option<u16>>(7)?,
                     ))
                 },
             )
             .optional()?
             .map(
-                |(seed_hex, stimuli_json, selections_json, policy_version, kind)| {
+                |(
+                    seed_hex,
+                    stimuli_json,
+                    selections_json,
+                    policy_version,
+                    kind,
+                    shadow_stimuli_json,
+                    shadow_selections_json,
+                    shadow_policy_version,
+                )| {
                     Ok(SessionProvenance {
                         seed: u64::from_str_radix(&seed_hex, 16)?,
                         stimuli: serde_json::from_str(&stimuli_json)?,
                         selections: serde_json::from_str(&selections_json)?,
                         policy_version,
+                        shadow_stimuli: serde_json::from_str(&shadow_stimuli_json)?,
+                        shadow_selections: serde_json::from_str(&shadow_selections_json)?,
+                        shadow_policy_version,
                         kind: session_kind_from_db(&kind),
                     })
                 },
@@ -2116,7 +2216,7 @@ fn word_reset_scope(language: &str, word: &str) -> String {
     format!("palavra\0{language}\0{word}")
 }
 
-const CURRENT_SCHEMA_VERSION: i64 = 8;
+const CURRENT_SCHEMA_VERSION: i64 = 9;
 
 fn validate_schema_version(connection: &Connection) -> Result<Option<i64>> {
     let exists = connection.query_row(
@@ -2160,7 +2260,10 @@ fn migrate(connection: &Connection) -> Result<()> {
            seed_hex TEXT NOT NULL DEFAULT '0000000000000000',
            stimuli_json TEXT NOT NULL DEFAULT '[]',
            selections_json TEXT NOT NULL DEFAULT '[]',
-           policy_version INTEGER NOT NULL DEFAULT 0
+           policy_version INTEGER NOT NULL DEFAULT 0,
+           shadow_stimuli_json TEXT NOT NULL DEFAULT '[]',
+           shadow_selections_json TEXT NOT NULL DEFAULT '[]',
+           shadow_policy_version INTEGER
          );
          CREATE TABLE IF NOT EXISTS word_observations (
            id INTEGER PRIMARY KEY, session_id INTEGER NOT NULL REFERENCES sessions(id),
@@ -2191,11 +2294,26 @@ fn migrate(connection: &Connection) -> Result<()> {
          CREATE TABLE IF NOT EXISTS xp_state (id INTEGER PRIMARY KEY CHECK(id = 1), state BLOB NOT NULL);
          CREATE TABLE IF NOT EXISTS streak_state (id INTEGER PRIMARY KEY CHECK(id = 1), state BLOB NOT NULL);
          CREATE TABLE IF NOT EXISTS adaptive_resets (scope TEXT PRIMARY KEY, session_id INTEGER NOT NULL);
+         CREATE TABLE IF NOT EXISTS adaptive_policy_state (
+           id INTEGER PRIMARY KEY CHECK(id = 1),
+           active_version INTEGER NOT NULL,
+           fallback_version INTEGER NOT NULL,
+           shadow_version INTEGER,
+           changed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+         );
+         INSERT INTO adaptive_policy_state (id, active_version, fallback_version)
+           VALUES (1, 2, 0) ON CONFLICT(id) DO NOTHING;
          CREATE TABLE IF NOT EXISTS raw_events (session_id INTEGER PRIMARY KEY REFERENCES sessions(id), codec_version INTEGER NOT NULL, uncompressed_size INTEGER NOT NULL, blob BLOB NOT NULL);",
     )?;
     if !table_has_column(&transaction, "word_observations", "fast_success")? {
         transaction.execute(
             "ALTER TABLE word_observations ADD COLUMN fast_success INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
+    if !table_has_column(&transaction, "adaptive_policy_state", "shadow_version")? {
+        transaction.execute(
+            "ALTER TABLE adaptive_policy_state ADD COLUMN shadow_version INTEGER",
             [],
         )?;
     }
@@ -2254,6 +2372,9 @@ fn migrate(connection: &Connection) -> Result<()> {
         ("stimuli_json", "TEXT NOT NULL DEFAULT '[]'"),
         ("selections_json", "TEXT NOT NULL DEFAULT '[]'"),
         ("policy_version", "INTEGER NOT NULL DEFAULT 0"),
+        ("shadow_stimuli_json", "TEXT NOT NULL DEFAULT '[]'"),
+        ("shadow_selections_json", "TEXT NOT NULL DEFAULT '[]'"),
+        ("shadow_policy_version", "INTEGER"),
     ] {
         if !table_has_column(&transaction, "sessions", column)? {
             transaction.execute(
@@ -2373,6 +2494,27 @@ fn lexical_stimulus(value: &str) -> Option<String> {
         .trim_matches(|character: char| !character.is_alphabetic())
         .to_lowercase();
     (!lexical.is_empty()).then_some(lexical)
+}
+
+fn validate_selection_trace(
+    session_id: i64,
+    label: &str,
+    stimuli: &[String],
+    selections: &[Option<WordSelection>],
+) -> Result<()> {
+    anyhow::ensure!(
+        selections.is_empty() || selections.len() == stimuli.len(),
+        "sessão #{session_id}: seleção {label} não corresponde aos estímulos"
+    );
+    for selection in selections.iter().flatten() {
+        anyhow::ensure!(
+            !selection.word.is_empty()
+                && selection.propensity.is_finite()
+                && (0.0..=1.0).contains(&selection.propensity),
+            "sessão #{session_id}: seleção {label} inválida"
+        );
+    }
+    Ok(())
 }
 
 fn selection_source_from_db(value: &str) -> Result<SelectionSource> {
@@ -2523,6 +2665,43 @@ mod tests {
     }
 
     #[test]
+    fn rollback_da_politica_e_atomico_persistente_e_reversivel() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("history.db");
+        let repository = Repository::open(&path).unwrap();
+        assert_eq!(
+            repository.adaptive_policy_state().unwrap(),
+            AdaptivePolicyState {
+                active_version: CURRENT_POLICY_VERSION,
+                fallback_version: UNIFORM_POLICY_VERSION,
+                shadow_version: None,
+            }
+        );
+        assert_eq!(
+            repository.rollback_adaptive_policy().unwrap(),
+            AdaptivePolicyState {
+                active_version: UNIFORM_POLICY_VERSION,
+                fallback_version: CURRENT_POLICY_VERSION,
+                shadow_version: Some(CURRENT_POLICY_VERSION),
+            }
+        );
+        drop(repository);
+
+        let repository = Repository::open(&path).unwrap();
+        assert_eq!(
+            repository.adaptive_policy_state().unwrap().active_version,
+            UNIFORM_POLICY_VERSION
+        );
+        assert_eq!(
+            repository
+                .rollback_adaptive_policy()
+                .unwrap()
+                .active_version,
+            CURRENT_POLICY_VERSION
+        );
+    }
+
+    #[test]
     fn migracao_v7_preserva_sessao_e_adiciona_proveniencia_de_selecao() {
         let temporary = tempfile::tempdir().unwrap();
         let path = temporary.path().join("history.db");
@@ -2574,7 +2753,7 @@ mod tests {
                 .query_row("SELECT version FROM schema_version", [], |row| row
                     .get::<_, i64>(0))
                 .unwrap(),
-            8
+            CURRENT_SCHEMA_VERSION
         );
         let selections = repository
             .connection
@@ -2913,6 +3092,16 @@ mod tests {
             stimuli: vec!["ação".into(), "casa".into()],
             selections: vec![],
             policy_version: 2,
+            shadow_stimuli: vec!["tempo".into(), "ação".into()],
+            shadow_selections: vec![
+                Some(WordSelection {
+                    word: "tempo".into(),
+                    source: SelectionSource::Targeted,
+                    propensity: 0.25,
+                }),
+                None,
+            ],
+            shadow_policy_version: Some(3),
             kind: SessionKind::Assessment,
         };
         let id = repository
