@@ -1,8 +1,13 @@
 use std::{
     collections::HashMap,
+    env,
     io::Write,
     path::PathBuf,
     sync::mpsc::{self, Receiver, SyncSender, TryRecvError},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -18,6 +23,8 @@ use crossterm::{
     execute,
 };
 use rand::{SeedableRng, rngs::SmallRng, seq::IndexedRandom};
+#[cfg(unix)]
+use signal_hook::consts::signal::{SIGHUP, SIGTERM};
 use termina::{
     escape::osc::{DynamicColorNumber, Osc},
     style::RgbColor,
@@ -39,12 +46,28 @@ use tuipe::{
 };
 
 fn main() -> Result<()> {
+    if handle_cli()? {
+        return Ok(());
+    }
     let (config_path, database_path) = paths();
-    let preferences = Preferences::load(&config_path)?;
+    let loaded = Preferences::load_recovering(&config_path)?;
+    let startup_notice = loaded.quarantined.map(|path| {
+        format!(
+            "configuração inválida isolada em {}; padrões restaurados",
+            path.display()
+        )
+    });
     let catalog = ContentCatalog::bundled()?;
     let repository = Repository::open(&database_path)?;
     let mut persistence = PersistenceWorker::start(database_path)?;
-    let mut app = App::new(preferences, catalog, config_path, &repository)?;
+    let mut app = App::new(
+        loaded.preferences,
+        catalog,
+        config_path,
+        startup_notice,
+        &repository,
+    )?;
+    let shutdown = shutdown_flag()?;
 
     ratatui::run(|terminal| {
         let _mouse_guard = scopeguard::guard((), |_| {
@@ -69,8 +92,64 @@ fn main() -> Result<()> {
             EnableMouseCapture,
             SetCursorStyle::BlinkingBar
         )?;
-        run(terminal, &mut app, &repository, &mut persistence)
+        run(terminal, &mut app, &repository, &mut persistence, &shutdown)
     })
+}
+
+fn shutdown_flag() -> Result<Arc<AtomicBool>> {
+    let shutdown = Arc::new(AtomicBool::new(false));
+    #[cfg(unix)]
+    {
+        signal_hook::flag::register(SIGTERM, Arc::clone(&shutdown))?;
+        signal_hook::flag::register(SIGHUP, Arc::clone(&shutdown))?;
+    }
+    Ok(shutdown)
+}
+
+fn handle_cli() -> Result<bool> {
+    let mut arguments = env::args().skip(1);
+    let Some(command) = arguments.next() else {
+        return Ok(false);
+    };
+    match command.as_str() {
+        "-h" | "--help" | "help" => {
+            println!(
+                "tuipe — treinador de digitação adaptativo e offline\n\nUSO:\n    tuipe\n    tuipe doctor\n    tuipe backup [DESTINO]\n    tuipe --version\n\nCOMANDOS:\n    doctor           valida configuração, banco e eventos sem alterar dados\n    backup [DESTINO] cria uma cópia SQLite consistente e privada\n\nDentro do aplicativo, pressione esc para configurações e q para sair."
+            );
+        }
+        "-V" | "--version" | "version" => println!("tuipe {}", env!("CARGO_PKG_VERSION")),
+        "doctor" => {
+            anyhow::ensure!(arguments.next().is_none(), "doctor não recebe argumentos");
+            let (config_path, database_path) = paths();
+            Preferences::validate(&config_path).context("configuração inválida")?;
+            anyhow::ensure!(
+                database_path.exists(),
+                "o banco ainda não existe: {}",
+                database_path.display()
+            );
+            Repository::doctor(&database_path).context("banco inválido")?;
+            println!("configuração: ok\nbanco e eventos: ok");
+        }
+        "backup" => {
+            let destination = arguments.next().map(PathBuf::from).unwrap_or_else(|| {
+                PathBuf::from(format!(
+                    "tuipe-backup-{}.db",
+                    chrono::Local::now().format("%Y%m%d-%H%M%S")
+                ))
+            });
+            anyhow::ensure!(
+                arguments.next().is_none(),
+                "backup recebe no máximo um destino"
+            );
+            let (_, database_path) = paths();
+            let repository = Repository::open(&database_path)
+                .with_context(|| format!("abrir banco em {}", database_path.display()))?;
+            repository.backup(&destination)?;
+            println!("backup criado em {}", destination.display());
+        }
+        _ => anyhow::bail!("comando desconhecido: {command}. Use tuipe --help"),
+    }
+    Ok(true)
 }
 
 struct App {
@@ -92,6 +171,7 @@ struct App {
     repeated_test: bool,
     session_kind: SessionKind,
     session_baseline: tuipe::persistence::PersonalBaselineProfile,
+    startup_notice: Option<String>,
 }
 
 struct PersistJob {
@@ -197,6 +277,7 @@ impl App {
         preferences: Preferences,
         catalog: ContentCatalog,
         config_path: PathBuf,
+        startup_notice: Option<String>,
         repository: &Repository,
     ) -> Result<Self> {
         let seed = rand::random();
@@ -240,6 +321,7 @@ impl App {
             repeated_test: false,
             session_kind,
             session_baseline,
+            startup_notice,
         })
     }
 
@@ -387,6 +469,9 @@ impl App {
 
     fn update(&mut self, event: InputEvent) {
         self.engine.update(event);
+        if matches!(self.engine.status(), TestStatus::Running { .. }) {
+            self.startup_notice = None;
+        }
         if matches!(self.engine.config().mode, TestMode::Time { .. })
             && self
                 .engine
@@ -732,6 +817,7 @@ fn run(
     app: &mut App,
     repository: &Repository,
     persistence: &mut PersistenceWorker,
+    shutdown: &AtomicBool,
 ) -> Result<()> {
     let mut needs_draw = true;
     let mut last_drawn_second = 0;
@@ -750,11 +836,32 @@ fn run(
             }
             needs_draw = true;
         }
+        if shutdown.load(Ordering::Relaxed) {
+            let terminal_session = matches!(
+                app.engine.status(),
+                TestStatus::Completed { .. } | TestStatus::Failed { .. }
+            );
+            if terminal_session && app.persisted {
+                break;
+            } else if terminal_session {
+                if let Some(error) = &app.persistence_error {
+                    anyhow::bail!("não foi possível salvar a sessão antes de sair: {error}");
+                }
+                if !app.persistence_pending {
+                    persistence.save(app.persistence_job())?;
+                    app.persistence_pending = true;
+                    needs_draw = true;
+                }
+            } else {
+                app.persist_interrupted(repository, RawSessionEnd::Quit)?;
+                break;
+            }
+        }
         if needs_draw {
             let theme = app
                 .catalog
                 .theme(&app.preferences.theme)
-                .context("configured theme is unavailable")?;
+                .context("o tema configurado não está disponível")?;
             if ui::uses_true_color() && theme.caret != last_cursor_color {
                 set_cursor_color(&theme.caret)?;
                 last_cursor_color.clone_from(&theme.caret);
@@ -764,10 +871,13 @@ fn run(
                     frame,
                     &app.engine,
                     theme,
-                    app.settings_open,
-                    &app.preferences.theme,
-                    app.session_kind,
-                    app.persistence_ui_state(),
+                    ui::RenderState {
+                        settings_open: app.settings_open,
+                        theme_name: &app.preferences.theme,
+                        session_kind: app.session_kind,
+                        persistence: app.persistence_ui_state(),
+                        notice: app.startup_notice.as_deref(),
+                    },
                 );
                 if app.statistics_open {
                     ui::render_statistics(frame, &app.statistics, theme);
@@ -1262,6 +1372,7 @@ mod tests {
             preferences,
             ContentCatalog::bundled().unwrap(),
             temporary.path().join("config.toml"),
+            None,
             &repository,
         )
         .unwrap();

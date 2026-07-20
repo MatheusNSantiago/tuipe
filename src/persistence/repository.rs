@@ -9,7 +9,7 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
 use anyhow::{Context, Result};
 use chrono::{Datelike, Local};
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 
 use crate::adaptive::{
     MechanicSkill, NgramSkill, Observation, PersonalBaseline, ReviewState, SelectionSource,
@@ -177,6 +177,50 @@ impl PersonalBaselineProfile {
 }
 
 impl Repository {
+    /// Valida estrutura, versão, integridade do SQLite e blobs brutos sem
+    /// executar migrações nem alterar o banco.
+    pub fn doctor(path: &Path) -> Result<()> {
+        let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        validate_schema_version(&connection)?;
+        let quick_check =
+            connection.query_row("PRAGMA quick_check", [], |row| row.get::<_, String>(0))?;
+        anyhow::ensure!(quick_check == "ok", "integridade do SQLite: {quick_check}");
+        let mut statement = connection.prepare(
+            "SELECT codec_version, uncompressed_size, blob FROM raw_events ORDER BY session_id",
+        )?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, u16>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, Vec<u8>>(2)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for (version, size, blob) in rows {
+            let size =
+                usize::try_from(size).context("tamanho negativo nos eventos brutos persistidos")?;
+            RawEventCodec::decode(version, size, &blob)?;
+        }
+        Ok(())
+    }
+
+    /// Produz uma cópia consistente mesmo quando o banco usa WAL.
+    pub fn backup(&self, destination: &Path) -> Result<()> {
+        anyhow::ensure!(
+            !destination.exists(),
+            "o destino do backup já existe: {}",
+            destination.display()
+        );
+        if let Some(parent) = destination.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        self.connection
+            .execute("VACUUM INTO ?1", [destination.to_string_lossy().as_ref()])?;
+        restrict_file(destination)?;
+        Ok(())
+    }
+
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
@@ -1434,6 +1478,33 @@ mod tests {
                 })
                 .unwrap(),
             0
+        );
+    }
+
+    #[test]
+    fn doctor_e_backup_validam_uma_copia_consistente() {
+        let temporary = tempfile::tempdir().unwrap();
+        let source = temporary.path().join("source.db");
+        let backup = temporary.path().join("backup.db");
+        let repository = Repository::open(&source).unwrap();
+        repository
+            .save_session(
+                &TestConfig::default(),
+                &TestStatus::Completed { ended_at_ms: 1 },
+                Metrics::default(),
+            )
+            .unwrap();
+
+        Repository::doctor(&source).unwrap();
+        repository.backup(&backup).unwrap();
+        Repository::doctor(&backup).unwrap();
+        assert_eq!(
+            Repository::open(&backup)
+                .unwrap()
+                .statistics_overview()
+                .unwrap()
+                .completed_tests,
+            1
         );
     }
 

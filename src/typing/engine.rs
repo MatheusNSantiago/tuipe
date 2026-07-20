@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use unicode_normalization::UnicodeNormalization;
 use unicode_segmentation::UnicodeSegmentation;
 
 use super::{CharacterStats, Difficulty, Metrics, TargetWord, TestConfig, TestMode, WordAttempt};
@@ -257,7 +258,8 @@ impl TestEngine {
 
     fn insert_text(&mut self, text: &str, at_ms: u64) -> Vec<Transition> {
         let mut transitions = Vec::new();
-        for grapheme in text.graphemes(true) {
+        let normalized = text.nfc().collect::<String>();
+        for grapheme in normalized.graphemes(true) {
             if self.is_terminal() {
                 break;
             }
@@ -681,6 +683,19 @@ mod tests {
             engine.recorded_events()[0].kind,
             RecordedInputKind::PasteRedacted { graphemes: 11 }
         );
+    }
+
+    #[test]
+    fn entrada_unicode_equivalente_e_normalizada_antes_da_comparacao() {
+        let mut engine = engine(Difficulty::Master, &["á "]);
+
+        engine.update(InputEvent::Key {
+            action: KeyAction::Text("a\u{301}".into()),
+            at_ms: 10,
+        });
+
+        assert_eq!(engine.attempts()[0].input, "á");
+        assert!(matches!(engine.status(), TestStatus::Running { .. }));
     }
 
     #[test]

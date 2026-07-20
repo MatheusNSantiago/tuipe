@@ -5,9 +5,9 @@ as métricas seguem o Monkeytype; o currículo observa dificuldades recorrentes 
 escolhe automaticamente o próximo treino, sem exigir que o usuário entenda ou
 configure o modelo.
 
-O projeto está em **alpha**. O motor, a persistência e a jornada principal são
-funcionais, mas ainda faltam validações de recuperação, desempenho, terminais e
-empacotamento antes de uma versão de produção.
+O projeto ainda está em **alpha** enquanto a experiência e o empacotamento são
+fechados. Motor, persistência, recuperação e jornada principal já são validados
+automaticamente, inclusive dentro de um pseudo-terminal real.
 
 ## Instalação para desenvolvimento
 
@@ -92,8 +92,26 @@ arquivos respeitam as variáveis XDG:
   `~/.local/share/tuipe/tuipe.db`.
 
 O banco guarda sessões, eventos compactados e projeções do modelo adaptativo.
-Enquanto não houver uma ferramenta de backup e recuperação estável, faça cópia
-do arquivo `tuipe.db` antes de testar versões de desenvolvimento.
+Uma configuração inválida é isolada com o prefixo `config-corrompida-` e o
+aplicativo volta aos padrões sem destruir o arquivo problemático.
+
+Para validar a configuração, a estrutura do banco, a integridade do SQLite e
+todos os eventos compactados sem alterar dados:
+
+```sh
+tuipe doctor
+```
+
+Para produzir uma cópia consistente e privada do banco, inclusive enquanto ele
+usa WAL:
+
+```sh
+tuipe backup
+tuipe backup caminho/para/copia.db
+```
+
+Sem um destino explícito, o arquivo recebe data e hora no nome. O comando não
+sobrescreve uma cópia existente.
 
 ## Desenvolvimento
 

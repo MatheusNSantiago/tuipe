@@ -119,27 +119,30 @@ struct RenderContext<'a> {
     theme_name: &'a str,
     session_kind: SessionKind,
     persistence: PersistenceUiState,
+    notice: Option<&'a str>,
     icones: Icons,
 }
 
-pub fn render(
-    frame: &mut Frame,
-    engine: &TestEngine,
-    theme: &Theme,
-    settings_open: bool,
-    theme_name: &str,
-    session_kind: SessionKind,
-    persistence: PersistenceUiState,
-) {
+#[derive(Clone, Copy)]
+pub struct RenderState<'a> {
+    pub settings_open: bool,
+    pub theme_name: &'a str,
+    pub session_kind: SessionKind,
+    pub persistence: PersistenceUiState,
+    pub notice: Option<&'a str>,
+}
+
+pub fn render(frame: &mut Frame, engine: &TestEngine, theme: &Theme, state: RenderState<'_>) {
     render_com_icones(
         frame,
         engine,
         theme,
         RenderContext {
-            settings_open,
-            theme_name,
-            session_kind,
-            persistence,
+            settings_open: state.settings_open,
+            theme_name: state.theme_name,
+            session_kind: state.session_kind,
+            persistence: state.persistence,
+            notice: state.notice,
             icones: icones_do_terminal(),
         },
     );
@@ -697,6 +700,7 @@ fn render_com_icones(
         theme_name,
         session_kind,
         persistence,
+        notice,
         icones,
     } = context;
     let viewport = frame.area();
@@ -780,6 +784,18 @@ fn render_com_icones(
     }
     if settings_open {
         render_settings(frame, viewport, engine, theme, theme_name, icones);
+    } else if ready && let Some(notice) = notice {
+        frame.render_widget(
+            Paragraph::new(notice)
+                .alignment(Alignment::Center)
+                .style(Style::default().fg(theme_color(theme, &theme.error, 3.0))),
+            Rect::new(
+                content.x,
+                viewport.bottom().saturating_sub(3),
+                content.width,
+                1,
+            ),
+        );
     }
 }
 
@@ -2358,6 +2374,7 @@ mod tests {
                         theme_name: "arch",
                         session_kind,
                         persistence,
+                        notice: None,
                         icones: ICONES_UNICODE,
                     },
                 )
