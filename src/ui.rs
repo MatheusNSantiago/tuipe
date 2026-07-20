@@ -3537,6 +3537,18 @@ pub fn uses_true_color() -> bool {
     color_profile() == ColorProfile::TrueColor
 }
 
+/// Alinha a emissão ANSI do Crossterm ao override explícito do tuipe. Sem
+/// override, `NO_COLOR` continua sendo respeitado normalmente.
+pub fn configure_terminal_color_output() {
+    match env::var("TUIPE_COLORS").ok().as_deref() {
+        Some("truecolor" | "24bit" | "256" | "16") => {
+            crossterm::style::force_color_output(true);
+        }
+        Some("none") => crossterm::style::force_color_output(false),
+        _ => {}
+    }
+}
+
 fn color_profile() -> ColorProfile {
     *COLOR_PROFILE.get_or_init(|| {
         if let Ok(profile) = env::var("TUIPE_COLORS") {

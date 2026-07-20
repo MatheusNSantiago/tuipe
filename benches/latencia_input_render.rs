@@ -13,6 +13,10 @@ const AQUECIMENTO: usize = 1_000;
 const AMOSTRAS: usize = 20_000;
 
 fn main() {
+    if cfg!(debug_assertions) {
+        println!("benchmark ignorado em debug; use cargo bench --bench latencia_input_render");
+        return;
+    }
     let catalog = ContentCatalog::bundled().expect("carregar assets embarcados");
     let theme = catalog.theme("arch").expect("tema arch disponível");
     let config = TestConfig {

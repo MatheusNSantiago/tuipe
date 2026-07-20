@@ -10,6 +10,10 @@ use std::{
 };
 
 use portable_pty::{Child, CommandBuilder, MasterPty, NativePtySystem, PtySize, PtySystem};
+use tuipe::{
+    persistence::{RawEventCodec, RawEventKind},
+    typing::RecordedInputKind,
+};
 
 const INICIO_COLAGEM: &[u8] = b"\x1b[?2004h";
 const FIM_COLAGEM: &[u8] = b"\x1b[?2004l";
@@ -26,6 +30,10 @@ struct AplicativoNoTerminal {
 
 impl AplicativoNoTerminal {
     fn iniciar(home: &Path) -> Self {
+        Self::iniciar_com_cores(home, "256")
+    }
+
+    fn iniciar_com_cores(home: &Path, colors: &str) -> Self {
         let par = NativePtySystem::default()
             .openpty(PtySize {
                 rows: 28,
@@ -40,7 +48,7 @@ impl AplicativoNoTerminal {
         comando.env("XDG_DATA_HOME", home.join("data"));
         comando.env("TERM", "xterm-256color");
         comando.env("TUIPE_ICONS", "unicode");
-        comando.env("TUIPE_COLORS", "256");
+        comando.env("TUIPE_COLORS", colors);
 
         let child = par
             .slave
@@ -148,11 +156,25 @@ fn devolve_protocolos_ao_terminal_ao_sair() {
 }
 
 #[test]
+fn renderiza_em_truecolor_e_no_fallback_256() {
+    for (profile, sgr) in [("truecolor", b"[38;2;".as_slice()), ("256", b"[38;5;")] {
+        let home = tempfile::tempdir().expect("criar diretório temporário");
+        let mut app = AplicativoNoTerminal::iniciar_com_cores(home.path(), profile);
+        app.esperar_saida(INICIO_COLAGEM);
+        app.esperar_saida(sgr);
+        app.escrever(b"\x1b");
+        thread::sleep(Duration::from_millis(80));
+        app.escrever(b"q");
+        confirmar_protocolos_restaurados(&app.esperar_encerrar());
+    }
+}
+
+#[test]
 fn salva_sessao_e_restaura_terminal_ao_receber_sigterm() {
     let home = tempfile::tempdir().expect("criar diretório temporário");
     let mut app = AplicativoNoTerminal::iniciar(home.path());
     app.esperar_saida(INICIO_COLAGEM);
-    app.escrever(b"a");
+    app.escrever("á".as_bytes());
     let pid = app.child.process_id().expect("processo sem PID");
 
     let status = Command::new("kill")
@@ -169,4 +191,25 @@ fn salva_sessao_e_restaura_terminal_ao_receber_sigterm() {
         .query_row("SELECT COUNT(*) FROM raw_events", [], |linha| linha.get(0))
         .expect("contar sessões interrompidas");
     assert_eq!(sessoes_com_eventos, 1);
+    let (version, size, blob) = conexao
+        .query_row(
+            "SELECT codec_version, uncompressed_size, blob FROM raw_events LIMIT 1",
+            [],
+            |linha| {
+                Ok((
+                    linha.get::<_, u16>(0)?,
+                    linha.get::<_, usize>(1)?,
+                    linha.get::<_, Vec<u8>>(2)?,
+                ))
+            },
+        )
+        .expect("ler eventos da sessão interrompida");
+    let events = RawEventCodec::decode(version, size, &blob).expect("decodificar eventos");
+    assert!(events.iter().any(|event| matches!(
+        &event.kind,
+        RawEventKind::Input {
+            event: RecordedInputKind::InsertDelta { grapheme, .. },
+            ..
+        } if grapheme == "á"
+    )));
 }

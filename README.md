@@ -38,9 +38,10 @@ TUIPE_ICONS=unicode tuipe
 As cores são detectadas automaticamente e degradadas de RGB para 256 ou 16
 cores quando necessário. Para diagnosticar uma detecção incorreta, use
 `TUIPE_COLORS=truecolor`, `TUIPE_COLORS=256`, `TUIPE_COLORS=16` ou
-`TUIPE_COLORS=none`. Papéis sem contraste suficiente recebem o menor ajuste
-necessário durante a renderização; os arquivos originais dos temas não são
-alterados.
+`TUIPE_COLORS=none`. Um valor explícito também prevalece sobre `NO_COLOR`; sem
+`TUIPE_COLORS`, a convenção `NO_COLOR` continua sendo respeitada. Papéis sem
+contraste suficiente recebem o menor ajuste necessário durante a renderização;
+os arquivos originais dos temas não são alterados.
 
 Temas pessoais podem ser adicionados como TOML em
 `$XDG_CONFIG_HOME/tuipe/themes/NOME.toml` (ou

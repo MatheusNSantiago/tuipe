@@ -50,6 +50,7 @@ fn main() -> Result<()> {
     if handle_cli()? {
         return Ok(());
     }
+    ui::configure_terminal_color_output();
     let (config_path, database_path) = paths();
     let loaded = Preferences::load_recovering(&config_path)?;
     let mut notices = loaded

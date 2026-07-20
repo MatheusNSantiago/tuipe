@@ -416,10 +416,10 @@ Streak:
 - [x] Fazer comparacao lado a lado com Monkeytype em `time 30`, `words 50` e quotes.
 - [x] Medir p50/p95/p99 de input -> state -> render em release.
 - [x] Corrigir qualquer hitch de SQLite, recomputacao ou resize.
-- [ ] Testar terminais com true color e fallback 256 cores.
-- [ ] Testar UTF-8/acentos, terminais pequenos, mouse e keybindings conflitantes.
+- [x] Testar terminais com true color e fallback 256 cores.
+- [x] Testar UTF-8/acentos, terminais pequenos, mouse e keybindings conflitantes.
 - [x] Criar README com instalacao via Cargo, paths XDG, temas e controles.
-- [ ] Gerar binario Linux release e smoke test em ambiente limpo.
+- [x] Gerar binario Linux release e smoke test em ambiente limpo.
 
 ### Experiência e prontidão de produto
 
