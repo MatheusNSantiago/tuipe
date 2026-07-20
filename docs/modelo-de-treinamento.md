@@ -524,7 +524,7 @@ Métodos de validação:
 
 O modelo ativo já possui:
 
-- eventos brutos v2 com caminho de inserção/remoção, foco, paste e causa
+- eventos brutos v3 com caminho de inserção/remoção, foco, paste e causa
   terminal, persistidos também em restart e saída;
 - seed, estímulos, tipo de sessão, versão da política, componente de seleção e
   propensão congelados por sessão;
@@ -565,7 +565,7 @@ Limitações ainda abertas:
 
 ### Fase 1 — fonte da verdade
 
-- [x] Versionar `RawEvent` v2 com operação, posição, origem e contexto disponível.
+- [x] Versionar `RawEvent` v3 com operação, posição, origem e contexto disponível.
 - [x] Persistir eventos em todos os estados terminais, inclusive restart e saída.
 - [x] Congelar estímulos, seed, tipo e política por sessão.
 - [x] Registrar token, componente e propensão por seleção.

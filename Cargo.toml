@@ -5,7 +5,7 @@ edition = "2024"
 rust-version = "1.88"
 license = "GPL-3.0-only"
 description = "Treinador de digitação adaptativo, offline e nativo do terminal"
-repository = "https://github.com/matheus/tuipe"
+repository = "https://github.com/MatheusNSantiago/tuipe"
 
 [dependencies]
 anyhow = "1.0.100"

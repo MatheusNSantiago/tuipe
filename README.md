@@ -5,9 +5,10 @@ as métricas seguem o Monkeytype; o currículo observa dificuldades recorrentes 
 escolhe automaticamente o próximo treino, sem exigir que o usuário entenda ou
 configure o modelo.
 
-O projeto ainda está em **alpha** enquanto a experiência e o empacotamento são
-fechados. Motor, persistência, recuperação e jornada principal já são validados
-automaticamente, inclusive dentro de um pseudo-terminal real.
+O código está em **candidato a release 0.1.0**. Motor, persistência, recuperação,
+empacotamento e jornada principal já são validados automaticamente, inclusive
+dentro de um pseudo-terminal real. A publicação depende apenas das validações
+humanas e de acessibilidade registradas no `PLAN.md`.
 
 ## Instalação para desenvolvimento
 
