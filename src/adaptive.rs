@@ -14,7 +14,7 @@ use rand::{
     rngs::SmallRng,
 };
 use serde::{Deserialize, Serialize};
-use statrs::distribution::{Beta, ContinuousCDF};
+use special::Beta;
 use unicode_normalization::UnicodeNormalization;
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -336,10 +336,8 @@ fn posterior_excess(
     let baseline = baseline.clamp(0.001, 0.999);
     let alpha = baseline * prior_strength + error_mass;
     let beta = (1.0 - baseline) * prior_strength + (exposures - error_mass).max(0.0);
-    let posterior = Beta::new(alpha.max(f64::EPSILON), beta.max(f64::EPSILON))
-        .expect("parâmetros da posterior beta são positivos");
     let threshold = (baseline + minimum_effect).min(0.999);
-    let probability = 1.0 - posterior.cdf(threshold);
+    let probability = 1.0 - threshold.inc_beta(alpha, beta, alpha.ln_beta(beta));
     let mean = alpha / (alpha + beta);
     probability * (mean - baseline).max(0.0)
 }
@@ -1098,6 +1096,12 @@ mod tests {
             "recência controla revisão, não altera a posterior de erro"
         );
         assert!(sampler.review_value("portuguese", "casa") > 0.0);
+    }
+
+    #[test]
+    fn posterior_beta_preserva_o_resultado_de_referencia() {
+        let actual = posterior_excess(0.05, 8.0, 3.0, 12.0, 0.02);
+        assert!((actual - 0.109_320_281_206_737_73).abs() < 1e-12);
     }
 
     proptest! {
