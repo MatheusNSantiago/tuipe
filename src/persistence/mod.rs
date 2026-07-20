@@ -4,7 +4,7 @@ mod config;
 mod raw_events;
 mod repository;
 
-pub use config::{LoadedPreferences, Preferences, paths};
+pub use config::{Keymap, LoadedPreferences, Preferences, paths};
 pub use raw_events::{RawEvent, RawEventCodec, RawSessionEnd};
 pub use repository::{
     ActivityDay, MechanicObservationRecord, OpenedRepository, PersonalBaselineProfile,

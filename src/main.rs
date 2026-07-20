@@ -17,8 +17,8 @@ use crossterm::{
     cursor::SetCursorStyle,
     event::{
         self, DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
-        EnableFocusChange, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
-        MouseButton, MouseEvent, MouseEventKind,
+        EnableFocusChange, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
+        KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
     },
     execute,
 };
@@ -228,6 +228,13 @@ struct PersistJob {
 enum PersistResult {
     Saved(Vec<WordObservationRecord>),
     Failed(String),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MouseOutcome {
+    Unchanged,
+    Changed,
+    Quit,
 }
 
 struct PersistenceWorker {
@@ -1045,6 +1052,7 @@ fn run(
                                 source: &quote.source,
                                 favorite: app.quote_favorite,
                             }),
+                        keymap: &app.preferences.keymap,
                     },
                 );
                 if app.statistics_open {
@@ -1097,7 +1105,13 @@ fn run(
                     break;
                 }
                 Event::Key(key) if key.kind == KeyEventKind::Press => true,
-                Event::Mouse(mouse) => handle_mouse(app, repository, mouse, terminal.size()?)?,
+                Event::Mouse(mouse) => {
+                    match handle_mouse(app, repository, mouse, terminal.size()?)? {
+                        MouseOutcome::Unchanged => false,
+                        MouseOutcome::Changed => true,
+                        MouseOutcome::Quit => break,
+                    }
+                }
                 Event::Resize(width, height)
                     if width != last_size.width || height != last_size.height =>
                 {
@@ -1168,15 +1182,15 @@ fn handle_mouse(
     repository: &Repository,
     mouse: MouseEvent,
     terminal: ratatui::layout::Size,
-) -> Result<bool> {
+) -> Result<MouseOutcome> {
     if mouse.kind != MouseEventKind::Down(MouseButton::Left) {
-        return Ok(false);
+        return Ok(MouseOutcome::Unchanged);
     }
 
     let viewport = ratatui::layout::Rect::new(0, 0, terminal.width, terminal.height);
     if app.statistics_open {
         if app.statistics_reset.is_some() {
-            return Ok(false);
+            return Ok(MouseOutcome::Unchanged);
         }
         let position = ratatui::layout::Position::new(mouse.column, mouse.row);
         if app.statistics_detail.is_none()
@@ -1197,7 +1211,7 @@ fn handle_mouse(
                     app.open_statistics_session(repository)?;
                 }
             }
-            return Ok(true);
+            return Ok(MouseOutcome::Changed);
         }
         if app.statistics_page == ui::StatisticsPage::Overview
             && app.statistics_detail.is_none()
@@ -1210,7 +1224,7 @@ fn handle_mouse(
             )
         {
             app.open_statistics_word(repository, index)?;
-            return Ok(true);
+            return Ok(MouseOutcome::Changed);
         }
         if mouse.row >= terminal.height.saturating_sub(2) {
             if app.statistics_detail.is_some() {
@@ -1220,20 +1234,24 @@ fn handle_mouse(
             } else {
                 app.statistics_open = false;
             }
-            return Ok(true);
+            return Ok(MouseOutcome::Changed);
         }
-        return Ok(false);
+        return Ok(MouseOutcome::Unchanged);
     }
     if app.settings_open {
         let position = ratatui::layout::Position::new(mouse.column, mouse.row);
         if !ui::settings_area(viewport).contains(position) {
             app.settings_open = false;
-            return Ok(true);
+            return Ok(MouseOutcome::Changed);
         }
         let Some(action) = ui::settings_action_at(viewport, app.engine.config(), position) else {
-            return Ok(false);
+            return Ok(MouseOutcome::Unchanged);
         };
-        return handle_settings_mouse_action(app, repository, action);
+        return Ok(if handle_settings_mouse_action(app, repository, action)? {
+            MouseOutcome::Quit
+        } else {
+            MouseOutcome::Changed
+        });
     }
     if matches!(
         app.engine.status(),
@@ -1244,32 +1262,42 @@ fn handle_mouse(
         let content_width = terminal.width.saturating_sub(padding * 2).max(1);
         let relative = mouse.column.saturating_sub(padding).min(content_width - 1);
         let actions = if app.current_quote.is_some() { 5 } else { 4 };
-        let action = match (relative * actions / content_width).min(actions - 1) {
-            0 => KeyCode::Enter,
-            1 => KeyCode::Char('r'),
-            2 => KeyCode::Char('s'),
-            3 if actions == 5 => KeyCode::Char('f'),
-            _ => KeyCode::Char('q'),
-        };
-        return handle_key(app, repository, action, KeyModifiers::NONE);
+        let action = (relative * actions / content_width).min(actions - 1);
+        if app.persistence_pending || app.persistence_error.is_some() {
+            return Ok(MouseOutcome::Unchanged);
+        }
+        if action > 0 && app.bloqueia_atalhos_do_resultado() {
+            return Ok(MouseOutcome::Unchanged);
+        }
+        match action {
+            0 => app.restart(repository)?,
+            1 => app.repeat(repository)?,
+            2 => {
+                app.load_statistics(repository)?;
+                app.statistics_open = true;
+            }
+            3 if actions == 5 => app.toggle_quote_favorite(repository)?,
+            _ => return Ok(MouseOutcome::Quit),
+        }
+        return Ok(MouseOutcome::Changed);
     }
     if !matches!(app.engine.status(), TestStatus::Ready) {
-        return Ok(false);
+        return Ok(MouseOutcome::Unchanged);
     }
 
     let config_bar = ui::config_bar_area(viewport);
     if mouse.row != config_bar.y + 1 {
-        return Ok(false);
+        return Ok(MouseOutcome::Unchanged);
     }
 
     let Some(cards) = ui::config_card_areas(viewport, &app.engine.config().mode) else {
         app.settings_open = true;
-        return Ok(true);
+        return Ok(MouseOutcome::Changed);
     };
     let x = mouse.column;
     if (cards[0].x..cards[0].right()).contains(&x) {
         if matches!(app.engine.config().mode, TestMode::Quote) {
-            return Ok(false);
+            return Ok(MouseOutcome::Unchanged);
         }
         let punctuation = x < cards[0].x + cards[0].width / 2;
         app.apply_preference(repository, |preferences| {
@@ -1309,9 +1337,9 @@ fn handle_mouse(
             };
         })?;
     } else {
-        return Ok(false);
+        return Ok(MouseOutcome::Unchanged);
     }
-    Ok(true)
+    Ok(MouseOutcome::Changed)
 }
 
 fn handle_settings_mouse_action(
@@ -1325,7 +1353,7 @@ fn handle_settings_mouse_action(
         SettingsAction::Close => app.settings_open = false,
         SettingsAction::Quit => return Ok(true),
         SettingsAction::NextTheme => {
-            return handle_settings_key(app, repository, KeyCode::Char('t'));
+            return handle_settings_key(app, repository, KeyCode::Char('t'), KeyModifiers::NONE);
         }
         SettingsAction::TogglePunctuation => app.apply_preference(repository, |preferences| {
             preferences.test.punctuation = !preferences.test.punctuation;
@@ -1409,6 +1437,7 @@ fn handle_key(
     code: KeyCode,
     modifiers: KeyModifiers,
 ) -> Result<bool> {
+    let pressed: crokey::KeyCombination = KeyEvent::new(code, modifiers).into();
     if app.statistics_open {
         if let Some(reset) = app.statistics_reset.take() {
             match code {
@@ -1519,8 +1548,7 @@ fn handle_key(
         app.engine.status(),
         TestStatus::Completed { .. } | TestStatus::Failed { .. }
     );
-    if matches!(code, KeyCode::Char('s'))
-        && modifiers.contains(KeyModifiers::CONTROL)
+    if pressed == app.preferences.keymap.statistics_global
         && matches!(app.engine.status(), TestStatus::Ready)
     {
         app.load_statistics(repository)?;
@@ -1531,28 +1559,30 @@ fn handle_key(
         return Ok(false);
     }
     if terminal && app.persistence_error.is_some() {
-        if matches!(code, KeyCode::Char('r')) {
+        if pressed == app.preferences.keymap.repeat {
             app.persistence_error = None;
         }
         return Ok(false);
     }
     if app.settings_open {
-        return handle_settings_key(app, repository, code);
+        return handle_settings_key(app, repository, code, modifiers);
     }
-    if matches!(code, KeyCode::Esc) && !matches!(app.engine.status(), TestStatus::Running { .. }) {
+    if pressed == app.preferences.keymap.settings
+        && !matches!(app.engine.status(), TestStatus::Running { .. })
+    {
         app.settings_open = true;
         return Ok(false);
     }
-    if matches!(code, KeyCode::Char('c')) && modifiers.contains(KeyModifiers::CONTROL) {
+    if pressed == app.preferences.keymap.cancel {
         app.repeat(repository)?;
         return Ok(false);
     }
     let resultado_recente = app.bloqueia_atalhos_do_resultado();
-    if matches!(code, KeyCode::Char('f')) && terminal && !resultado_recente {
+    if pressed == app.preferences.keymap.favorite && terminal && !resultado_recente {
         app.toggle_quote_favorite(repository)?;
         return Ok(false);
     }
-    if matches!(code, KeyCode::Char('q'))
+    if pressed == app.preferences.keymap.quit
         && matches!(
             app.engine.status(),
             TestStatus::Completed { .. } | TestStatus::Failed { .. }
@@ -1561,11 +1591,11 @@ fn handle_key(
     {
         return Ok(true);
     }
-    if matches!(code, KeyCode::Enter) {
+    if pressed == app.preferences.keymap.next {
         app.restart(repository)?;
         return Ok(false);
     }
-    if matches!(code, KeyCode::Char('r'))
+    if pressed == app.preferences.keymap.repeat
         && matches!(
             app.engine.status(),
             TestStatus::Completed { .. } | TestStatus::Failed { .. }
@@ -1575,7 +1605,7 @@ fn handle_key(
         app.repeat(repository)?;
         return Ok(false);
     }
-    if matches!(code, KeyCode::Char('s'))
+    if pressed == app.preferences.keymap.statistics
         && matches!(
             app.engine.status(),
             TestStatus::Completed { .. } | TestStatus::Failed { .. }
@@ -1587,7 +1617,11 @@ fn handle_key(
         return Ok(false);
     }
 
-    let action = typing_action(code, modifiers);
+    let action = typing_action(
+        code,
+        modifiers,
+        app.preferences.keymap.delete_word.contains(&pressed),
+    );
     if let Some(action) = action {
         app.update(InputEvent::Key {
             action,
@@ -1597,31 +1631,37 @@ fn handle_key(
     Ok(false)
 }
 
-fn typing_action(code: KeyCode, modifiers: KeyModifiers) -> Option<KeyAction> {
+fn typing_action(code: KeyCode, modifiers: KeyModifiers, delete_word: bool) -> Option<KeyAction> {
+    if delete_word {
+        return Some(KeyAction::DeleteWordBackward);
+    }
     match code {
-        KeyCode::Char(character)
-            if modifiers.contains(KeyModifiers::CONTROL) && matches!(character, 'w' | 'h') =>
-        {
-            Some(KeyAction::DeleteWordBackward)
-        }
         KeyCode::Char(character)
             if !modifiers
                 .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER) =>
         {
             Some(KeyAction::Text(character.to_string()))
         }
-        KeyCode::Backspace if modifiers.contains(KeyModifiers::CONTROL) => {
-            Some(KeyAction::DeleteWordBackward)
-        }
         KeyCode::Backspace => Some(KeyAction::Backspace),
         _ => None,
     }
 }
 
-fn handle_settings_key(app: &mut App, repository: &Repository, code: KeyCode) -> Result<bool> {
+fn handle_settings_key(
+    app: &mut App,
+    repository: &Repository,
+    code: KeyCode,
+    modifiers: KeyModifiers,
+) -> Result<bool> {
+    let pressed: crokey::KeyCombination = KeyEvent::new(code, modifiers).into();
+    if pressed == app.preferences.keymap.quit {
+        return Ok(true);
+    }
+    if pressed == app.preferences.keymap.settings || pressed == app.preferences.keymap.next {
+        app.settings_open = false;
+        return Ok(false);
+    }
     match code {
-        KeyCode::Char('q') => return Ok(true),
-        KeyCode::Esc | KeyCode::Enter => app.settings_open = false,
         KeyCode::Char('m') => app.apply_preference(repository, |preferences| {
             preferences.test.mode = match preferences.test.mode {
                 TestMode::Time { .. } => TestMode::Words { count: 25 },
@@ -1863,17 +1903,78 @@ mod tests {
     #[test]
     fn ctrl_w_and_ctrl_backspace_remove_the_active_word() {
         assert_eq!(
-            typing_action(KeyCode::Char('w'), KeyModifiers::CONTROL),
+            typing_action(KeyCode::Char('w'), KeyModifiers::CONTROL, true),
             Some(KeyAction::DeleteWordBackward)
         );
         assert_eq!(
-            typing_action(KeyCode::Backspace, KeyModifiers::CONTROL),
+            typing_action(KeyCode::Backspace, KeyModifiers::CONTROL, true),
             Some(KeyAction::DeleteWordBackward)
         );
         assert_eq!(
-            typing_action(KeyCode::Char('h'), KeyModifiers::CONTROL),
-            Some(KeyAction::DeleteWordBackward)
+            typing_action(KeyCode::Char('h'), KeyModifiers::CONTROL, false),
+            None
         );
+    }
+
+    #[test]
+    fn atalho_personalizado_substitui_o_padrao_no_resultado() {
+        let temporary = tempfile::tempdir().unwrap();
+        let repository = Repository::open(&temporary.path().join("history.db")).unwrap();
+        let mut app = app_de_teste(tuipe::typing::TestConfig::default(), &["que "]);
+        app.preferences.keymap.repeat = crokey::parse("ctrl-r").unwrap();
+        app.update(InputEvent::Key {
+            action: KeyAction::Text("que ".into()),
+            at_ms: 10,
+        });
+        app.update(InputEvent::Tick { at_ms: 30_100 });
+        app.started = Instant::now() - Duration::from_secs(31);
+
+        handle_key(
+            &mut app,
+            &repository,
+            KeyCode::Char('r'),
+            KeyModifiers::NONE,
+        )
+        .unwrap();
+        assert!(matches!(app.engine.status(), TestStatus::Completed { .. }));
+
+        handle_key(
+            &mut app,
+            &repository,
+            KeyCode::Char('r'),
+            KeyModifiers::CONTROL,
+        )
+        .unwrap();
+        assert!(matches!(app.engine.status(), TestStatus::Ready));
+    }
+
+    #[test]
+    fn clique_em_sair_devolve_ordem_de_encerramento() {
+        let temporary = tempfile::tempdir().unwrap();
+        let repository = Repository::open(&temporary.path().join("history.db")).unwrap();
+        let mut app = app_de_teste(tuipe::typing::TestConfig::default(), &["que "]);
+        app.update(InputEvent::Key {
+            action: KeyAction::Text("que ".into()),
+            at_ms: 10,
+        });
+        app.update(InputEvent::Tick { at_ms: 30_100 });
+        app.started = Instant::now() - Duration::from_secs(31);
+        app.persisted = true;
+
+        let outcome = handle_mouse(
+            &mut app,
+            &repository,
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 95,
+                row: 27,
+                modifiers: KeyModifiers::NONE,
+            },
+            ratatui::layout::Size::new(100, 28),
+        )
+        .unwrap();
+
+        assert_eq!(outcome, MouseOutcome::Quit);
     }
 
     #[test]

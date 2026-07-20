@@ -8,6 +8,7 @@ use std::{
 use std::os::unix::fs::PermissionsExt;
 
 use anyhow::Result;
+use crokey::KeyCombination;
 use directories::BaseDirs;
 use serde::{Deserialize, Serialize};
 
@@ -19,6 +20,30 @@ pub struct Preferences {
     pub test: TestConfig,
     #[serde(default = "default_theme")]
     pub theme: String,
+    #[serde(default)]
+    pub keymap: Keymap,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Keymap {
+    #[serde(default = "default_next")]
+    pub next: KeyCombination,
+    #[serde(default = "default_repeat")]
+    pub repeat: KeyCombination,
+    #[serde(default = "default_statistics")]
+    pub statistics: KeyCombination,
+    #[serde(default = "default_statistics_global")]
+    pub statistics_global: KeyCombination,
+    #[serde(default = "default_favorite")]
+    pub favorite: KeyCombination,
+    #[serde(default = "default_quit")]
+    pub quit: KeyCombination,
+    #[serde(default = "default_settings")]
+    pub settings: KeyCombination,
+    #[serde(default = "default_cancel")]
+    pub cancel: KeyCombination,
+    #[serde(default = "default_delete_word")]
+    pub delete_word: Vec<KeyCombination>,
 }
 
 pub struct LoadedPreferences {
@@ -35,8 +60,123 @@ impl Default for Preferences {
         Self {
             test: TestConfig::default(),
             theme: default_theme(),
+            keymap: Keymap::default(),
         }
     }
+}
+
+impl Default for Keymap {
+    fn default() -> Self {
+        Self {
+            next: default_next(),
+            repeat: default_repeat(),
+            statistics: default_statistics(),
+            statistics_global: default_statistics_global(),
+            favorite: default_favorite(),
+            quit: default_quit(),
+            settings: default_settings(),
+            cancel: default_cancel(),
+            delete_word: default_delete_word(),
+        }
+    }
+}
+
+impl Keymap {
+    pub fn validate(&self) -> Result<()> {
+        let mut bindings = vec![
+            ("próximo", self.next),
+            ("repetir", self.repeat),
+            ("estatísticas", self.statistics),
+            ("estatísticas globais", self.statistics_global),
+            ("favorito", self.favorite),
+            ("sair", self.quit),
+            ("configurações", self.settings),
+            ("cancelar", self.cancel),
+        ];
+        anyhow::ensure!(
+            !self.delete_word.is_empty(),
+            "o atalho de apagar palavra precisa de ao menos uma combinação"
+        );
+        bindings.extend(
+            self.delete_word
+                .iter()
+                .copied()
+                .map(|binding| ("apagar palavra", binding)),
+        );
+        for (name, binding) in &bindings {
+            anyhow::ensure!(
+                binding.codes.len() == 1,
+                "o atalho de {name} precisa ser uma combinação de uma tecla"
+            );
+        }
+        for (index, (name, binding)) in bindings.iter().enumerate() {
+            if let Some((other, _)) = bindings[..index]
+                .iter()
+                .find(|(_, candidate)| candidate == binding)
+            {
+                anyhow::bail!("os atalhos de {other} e {name} usam a mesma combinação");
+            }
+        }
+        Ok(())
+    }
+
+    pub fn label(binding: KeyCombination) -> String {
+        let raw = binding.to_string().to_lowercase();
+        let parts = raw.split('-').collect::<Vec<_>>();
+        let modifier_count = parts
+            .iter()
+            .take_while(|part| matches!(part, &&"ctrl" | &&"alt" | &&"shift" | &&"super"))
+            .count();
+        if modifier_count == 0 {
+            raw
+        } else {
+            format!(
+                "{}+{}",
+                parts[..modifier_count].join("+"),
+                parts[modifier_count..].join("-")
+            )
+        }
+    }
+}
+
+fn binding(value: &str) -> KeyCombination {
+    crokey::parse(value).expect("os atalhos padrão são válidos")
+}
+
+fn default_next() -> KeyCombination {
+    binding("enter")
+}
+
+fn default_repeat() -> KeyCombination {
+    binding("r")
+}
+
+fn default_statistics() -> KeyCombination {
+    binding("s")
+}
+
+fn default_statistics_global() -> KeyCombination {
+    binding("ctrl-s")
+}
+
+fn default_favorite() -> KeyCombination {
+    binding("f")
+}
+
+fn default_quit() -> KeyCombination {
+    binding("q")
+}
+
+fn default_settings() -> KeyCombination {
+    binding("esc")
+}
+
+fn default_cancel() -> KeyCombination {
+    binding("ctrl-c")
+}
+
+fn default_delete_word() -> Vec<KeyCombination> {
+    vec![binding("ctrl-w"), binding("ctrl-backspace")]
 }
 
 pub fn paths() -> (PathBuf, PathBuf) {
@@ -59,12 +199,12 @@ impl Preferences {
         }
         restrict_file(path)?;
         let contents = fs::read_to_string(path)?;
-        match toml::from_str(&contents) {
-            Ok(preferences) => Ok(LoadedPreferences {
+        match toml::from_str::<Self>(&contents) {
+            Ok(preferences) if preferences.keymap.validate().is_ok() => Ok(LoadedPreferences {
                 preferences,
                 quarantined: None,
             }),
-            Err(_) => {
+            _ => {
                 let parent = path
                     .parent()
                     .expect("o caminho da configuração deve ter um diretório pai");
@@ -85,7 +225,8 @@ impl Preferences {
 
     pub fn validate(path: &Path) -> Result<()> {
         if path.exists() {
-            toml::from_str::<Self>(&fs::read_to_string(path)?)?;
+            let preferences = toml::from_str::<Self>(&fs::read_to_string(path)?)?;
+            preferences.keymap.validate()?;
         }
         Ok(())
     }
@@ -95,12 +236,15 @@ impl Preferences {
             return Ok(Self::default());
         }
         restrict_file(path)?;
-        Ok(toml::from_str(&fs::read_to_string(path)?)?)
+        let preferences: Self = toml::from_str(&fs::read_to_string(path)?)?;
+        preferences.keymap.validate()?;
+        Ok(preferences)
     }
 
     /// Escrever, sincronizar e só então renomear impede que uma queda de energia
     /// produza um TOML parcial. A configuração antiga vale até o rename final.
     pub fn save(&self, path: &Path) -> Result<()> {
+        self.keymap.validate()?;
         let parent = path
             .parent()
             .expect("o caminho da configuração deve ter um diretório pai");
@@ -174,5 +318,35 @@ mod tests {
             fs::read_to_string(quarantine).unwrap(),
             "isto não é toml = ["
         );
+    }
+
+    #[test]
+    fn atalhos_personalizados_sao_persistidos_em_formato_legivel() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("config.toml");
+        let mut preferences = Preferences::default();
+        preferences.keymap.repeat = crokey::parse("ctrl-r").unwrap();
+
+        preferences.save(&path).unwrap();
+        let restored = Preferences::load(&path).unwrap();
+
+        assert_eq!(restored.keymap.repeat, crokey::parse("ctrl-r").unwrap());
+        assert!(
+            fs::read_to_string(path)
+                .unwrap()
+                .contains("repeat = \"Ctrl-r\"")
+        );
+    }
+
+    #[test]
+    fn conflito_de_atalhos_isola_a_configuracao() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("config.toml");
+        fs::write(&path, "[keymap]\nnext = 'enter'\nrepeat = 'enter'\n").unwrap();
+
+        let loaded = Preferences::load_recovering(&path).unwrap();
+
+        assert!(loaded.quarantined.is_some());
+        assert_eq!(loaded.preferences.keymap, Keymap::default());
     }
 }

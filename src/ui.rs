@@ -19,8 +19,8 @@ use unicode_width::UnicodeWidthStr;
 use crate::{
     content::Theme,
     persistence::{
-        ActivityDay, PriorityPattern, PriorityWord, SessionDetail, SessionHistoryItem, SessionKind,
-        SessionOutcome, SessionSummary, StatisticsOverview, WordDetail, WpmBucket,
+        ActivityDay, Keymap, PriorityPattern, PriorityWord, SessionDetail, SessionHistoryItem,
+        SessionKind, SessionOutcome, SessionSummary, StatisticsOverview, WordDetail, WpmBucket,
     },
     typing::{Difficulty, Metrics, QuoteLength, TestEngine, TestMode, TestStatus},
 };
@@ -143,6 +143,15 @@ struct RenderContext<'a> {
     notice: Option<&'a str>,
     focus_warning: bool,
     quote: Option<QuoteRenderState<'a>>,
+    keymap: &'a Keymap,
+    icones: Icons,
+}
+
+#[derive(Clone, Copy)]
+struct FooterContext<'a> {
+    persistence: PersistenceUiState,
+    quote: Option<QuoteRenderState<'a>>,
+    keymap: &'a Keymap,
     icones: Icons,
 }
 
@@ -161,6 +170,7 @@ pub struct RenderState<'a> {
     pub notice: Option<&'a str>,
     pub focus_warning: bool,
     pub quote: Option<QuoteRenderState<'a>>,
+    pub keymap: &'a Keymap,
 }
 
 #[derive(Clone, Copy)]
@@ -234,6 +244,7 @@ pub fn render(frame: &mut Frame, engine: &TestEngine, theme: &Theme, state: Rend
             notice: state.notice,
             focus_warning: state.focus_warning,
             quote: state.quote,
+            keymap: state.keymap,
             icones: icones_do_terminal(),
         },
     );
@@ -1879,6 +1890,7 @@ fn render_com_icones(
         notice,
         focus_warning,
         quote,
+        keymap,
         icones,
     } = context;
     let viewport = frame.area();
@@ -1970,13 +1982,16 @@ fn render_com_icones(
             ),
             engine,
             theme,
-            persistence,
-            quote,
-            icones,
+            FooterContext {
+                persistence,
+                quote,
+                keymap,
+                icones,
+            },
         );
     }
     if settings_open {
-        render_settings(frame, viewport, engine, theme, theme_name, icones);
+        render_settings(frame, viewport, engine, theme, theme_name, keymap, icones);
     } else if ready && let Some(notice) = notice {
         frame.render_widget(
             Paragraph::new(notice)
@@ -2016,6 +2031,7 @@ fn render_settings(
     engine: &TestEngine,
     theme: &Theme,
     theme_name: &str,
+    keymap: &Keymap,
     icones: Icons,
 ) {
     for y in viewport.y..viewport.bottom() {
@@ -2132,7 +2148,11 @@ fn render_settings(
             chip(theme_name.to_owned(), true, theme),
         ]),
         Line::styled(
-            "esc fechar    q sair",
+            format!(
+                "{} fechar    {} sair",
+                Keymap::label(keymap.settings),
+                Keymap::label(keymap.quit)
+            ),
             Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
         ),
     ];
@@ -3002,10 +3022,21 @@ fn render_footer(
     area: Rect,
     engine: &TestEngine,
     theme: &Theme,
-    persistence: PersistenceUiState,
-    quote: Option<QuoteRenderState<'_>>,
-    icones: Icons,
+    context: FooterContext<'_>,
 ) {
+    let FooterContext {
+        persistence,
+        quote,
+        keymap,
+        icones,
+    } = context;
+    let next = Keymap::label(keymap.next);
+    let repeat = Keymap::label(keymap.repeat);
+    let statistics = Keymap::label(keymap.statistics);
+    let statistics_global = Keymap::label(keymap.statistics_global);
+    let favorite = Keymap::label(keymap.favorite);
+    let quit = Keymap::label(keymap.quit);
+    let settings = Keymap::label(keymap.settings);
     if matches!(
         engine.status(),
         TestStatus::Completed { .. } | TestStatus::Failed { .. }
@@ -3022,9 +3053,11 @@ fn render_footer(
             }
             PersistenceUiState::Failed => {
                 frame.render_widget(
-                    Paragraph::new("não foi possível salvar · r tentar novamente")
-                        .alignment(Alignment::Center)
-                        .style(Style::default().fg(theme_color(theme, &theme.error, 3.0))),
+                    Paragraph::new(format!(
+                        "não foi possível salvar · {repeat} tentar novamente"
+                    ))
+                    .alignment(Alignment::Center)
+                    .style(Style::default().fg(theme_color(theme, &theme.error, 3.0))),
                     area,
                 );
                 return;
@@ -3034,14 +3067,14 @@ fn render_footer(
     }
     let lines = match engine.status() {
         TestStatus::Ready if area.width < 64 => vec![
-            key_hints(&[("comece", "a digitar"), ("esc", "config")], theme),
-            key_hints(&[("ctrl+s", "estatísticas")], theme),
+            key_hints(&[("comece", "a digitar"), (&settings, "config")], theme),
+            key_hints(&[(&statistics_global, "estatísticas")], theme),
         ],
         TestStatus::Ready => vec![key_hints(
             &[
                 ("comece", "a digitar"),
-                ("esc", "configurações"),
-                ("ctrl+s", "estatísticas"),
+                (&settings, "configurações"),
+                (&statistics_global, "estatísticas"),
             ],
             theme,
         )],
@@ -3049,15 +3082,15 @@ fn render_footer(
         TestStatus::Completed { .. } | TestStatus::Failed { .. } if area.width < 60 => vec![
             compact_action_line(
                 [
-                    (icones.proximo, "enter", "próximo"),
-                    (icones.repeticao, "r", "repetir"),
+                    (icones.proximo, &next, "próximo"),
+                    (icones.repeticao, &repeat, "repetir"),
                 ],
                 theme,
             ),
             compact_action_line(
                 [
-                    (icones.estatisticas, "s", "dados"),
-                    (icones.sair, "q", "sair"),
+                    (icones.estatisticas, &statistics, "dados"),
+                    (icones.sair, &quit, "sair"),
                 ],
                 theme,
             ),
@@ -3066,11 +3099,11 @@ fn render_footer(
             result_action_icons(icones, quote, theme),
             key_hints(
                 &[
-                    ("enter", "próximo"),
-                    ("r", "repetir"),
-                    ("s", "estatísticas"),
-                    ("f", "favoritar"),
-                    ("q", "sair"),
+                    (&next, "próximo"),
+                    (&repeat, "repetir"),
+                    (&statistics, "estatísticas"),
+                    (&favorite, "favoritar"),
+                    (&quit, "sair"),
                 ],
                 theme,
             ),
@@ -3079,10 +3112,10 @@ fn render_footer(
             result_action_icons(icones, quote, theme),
             key_hints(
                 &[
-                    ("enter", "próximo"),
-                    ("r", "repetir"),
-                    ("s", "estatísticas"),
-                    ("q", "sair"),
+                    (&next, "próximo"),
+                    (&repeat, "repetir"),
+                    (&statistics, "estatísticas"),
+                    (&quit, "sair"),
                 ],
                 theme,
             ),
@@ -3822,6 +3855,7 @@ mod tests {
         let theme = catalog.theme("arch").unwrap();
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).unwrap();
+        let keymap = Keymap::default();
         terminal
             .draw(|frame| {
                 render_com_icones(
@@ -3836,6 +3870,7 @@ mod tests {
                         notice: None,
                         focus_warning,
                         quote: None,
+                        keymap: &keymap,
                         icones: ICONES_UNICODE,
                     },
                 )
@@ -3868,6 +3903,7 @@ mod tests {
         let theme = catalog.theme("arch").unwrap();
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).unwrap();
+        let keymap = Keymap::default();
         terminal
             .draw(|frame| {
                 render_com_icones(
@@ -3885,6 +3921,7 @@ mod tests {
                             source: "Fonte muito boa",
                             favorite,
                         }),
+                        keymap: &keymap,
                         icones: ICONES_UNICODE,
                     },
                 );

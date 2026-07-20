@@ -56,7 +56,7 @@ com palavras novas são agendados pelo próprio tuipe quando há evidência para
 isso. Esses contextos aparecem na interface apenas para explicar o teste atual;
 eles não são escolhas adicionais.
 
-### Atalhos do teste
+### Atalhos padrão do teste
 
 | Tecla | Ação |
 | --- | --- |
@@ -74,6 +74,27 @@ eles não são escolhas adicionais.
 
 Os atalhos `r`, `s`, `f` e `q` ficam bloqueados por 300 ms após o resultado para
 evitar uma ação acidental causada pela última tecla do teste.
+
+Os atalhos de aplicação podem ser alterados em `config.toml`. O tuipe usa a
+notação da crate Crokey e aceita uma tecla com modificadores por ação:
+
+```toml
+[keymap]
+next = "Enter"
+repeat = "Ctrl-r"
+statistics = "s"
+statistics_global = "Ctrl-s"
+favorite = "f"
+quit = "q"
+settings = "Esc"
+cancel = "Ctrl-c"
+delete_word = ["Ctrl-w", "Ctrl-Backspace"]
+```
+
+A interface sempre mostra as combinações configuradas. Combinações duplicadas,
+sequências de várias teclas ou uma lista vazia para `delete_word` invalidam a
+configuração; o arquivo é preservado como `config-corrompida-*.toml` e os
+atalhos seguros são restaurados.
 
 ### Estatísticas e diagnóstico
 

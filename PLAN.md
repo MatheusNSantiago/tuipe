@@ -360,7 +360,7 @@ Streak:
 - [x] Implementar lifecycle seguro de terminal com Ratatui/Crossterm.
 - [x] Construir tela de teste de tres linhas, reflow, rolagem, cursor e papeis de cor.
 - [x] Implementar seletores, mini progress, foco limpo e contexto das sessoes automaticas.
-- [ ] Implementar mouse, resize e keymap configuravel.
+- [x] Implementar mouse, resize e keymap configuravel.
 - [x] Construir tela de resultado e grafico terminal.
 - [x] Criar snapshots em tamanhos pequeno, medio e ultrawide para cada estado importante.
 
