@@ -170,46 +170,60 @@ fn renderiza_em_truecolor_e_no_fallback_256() {
 }
 
 #[test]
-fn salva_sessao_e_restaura_terminal_ao_receber_sigterm() {
-    let home = tempfile::tempdir().expect("criar diretório temporário");
-    let mut app = AplicativoNoTerminal::iniciar(home.path());
-    app.esperar_saida(INICIO_COLAGEM);
-    app.escrever("á".as_bytes());
-    let pid = app.child.process_id().expect("processo sem PID");
+fn salva_sessao_e_restaura_terminal_ao_receber_sinais() {
+    for signal in ["TERM", "INT"] {
+        let home = tempfile::tempdir().expect("criar diretório temporário");
+        let mut app = AplicativoNoTerminal::iniciar(home.path());
+        app.esperar_saida(INICIO_COLAGEM);
+        app.escrever("á".as_bytes());
+        let pid = app.child.process_id().expect("processo sem PID");
 
-    let status = Command::new("kill")
-        .args(["-TERM", &pid.to_string()])
-        .status()
-        .expect("enviar SIGTERM");
-    assert!(status.success(), "kill não conseguiu enviar SIGTERM");
+        let status = Command::new("kill")
+            .args([format!("-{signal}"), pid.to_string()])
+            .status()
+            .expect("enviar sinal");
+        assert!(status.success(), "kill não conseguiu enviar SIG{signal}");
 
-    confirmar_protocolos_restaurados(&app.esperar_encerrar());
-    let banco = home.path().join("data/tuipe/tuipe.db");
-    assert!(banco.exists(), "a sessão interrompida não criou o banco");
-    let conexao = rusqlite::Connection::open(banco).expect("abrir banco da sessão interrompida");
-    let sessoes_com_eventos: u64 = conexao
-        .query_row("SELECT COUNT(*) FROM raw_events", [], |linha| linha.get(0))
-        .expect("contar sessões interrompidas");
-    assert_eq!(sessoes_com_eventos, 1);
-    let (version, size, blob) = conexao
-        .query_row(
-            "SELECT codec_version, uncompressed_size, blob FROM raw_events LIMIT 1",
-            [],
-            |linha| {
-                Ok((
-                    linha.get::<_, u16>(0)?,
-                    linha.get::<_, usize>(1)?,
-                    linha.get::<_, Vec<u8>>(2)?,
-                ))
-            },
-        )
-        .expect("ler eventos da sessão interrompida");
-    let events = RawEventCodec::decode(version, size, &blob).expect("decodificar eventos");
-    assert!(events.iter().any(|event| matches!(
-        &event.kind,
-        RawEventKind::Input {
-            event: RecordedInputKind::InsertDelta { grapheme, .. },
-            ..
-        } if grapheme == "á"
-    )));
+        confirmar_protocolos_restaurados(&app.esperar_encerrar());
+        let banco = home.path().join("data/tuipe/tuipe.db");
+        assert!(banco.exists(), "a sessão interrompida não criou o banco");
+        let conexao =
+            rusqlite::Connection::open(banco).expect("abrir banco da sessão interrompida");
+        let sessoes_com_eventos: u64 = conexao
+            .query_row("SELECT COUNT(*) FROM raw_events", [], |linha| linha.get(0))
+            .expect("contar sessões interrompidas");
+        assert_eq!(sessoes_com_eventos, 1);
+        let (estado, observacoes): (String, u64) = conexao
+            .query_row(
+                "SELECT terminal_state,
+                        (SELECT COUNT(*) FROM word_observations WHERE session_id = sessions.id)
+                 FROM sessions LIMIT 1",
+                [],
+                |linha| Ok((linha.get(0)?, linha.get(1)?)),
+            )
+            .expect("ler classificação da sessão interrompida");
+        assert_eq!(estado, "quit");
+        assert_eq!(observacoes, 1);
+        let (version, size, blob) = conexao
+            .query_row(
+                "SELECT codec_version, uncompressed_size, blob FROM raw_events LIMIT 1",
+                [],
+                |linha| {
+                    Ok((
+                        linha.get::<_, u16>(0)?,
+                        linha.get::<_, usize>(1)?,
+                        linha.get::<_, Vec<u8>>(2)?,
+                    ))
+                },
+            )
+            .expect("ler eventos da sessão interrompida");
+        let events = RawEventCodec::decode(version, size, &blob).expect("decodificar eventos");
+        assert!(events.iter().any(|event| matches!(
+            &event.kind,
+            RawEventKind::Input {
+                event: RecordedInputKind::InsertDelta { grapheme, .. },
+                ..
+            } if grapheme == "á"
+        )));
+    }
 }

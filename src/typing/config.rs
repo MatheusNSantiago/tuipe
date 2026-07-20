@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use anyhow::Result;
+
 /// Subconjunto deliberadamente pequeno de modos do Monkeytype suportado pelo tuipe.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TestMode {
@@ -52,5 +54,30 @@ impl Default for TestConfig {
             language: "portuguese".into(),
             word_pack: "common".into(),
         }
+    }
+}
+
+impl TestConfig {
+    pub fn validate(&self) -> Result<()> {
+        match self.mode {
+            TestMode::Time { seconds } => anyhow::ensure!(
+                (1..=3_600).contains(&seconds),
+                "a duração precisa ficar entre 1 e 3600 segundos"
+            ),
+            TestMode::Words { count } => anyhow::ensure!(
+                (1..=10_000).contains(&count),
+                "a quantidade de palavras precisa ficar entre 1 e 10000"
+            ),
+            TestMode::Quote => {}
+        }
+        anyhow::ensure!(
+            !self.language.trim().is_empty(),
+            "o idioma não pode ser vazio"
+        );
+        anyhow::ensure!(
+            !self.word_pack.trim().is_empty(),
+            "o pacote de palavras não pode ser vazio"
+        );
+        Ok(())
     }
 }

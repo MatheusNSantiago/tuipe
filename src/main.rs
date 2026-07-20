@@ -24,25 +24,20 @@ use crossterm::{
 };
 use rand::{SeedableRng, rngs::SmallRng, seq::IndexedRandom};
 #[cfg(unix)]
-use signal_hook::consts::signal::{SIGHUP, SIGTERM};
+use signal_hook::consts::signal::{SIGHUP, SIGINT, SIGTERM};
 use termina::{
     escape::osc::{DynamicColorNumber, Osc},
     style::RgbColor,
 };
-use unicode_segmentation::UnicodeSegmentation;
-
 use tuipe::{
-    adaptive::{AdaptivePolicy, AdaptiveSampler, Observation, mechanics_for_token},
+    adaptive::{AdaptivePolicy, AdaptiveSampler, Observation},
     content::{ContentCatalog, Quote, WordGenerator},
     persistence::{
-        MechanicObservationRecord, Preferences, RawEvent, RawEventCodec, RawSessionEnd, Repository,
-        SessionDetail, SessionKind, SessionOutcome, SessionProvenance, StatisticsOverview,
-        WordDetail, WordObservationRecord, paths,
+        Preferences, RawEvent, RawEventCodec, RawSessionEnd, Repository, SessionDetail,
+        SessionKind, SessionOutcome, SessionProvenance, StatisticsOverview, WordDetail,
+        WordObservationRecord, paths,
     },
-    typing::{
-        ExternalEvent, InputEvent, KeyAction, QuoteLength, RecordedInputKind, TestEngine, TestMode,
-        TestStatus,
-    },
+    typing::{ExternalEvent, InputEvent, KeyAction, QuoteLength, TestEngine, TestMode, TestStatus},
     ui,
 };
 
@@ -130,6 +125,7 @@ fn shutdown_flag() -> Result<Arc<AtomicBool>> {
     {
         signal_hook::flag::register(SIGTERM, Arc::clone(&shutdown))?;
         signal_hook::flag::register(SIGHUP, Arc::clone(&shutdown))?;
+        signal_hook::flag::register(SIGINT, Arc::clone(&shutdown))?;
     }
     Ok(shutdown)
 }
@@ -322,22 +318,6 @@ impl PersistenceWorker {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default)]
-struct WordTiming {
-    fluent_ms: u64,
-    correction_ms: u64,
-    planning_ms: u64,
-    afk_ms: u64,
-    input_events: u16,
-    corrective_events: u16,
-}
-
-impl WordTiming {
-    fn execution_ms(self) -> u64 {
-        self.fluent_ms.saturating_add(self.correction_ms)
-    }
-}
-
 impl App {
     fn new(
         preferences: Preferences,
@@ -417,11 +397,12 @@ impl App {
         }
         let raw_events =
             RawEventCodec::materialize(self.engine.recorded_events(), self.elapsed_ms(), end);
+        let observations = self.observations(&self.session_baseline, true);
         repository.save_session_with_provenance(
             self.engine.config(),
             self.engine.status(),
             self.engine.metrics(),
-            &[],
+            &observations,
             &raw_events,
             &self.provenance(),
         )?;
@@ -524,6 +505,7 @@ impl App {
                 .iter()
                 .map(|target| target.text.clone())
                 .collect(),
+            selections: self.selections.clone(),
             policy_version: 2,
             kind: self.session_kind,
         }
@@ -550,7 +532,7 @@ impl App {
     }
 
     fn persistence_job(&self) -> PersistJob {
-        let observations = self.observations(&self.session_baseline);
+        let observations = self.observations(&self.session_baseline, false);
         let end = if matches!(self.engine.status(), TestStatus::Failed { .. }) {
             RawSessionEnd::Failed
         } else {
@@ -599,232 +581,15 @@ impl App {
     fn observations(
         &self,
         baseline: &tuipe::persistence::PersonalBaselineProfile,
+        interrupted: bool,
     ) -> Vec<WordObservationRecord> {
-        let timings = self.word_timings();
-        let mut occurrences = HashMap::<String, usize>::new();
-        for (word_index, (target, attempt)) in self
-            .engine
-            .targets()
-            .iter()
-            .zip(self.engine.attempts())
-            .enumerate()
-        {
-            let terminal_failure = matches!(
-                self.engine.status(),
-                TestStatus::Failed { word_index: failed_index, .. } if *failed_index == word_index
-            );
-            let censored = !attempt.committed
-                && !terminal_failure
-                && matches!(self.engine.status(), TestStatus::Completed { .. })
-                && !attempt.input.is_empty();
-            if (attempt.committed || terminal_failure || censored)
-                && let Some(word) = lexical_word(&target.text)
-            {
-                *occurrences.entry(word).or_default() += 1;
-            }
-        }
-        self.engine
-            .targets()
-            .iter()
-            .enumerate()
-            .zip(self.engine.attempts())
-            .filter_map(|((word_index, target), attempt)| {
-                let terminal_failure = matches!(
-                    self.engine.status(),
-                    TestStatus::Failed { word_index: failed_index, .. } if *failed_index == word_index
-                );
-                let censored = !attempt.committed
-                    && !terminal_failure
-                    && matches!(self.engine.status(), TestStatus::Completed { .. })
-                    && !attempt.input.is_empty();
-                if !attempt.committed && !terminal_failure && !censored {
-                    return None;
-                }
-                let word = lexical_word(&target.text)?;
-                let timing = timings.get(word_index).copied().unwrap_or_default();
-                let active_ms = timing.execution_ms();
-                let grapheme_count = word.graphemes(true).count().try_into().unwrap_or(u16::MAX);
-                let active_per_grapheme = active_ms as f64 / f64::from(grapheme_count.max(1));
-                let latency_baseline = baseline.latency_ms_per_grapheme(grapheme_count);
-                let typed = attempt.without_commit();
-                let expected_prefix = target
-                    .text
-                    .graphemes(true)
-                    .take(typed.graphemes(true).count())
-                    .collect::<String>();
-                let confirmed_error = terminal_failure
-                    || (attempt.committed && typed != target.text)
-                    || (censored && typed != expected_prefix);
-                let fast_success = attempt.committed
-                    && !confirmed_error
-                    && attempt.corrections == 0
-                    && latency_baseline
-                        .is_some_and(|baseline| active_per_grapheme <= baseline * 0.8);
-                let slow = latency_baseline
-                    .is_some_and(|baseline| active_per_grapheme >= baseline * 1.5);
-                let evidence_weight = if self.repeated_test || (censored && !confirmed_error) {
-                    0.0
-                } else {
-                    let occurrence_weight = 1.0 / occurrences
-                        .get(&word)
-                        .copied()
-                        .unwrap_or(1)
-                        .max(1) as f64;
-                    if censored {
-                        let observed_fraction = typed.graphemes(true).count() as f64
-                            / f64::from(grapheme_count.max(1));
-                        occurrence_weight * observed_fraction.min(1.0) * 0.5
-                    } else {
-                        occurrence_weight
-                    }
-                };
-                let selection = (!self.repeated_test)
-                    .then(|| self.selections.get(word_index).cloned().flatten())
-                    .flatten();
-                let final_mechanics = mechanics_for_token(&attempt.without_commit());
-                let mechanics = mechanics_for_token(&target.text)
-                    .into_iter()
-                    .map(|mechanic| {
-                        let had_mistake = self.engine.recorded_events().iter().any(|event| {
-                            event.word_index == word_index
-                                && matches!(
-                                    &event.kind,
-                                    RecordedInputKind::Insert {
-                                        expected: Some(expected),
-                                        correct: false,
-                                        ..
-                                    }
-                                    | RecordedInputKind::InsertDelta {
-                                        expected: Some(expected),
-                                        correct: false,
-                                        ..
-                                    } if mechanics_for_token(expected).contains(&mechanic)
-                                )
-                        });
-                        let present_at_end = final_mechanics.contains(&mechanic);
-                        MechanicObservationRecord {
-                            mechanic,
-                            confirmed_error: !present_at_end,
-                            corrected: had_mistake && present_at_end,
-                        }
-                    })
-                    .collect();
-                Some(WordObservationRecord {
-                    language: self.engine.config().language.clone(),
-                    word,
-                    confirmed_error,
-                    corrections: attempt.corrections,
-                    active_ms,
-                    afk_ms: timing.afk_ms,
-                    planning_ms: timing.planning_ms,
-                    fluent_ms: timing.fluent_ms,
-                    correction_ms: timing.correction_ms,
-                    input_events: timing.input_events,
-                    corrective_events: timing.corrective_events,
-                    censored,
-                    grapheme_count,
-                    fast_success,
-                    slow,
-                    latency_ratio: latency_baseline.map(|baseline| active_per_grapheme / baseline),
-                    evidence_weight,
-                    selection_source: selection.as_ref().map(|selection| selection.source),
-                    selection_propensity: selection.map(|selection| selection.propensity),
-                    mechanics,
-                })
-            })
-            .collect()
-    }
-
-    /// Separa execução e interrupção pela distribuição da própria sessão. Um
-    /// intervalo entre palavras continua sendo latência de planejamento, não
-    /// tempo motor da palavra seguinte.
-    fn word_timings(&self) -> Vec<WordTiming> {
-        #[derive(Clone, Copy)]
-        struct Gap {
-            word_index: usize,
-            elapsed_ms: u64,
-            interrupted: bool,
-            same_word: bool,
-            correction: bool,
-        }
-
-        let mut gaps = Vec::new();
-        let mut previous_key = None::<(u64, usize, bool)>;
-        let mut interrupted = false;
-        let mut event_counts = vec![(0_u16, 0_u16); self.engine.targets().len()];
-        for event in self.engine.recorded_events() {
-            match &event.kind {
-                RecordedInputKind::Focus { gained } => {
-                    if !gained {
-                        interrupted = true;
-                    }
-                }
-                RecordedInputKind::Insert { .. }
-                | RecordedInputKind::Delete { .. }
-                | RecordedInputKind::InsertDelta { .. }
-                | RecordedInputKind::DeleteDelta { .. } => {
-                    let current_delete = matches!(
-                        event.kind,
-                        RecordedInputKind::Delete { .. } | RecordedInputKind::DeleteDelta { .. }
-                    );
-                    let counts = &mut event_counts[event.word_index];
-                    counts.0 = counts.0.saturating_add(1);
-                    counts.1 = counts.1.saturating_add(u16::from(current_delete));
-                    if let Some((previous_at, previous_word, previous_delete)) = previous_key {
-                        gaps.push(Gap {
-                            word_index: event.word_index,
-                            elapsed_ms: event.at_ms.saturating_sub(previous_at),
-                            interrupted,
-                            same_word: previous_word == event.word_index,
-                            correction: current_delete || previous_delete,
-                        });
-                    }
-                    previous_key = Some((event.at_ms, event.word_index, current_delete));
-                    interrupted = false;
-                }
-                RecordedInputKind::Paste { .. } | RecordedInputKind::PasteRedacted { .. } => {}
-            }
-        }
-
-        let mut log_intervals = gaps
-            .iter()
-            .filter(|gap| gap.same_word && !gap.interrupted && gap.elapsed_ms > 0)
-            .map(|gap| (gap.elapsed_ms as f64).ln())
-            .collect::<Vec<_>>();
-        let pause_threshold = if log_intervals.len() >= 12 {
-            let median_value = median(&mut log_intervals);
-            let mut deviations = log_intervals
-                .iter()
-                .map(|value| (value - median_value).abs())
-                .collect::<Vec<_>>();
-            let mad = median(&mut deviations);
-            (mad > f64::EPSILON).then_some(median_value + 3.5 * 1.4826 * mad)
-        } else {
-            None
-        };
-
-        let mut timings = vec![WordTiming::default(); self.engine.targets().len()];
-        for gap in gaps {
-            let is_pause = gap.interrupted
-                || pause_threshold.is_some_and(|threshold| {
-                    gap.elapsed_ms > 0 && (gap.elapsed_ms as f64).ln() > threshold
-                });
-            let timing = &mut timings[gap.word_index];
-            if is_pause {
-                timing.afk_ms = timing.afk_ms.saturating_add(gap.elapsed_ms);
-            } else if !gap.same_word {
-                timing.planning_ms = timing.planning_ms.saturating_add(gap.elapsed_ms);
-            } else if gap.correction {
-                timing.correction_ms = timing.correction_ms.saturating_add(gap.elapsed_ms);
-            } else {
-                timing.fluent_ms = timing.fluent_ms.saturating_add(gap.elapsed_ms);
-            }
-        }
-        for (timing, (input_events, corrective_events)) in timings.iter_mut().zip(event_counts) {
-            timing.input_events = input_events;
-            timing.corrective_events = corrective_events;
-        }
-        timings
+        tuipe::persistence::derive_word_observations(
+            &self.engine,
+            baseline,
+            self.repeated_test,
+            interrupted,
+            &self.selections,
+        )
     }
 
     fn apply_observations(&mut self, observations: &[WordObservationRecord]) {
@@ -976,23 +741,6 @@ impl App {
             .flatten();
         Ok(())
     }
-}
-
-fn median(values: &mut [f64]) -> f64 {
-    values.sort_by(f64::total_cmp);
-    let middle = values.len() / 2;
-    if values.len().is_multiple_of(2) {
-        (values[middle - 1] + values[middle]) / 2.0
-    } else {
-        values[middle]
-    }
-}
-
-fn lexical_word(value: &str) -> Option<String> {
-    let lexical = value
-        .trim_matches(|character: char| !character.is_alphabetic())
-        .to_lowercase();
-    (!lexical.is_empty()).then_some(lexical)
 }
 
 fn run(
@@ -2183,7 +1931,7 @@ mod tests {
             at_ms: 0,
         });
         app.update(InputEvent::Tick { at_ms: 1_000 });
-        let observations = app.observations(&Default::default());
+        let observations = app.observations(&Default::default(), false);
         assert_eq!(observations.len(), 1);
         assert!(observations[0].censored);
         assert!(!observations[0].confirmed_error);
@@ -2204,7 +1952,7 @@ mod tests {
             at_ms: 500,
         });
 
-        let observations = app.observations(&Default::default());
+        let observations = app.observations(&Default::default(), false);
         assert_eq!(observations.len(), 1);
         assert_eq!(observations[0].evidence_weight, 0.0);
         assert!(observations[0].selection_source.is_none());
@@ -2231,7 +1979,7 @@ mod tests {
             app.update(InputEvent::Key { action, at_ms });
         }
         app.update(InputEvent::Tick { at_ms: 1_000 });
-        let observations = app.observations(&Default::default());
+        let observations = app.observations(&Default::default(), false);
         assert_eq!(observations[0].fluent_ms, 400);
         assert_eq!(observations[0].correction_ms, 200);
         assert_eq!(observations[0].corrective_events, 1);

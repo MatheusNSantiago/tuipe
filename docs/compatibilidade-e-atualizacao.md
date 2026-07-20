@@ -4,7 +4,7 @@
 
 A versão 0.1 usa:
 
-- schema SQLite 7;
+- schema SQLite 8;
 - codec de eventos brutos 3, com leitura das versões 1 a 3;
 - métricas 2;
 - modelo adaptativo 2;
@@ -27,7 +27,10 @@ tuipe backup tuipe-antes-da-atualizacao.db
 Depois da atualização, execute `tuipe doctor` novamente. Se uma nova versão das
 métricas ou do modelo exigir rematerialização, use `tuipe rebuild`. Esse comando
 parte da configuração, dos estímulos e dos eventos brutos persistidos; sessões
-legadas sem estímulos continuam preservadas.
+legadas sem estímulos continuam preservadas. A reconstrução adquire um bloqueio
+de escrita antes de ler o histórico, rematerializa métricas e observações e só
+então troca as habilidades derivadas; uma instância aberta nunca produz uma
+projeção parcial.
 
 ## Reversão
 

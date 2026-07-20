@@ -13,7 +13,10 @@ use crossterm::event::{KeyCode, KeyModifiers};
 use directories::BaseDirs;
 use serde::{Deserialize, Serialize};
 
-use crate::typing::TestConfig;
+use crate::{
+    content::ContentCatalog,
+    typing::{TestConfig, TestMode},
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Preferences {
@@ -214,6 +217,27 @@ pub fn paths() -> (PathBuf, PathBuf) {
 }
 
 impl Preferences {
+    fn validate_values(&self) -> Result<()> {
+        self.test.validate()?;
+        self.keymap.validate()?;
+        let catalog = ContentCatalog::bundled()?;
+        match self.test.mode {
+            TestMode::Quote => anyhow::ensure!(
+                !catalog
+                    .quotes(&self.test.language, self.test.quote_length)
+                    .is_empty(),
+                "não há citações para o idioma e tamanho configurados"
+            ),
+            TestMode::Time { .. } | TestMode::Words { .. } => anyhow::ensure!(
+                catalog
+                    .word_pack(&self.test.language, &self.test.word_pack)
+                    .is_some(),
+                "o idioma ou pacote de palavras configurado não existe"
+            ),
+        }
+        Ok(())
+    }
+
     /// Preserva uma configuração inválida para diagnóstico e inicia com os
     /// padrões, sem impedir o usuário de abrir o aplicativo.
     pub fn load_recovering(path: &Path) -> Result<LoadedPreferences> {
@@ -226,7 +250,7 @@ impl Preferences {
         restrict_file(path)?;
         let contents = fs::read_to_string(path)?;
         match toml::from_str::<Self>(&contents) {
-            Ok(preferences) if preferences.keymap.validate().is_ok() => Ok(LoadedPreferences {
+            Ok(preferences) if preferences.validate_values().is_ok() => Ok(LoadedPreferences {
                 preferences,
                 quarantined: None,
             }),
@@ -252,7 +276,7 @@ impl Preferences {
     pub fn validate(path: &Path) -> Result<()> {
         if path.exists() {
             let preferences = toml::from_str::<Self>(&fs::read_to_string(path)?)?;
-            preferences.keymap.validate()?;
+            preferences.validate_values()?;
         }
         Ok(())
     }
@@ -263,7 +287,7 @@ impl Preferences {
         }
         restrict_file(path)?;
         let preferences: Self = toml::from_str(&fs::read_to_string(path)?)?;
-        preferences.keymap.validate()?;
+        preferences.validate_values()?;
         Ok(preferences)
     }
 
@@ -396,5 +420,33 @@ mod tests {
         };
 
         keymap.validate().unwrap();
+    }
+
+    #[test]
+    fn teste_sem_palavras_isola_a_configuracao_antes_do_motor() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("config.toml");
+        let mut preferences = Preferences::default();
+        preferences.test.mode = TestMode::Words { count: 0 };
+        fs::write(&path, toml::to_string(&preferences).unwrap()).unwrap();
+
+        let loaded = Preferences::load_recovering(&path).unwrap();
+
+        assert!(loaded.quarantined.is_some());
+        assert_eq!(loaded.preferences.test, TestConfig::default());
+    }
+
+    #[test]
+    fn pacote_inexistente_isola_a_configuracao() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("config.toml");
+        let mut preferences = Preferences::default();
+        preferences.test.word_pack = "fantasma".into();
+        fs::write(&path, toml::to_string(&preferences).unwrap()).unwrap();
+
+        let loaded = Preferences::load_recovering(&path).unwrap();
+
+        assert!(loaded.quarantined.is_some());
+        assert_eq!(loaded.preferences.test, TestConfig::default());
     }
 }

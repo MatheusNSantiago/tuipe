@@ -547,9 +547,8 @@ O modelo ativo já possui:
 
 Limitações ainda abertas:
 
-- o rebuild valida os eventos brutos, mas refaz as habilidades a partir das
-  observações consultáveis; ainda não rematerializa essas observações somente do
-  blob bruto;
+- sessões legadas anteriores à proveniência de estímulos não podem ter suas
+  observações rematerializadas; elas permanecem preservadas e auditáveis;
 - ativação e primeira visibilidade do token não são eventos do motor, portanto o
   planejamento anterior à primeira palavra não é observável;
 - repeat/IME/key-up dependem do que o terminal entrega e ainda não possuem flags
@@ -577,7 +576,7 @@ Limitações ainda abertas:
 - [x] Classificar erros corrigidos/não corrigidos e censura.
 - [x] Separar planejamento, IKI fluente, interrupção e custo de correção.
 - [x] Cobrir Unicode, paste e `Ctrl+W` sem inventar eventos indisponíveis.
-- [ ] Rematerializar observações consultáveis somente a partir do evento bruto.
+- [x] Rematerializar observações consultáveis somente a partir do evento bruto.
 
 ### Fase 3 — baselines e modelo em shadow mode
 
