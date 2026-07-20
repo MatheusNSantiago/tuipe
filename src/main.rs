@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     env,
     io::Write,
     path::PathBuf,
@@ -674,11 +674,11 @@ impl App {
                 .map(|word| word.word.clone())
                 .collect::<Vec<_>>();
             let next_kind = repository.next_session_kind(config, configured_words)?;
-            let (candidates, retention_words) =
-                session_word_pool(configured_words, config, &self.adaptive, next_kind);
             let chances = if matches!(config.mode, TestMode::Quote) {
                 HashMap::new()
             } else if next_kind == SessionKind::Practice && config.adaptive {
+                let (candidates, _) =
+                    session_word_pool(configured_words, config, &self.adaptive, next_kind);
                 self.adaptive.estimated_session_chances(
                     &config.language,
                     &targets,
@@ -686,26 +686,14 @@ impl App {
                     draws,
                 )
             } else {
-                let uniform = if candidates.is_empty() || draws == 0 {
-                    0.0
-                } else {
-                    1.0 - (1.0 - 1.0 / candidates.len() as f64).powi(draws as i32)
-                };
-                targets
-                    .iter()
-                    .map(|word| {
-                        let chance = if next_kind == SessionKind::Retention
-                            && retention_words.contains(word)
-                        {
-                            1.0
-                        } else if candidates.contains(word) {
-                            uniform
-                        } else {
-                            0.0
-                        };
-                        (word.clone(), chance)
-                    })
-                    .collect()
+                estimated_generator_chances(
+                    &self.catalog,
+                    config,
+                    &self.adaptive,
+                    next_kind,
+                    &targets,
+                    draws,
+                )?
             };
             for word in &mut statistics.priority_words {
                 word.estimated_session_chance = chances.get(&word.word).copied().unwrap_or(0.0);
@@ -1772,6 +1760,53 @@ fn session_word_pool(
     (words, retention_words)
 }
 
+fn estimated_generator_chances(
+    catalog: &ContentCatalog,
+    config: &tuipe::typing::TestConfig,
+    adaptive: &AdaptiveSampler,
+    session_kind: SessionKind,
+    targets: &[String],
+    draws: usize,
+) -> Result<HashMap<String, f64>> {
+    if targets.is_empty() || draws == 0 {
+        return Ok(HashMap::new());
+    }
+    const TRIALS: usize = 128;
+    let targets = targets.iter().map(String::as_str).collect::<HashSet<_>>();
+    let mut counts = HashMap::<String, usize>::new();
+    for trial in 0..TRIALS {
+        let seed = 0x7475_6970_652d_7374_u64.wrapping_add(trial as u64);
+        let mut generator = word_generator(
+            catalog,
+            config,
+            SmallRng::seed_from_u64(seed),
+            adaptive,
+            session_kind,
+        )?;
+        let mut seen = HashSet::<String>::new();
+        for _ in 0..draws {
+            let generated = generator.next_generated();
+            if let Some(selection) = generated.selection
+                && targets.contains(selection.word.as_str())
+            {
+                seen.insert(selection.word);
+            }
+        }
+        for word in seen {
+            *counts.entry(word).or_default() += 1;
+        }
+    }
+    Ok(targets
+        .into_iter()
+        .map(|word| {
+            (
+                word.to_owned(),
+                counts.get(word).copied().unwrap_or(0) as f64 / TRIALS as f64,
+            )
+        })
+        .collect())
+}
+
 /// Partição FNV-1a estável: aproximadamente 10% do pack nunca entra na prática
 /// adaptativa e fica reservado para medir transferência.
 fn is_transfer_holdout(word: &str) -> bool {
@@ -2119,6 +2154,47 @@ mod tests {
         let (transfer, _) = session_word_pool(&words, &config, &adaptive, SessionKind::Transfer);
         assert!(practice.iter().all(|word| !is_transfer_holdout(word)));
         assert!(transfer.iter().all(|word| is_transfer_holdout(word)));
+    }
+
+    #[test]
+    fn chance_de_retencao_respeita_o_limite_real_do_teste() {
+        let catalog = ContentCatalog::bundled().unwrap();
+        let config = tuipe::typing::TestConfig::default();
+        let mut adaptive = AdaptiveSampler::default();
+        adaptive.set_review_states(
+            [
+                (
+                    "portuguese".into(),
+                    "casa".into(),
+                    tuipe::adaptive::ReviewState {
+                        last_seen_unix_s: 1,
+                        consecutive_clean_sessions: 1,
+                    },
+                ),
+                (
+                    "portuguese".into(),
+                    "tempo".into(),
+                    tuipe::adaptive::ReviewState {
+                        last_seen_unix_s: 2,
+                        consecutive_clean_sessions: 1,
+                    },
+                ),
+            ],
+            4 * 86_400,
+        );
+        let chances = estimated_generator_chances(
+            &catalog,
+            &config,
+            &adaptive,
+            SessionKind::Retention,
+            &["casa".into(), "tempo".into()],
+            1,
+        )
+        .unwrap();
+
+        let values = [chances["casa"], chances["tempo"]];
+        assert_eq!(values.iter().filter(|chance| **chance == 1.0).count(), 1);
+        assert_eq!(values.iter().filter(|chance| **chance == 0.0).count(), 1);
     }
 
     #[test]

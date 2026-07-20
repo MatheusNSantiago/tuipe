@@ -86,12 +86,6 @@ pub fn derive_word_observations(
             let confirmed_error = terminal_failure
                 || (attempt.committed && typed != target.text)
                 || (censored && typed != expected_prefix);
-            let fast_success = attempt.committed
-                && !confirmed_error
-                && attempt.corrections == 0
-                && latency_baseline.is_some_and(|baseline| active_per_grapheme <= baseline * 0.8);
-            let slow =
-                latency_baseline.is_some_and(|baseline| active_per_grapheme >= baseline * 1.5);
             let evidence_weight = if repeated_test || (censored && !confirmed_error) {
                 0.0
             } else {
@@ -105,6 +99,14 @@ pub fn derive_word_observations(
                     occurrence_weight
                 }
             };
+            let has_timing_evidence = evidence_weight > 0.0 && !censored;
+            let fast_success = has_timing_evidence
+                && attempt.committed
+                && !confirmed_error
+                && attempt.corrections == 0
+                && latency_baseline.is_some_and(|baseline| active_per_grapheme <= baseline * 0.8);
+            let slow = has_timing_evidence
+                && latency_baseline.is_some_and(|baseline| active_per_grapheme >= baseline * 1.5);
             let selection = (!repeated_test)
                 .then(|| selections.get(word_index).cloned().flatten())
                 .flatten();
@@ -152,7 +154,9 @@ pub fn derive_word_observations(
                 grapheme_count,
                 fast_success,
                 slow,
-                latency_ratio: latency_baseline.map(|baseline| active_per_grapheme / baseline),
+                latency_ratio: has_timing_evidence
+                    .then(|| latency_baseline.map(|baseline| active_per_grapheme / baseline))
+                    .flatten(),
                 evidence_weight,
                 selection_source: selection.as_ref().map(|selection| selection.source),
                 selection_propensity: selection.map(|selection| selection.propensity),

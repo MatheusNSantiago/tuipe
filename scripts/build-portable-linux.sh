@@ -23,12 +23,12 @@ docker run --rm \
   cargo build --locked --release
 
 install -m 0755 "$alvo/release/tuipe" "$destino/tuipe-x86_64-linux"
-sha256sum "$destino/tuipe-x86_64-linux" > "$destino/tuipe-x86_64-linux.sha256"
+(cd "$destino" && sha256sum tuipe-x86_64-linux) > "$destino/tuipe-x86_64-linux.sha256"
 tar -czf "$destino/$pacote.tar.gz" \
   --transform "s,^,$pacote/," \
   -C "$destino" tuipe-x86_64-linux \
   -C "$raiz" LICENSE NOTICE README.md CHANGELOG.md assets/manifest.json
-sha256sum "$destino/$pacote.tar.gz" > "$destino/$pacote.tar.gz.sha256"
+(cd "$destino" && sha256sum "$pacote.tar.gz") > "$destino/$pacote.tar.gz.sha256"
 
 echo "artefato: $destino/tuipe-x86_64-linux"
 echo "checksum: $destino/tuipe-x86_64-linux.sha256"

@@ -1213,8 +1213,9 @@ fn render_word_detail(frame: &mut Frame, area: Rect, detail: &WordDetail, theme:
             ]),
             Line::styled(
                 format!(
-                    "{:.1}% de chance no próximo treino adaptativo",
-                    priority.estimated_session_chance * 100.0
+                    "chance na próxima: {} · {}",
+                    estimated_chance_label(priority.estimated_session_chance),
+                    evidence_stage_compact(priority.effective_exposures)
                 ),
                 Style::default().fg(theme_color(theme, &theme.main, 3.0)),
             ),
@@ -1291,8 +1292,9 @@ fn render_word_detail(frame: &mut Frame, area: Rect, detail: &WordDetail, theme:
     );
     frame.render_widget(
         Paragraph::new(format!(
-            "{:.1}% de chance estimada no próximo treino adaptativo",
-            priority.estimated_session_chance * 100.0
+            "chance estimada na próxima sessão automática: {} · {}",
+            estimated_chance_label(priority.estimated_session_chance),
+            evidence_stage(priority.effective_exposures)
         ))
         .style(Style::default().fg(theme_color(theme, &theme.main, 3.0))),
         sections[1],
@@ -1384,6 +1386,41 @@ fn render_word_detail(frame: &mut Frame, area: Rect, detail: &WordDetail, theme:
             .style(Style::default().fg(theme_color(theme, &theme.sub, 2.0))),
         sections[5],
     );
+}
+
+fn estimated_chance_label(chance: f64) -> String {
+    let chance = if chance.is_finite() {
+        chance.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    format!("≈{:.0}%", chance * 100.0)
+}
+
+fn evidence_stage(effective_exposures: f64) -> &'static str {
+    let confidence = evidence_confidence(effective_exposures);
+    if confidence < 0.35 {
+        "evidência inicial"
+    } else if confidence < 0.7 {
+        "evidência em formação"
+    } else {
+        "evidência consistente"
+    }
+}
+
+fn evidence_stage_compact(effective_exposures: f64) -> &'static str {
+    let confidence = evidence_confidence(effective_exposures);
+    if confidence < 0.35 {
+        "inicial"
+    } else if confidence < 0.7 {
+        "em formação"
+    } else {
+        "consistente"
+    }
+}
+
+fn evidence_confidence(effective_exposures: f64) -> f64 {
+    1.0 - (-effective_exposures.max(0.0) / 8.0).exp()
 }
 
 fn word_speed_line(detail: &WordDetail, theme: &Theme) -> Line<'static> {
@@ -1568,11 +1605,14 @@ fn render_statistics_compact(
                 .take(visible)
                 .map(|(index, word)| {
                     let chance = if area.width < 60 {
-                        format!("  chance {:.1}%  ", word.estimated_session_chance * 100.0)
+                        format!(
+                            "  chance {}  ",
+                            estimated_chance_label(word.estimated_session_chance)
+                        )
                     } else {
                         format!(
-                            "  ·  {:.1}% no próximo teste  ·  ",
-                            word.estimated_session_chance * 100.0
+                            "  ·  {} na próxima sessão  ·  ",
+                            estimated_chance_label(word.estimated_session_chance)
                         )
                     };
                     Line::from(vec![
@@ -1901,7 +1941,10 @@ fn render_priority_words(
                             Style::default().fg(theme_color(theme, &theme.main, 3.0)),
                         ),
                         Span::styled(
-                            format!("{:>5.1}%  ", word.estimated_session_chance * 100.0),
+                            format!(
+                                "{:>6}  ",
+                                estimated_chance_label(word.estimated_session_chance)
+                            ),
                             Style::default().fg(theme_color(theme, &theme.main, 3.0)),
                         ),
                         Span::styled(
@@ -2890,15 +2933,22 @@ fn render_result_chart(
     ])
     .split(area);
     let has_errors = metrics.error_history.iter().any(|count| *count > 0);
+    let raw_differs = !metrics.raw_wpm_history.is_empty()
+        && (metrics.raw_wpm_history.len() != metrics.wpm_history.len()
+            || metrics
+                .raw_wpm_history
+                .iter()
+                .zip(&metrics.wpm_history)
+                .any(|(raw, wpm)| (raw - wpm).abs() >= 0.5));
     let mut title = vec![Span::styled(
         "wpm ao longo do tempo",
         Style::default().fg(theme_color(theme, &theme.text, 4.5)),
     )];
-    if !metrics.raw_wpm_history.is_empty() {
+    if raw_differs {
         title.extend([
             Span::raw("   "),
             Span::styled(
-                "raw",
+                "bruto",
                 Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
             ),
         ]);
@@ -2954,12 +3004,16 @@ fn render_result_chart(
         .enumerate()
         .map(|(index, value)| (index as f64, *value))
         .collect::<Vec<_>>();
-    let raw_wpm_points = metrics
-        .raw_wpm_history
-        .iter()
-        .enumerate()
-        .map(|(index, value)| (index as f64, *value))
-        .collect::<Vec<_>>();
+    let raw_wpm_points = if raw_differs {
+        metrics
+            .raw_wpm_history
+            .iter()
+            .enumerate()
+            .map(|(index, value)| (index as f64, *value))
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
     let last_point = wpm_points.len().saturating_sub(1) as f64;
     let smoothed_wpm_points = smooth_wpm_points(&wpm_points);
     let smoothed_raw_wpm_points = smooth_wpm_points(&raw_wpm_points);
@@ -2987,8 +3041,11 @@ fn render_result_chart(
             .x_bounds([0.0, last_point.max(1.0)])
             .y_bounds([0.0, chart_ceiling])
             .paint(|context| {
-                for (index, points) in smoothed_raw_wpm_points.windows(2).enumerate() {
-                    if index.is_multiple_of(2) {
+                let columns_per_second =
+                    f64::from(plot.width.saturating_sub(1).max(1)) / last_point.max(1.0);
+                for points in smoothed_raw_wpm_points.windows(2) {
+                    let column = (points[0].0 * columns_per_second).floor() as u16;
+                    if column % 4 < 2 {
                         context.draw(&CanvasLine {
                             x1: points[0].0,
                             y1: points[0].1,

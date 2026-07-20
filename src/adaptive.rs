@@ -145,10 +145,13 @@ impl MechanicSkill {
         corrected: bool,
         evidence_weight: f64,
     ) {
+        let weight = evidence_weight.clamp(0.0, 1.0);
+        if weight <= 0.0 {
+            return;
+        }
         if !self.distinct_words.iter().any(|seen| seen == word) && self.distinct_words.len() < 32 {
             self.distinct_words.push(word.to_owned());
         }
-        let weight = evidence_weight.clamp(0.0, 1.0);
         self.effective_exposures += weight;
         self.uncorrected_error_mass += f64::from(confirmed_error) * weight;
         self.corrected_error_mass += f64::from(corrected && !confirmed_error) * weight;
@@ -157,10 +160,13 @@ impl MechanicSkill {
 
 impl NgramSkill {
     pub fn observe(&mut self, word: &str, observation: Observation) {
+        let weight = observation.evidence_weight.clamp(0.0, 1.0);
+        if weight <= 0.0 {
+            return;
+        }
         if !self.distinct_words.iter().any(|seen| seen == word) && self.distinct_words.len() < 32 {
             self.distinct_words.push(word.to_owned());
         }
-        let weight = observation.evidence_weight.clamp(0.0, 1.0);
         self.effective_exposures += weight;
         self.uncorrected_error_mass += f64::from(observation.confirmed_error) * weight;
         self.corrected_error_mass +=
@@ -1041,6 +1047,25 @@ mod tests {
         skill.observe("principal", observation);
         skill.observe("privado", observation);
         assert!(policy.ngram_difficulty(&skill, PersonalBaseline::default()) > 0.0);
+    }
+
+    #[test]
+    fn evidencia_descartada_nao_ativa_generalizacao_compartilhada() {
+        let discarded = Observation {
+            confirmed_error: true,
+            corrected: false,
+            fast_success: false,
+            slow: true,
+            latency_ratio: Some(4.0),
+            evidence_weight: 0.0,
+        };
+        let mut ngram = NgramSkill::default();
+        ngram.observe("primeiro", discarded);
+        assert!(ngram.distinct_words.is_empty());
+
+        let mut mechanic = MechanicSkill::default();
+        mechanic.observe("primeiro", true, false, 0.0);
+        assert!(mechanic.distinct_words.is_empty());
     }
 
     #[test]

@@ -297,6 +297,9 @@ impl PersonalBaselineProfile {
 
     fn observe_records(&mut self, records: &[WordObservationRecord]) {
         for record in records {
+            if record.censored || record.evidence_weight <= 0.0 {
+                continue;
+            }
             self.observe_sample(
                 record.active_ms,
                 record.grapheme_count,
@@ -1043,23 +1046,15 @@ impl Repository {
                 .query_row("SELECT COALESCE(MAX(id), 0) FROM sessions", [], |row| {
                     row.get::<_, i64>(0)
                 })?;
-        let transaction = self.connection.unchecked_transaction()?;
+        let transaction =
+            rusqlite::Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
         transaction.execute(
             "INSERT INTO adaptive_resets (scope, session_id) VALUES (?1, ?2)
              ON CONFLICT(scope) DO UPDATE SET session_id = excluded.session_id",
             params![word_reset_scope(language, word), cutoff],
         )?;
-        transaction.execute(
-            "DELETE FROM word_skill WHERE language = ?1 AND word = ?2",
-            params![language, word],
-        )?;
-        transaction.execute(
-            "DELETE FROM skill_review WHERE language = ?1 AND word = ?2",
-            params![language, word],
-        )?;
-        transaction.execute_batch("DELETE FROM ngram_skill; DELETE FROM mechanic_skill;")?;
+        self.rebuild_adaptive_projections_in(&transaction, true)?;
         transaction.commit()?;
-        self.rebuild_adaptive_projections()?;
         Ok(())
     }
 
@@ -1099,7 +1094,11 @@ impl Repository {
                     COALESCE(SUM(confirmed_error != 0), 0),
                     COALESCE(SUM(confirmed_error = 0 AND corrections > 0), 0)
              FROM word_observations
-             WHERE language = ?1 AND active_ms > 0 AND grapheme_count > 0",
+             WHERE language = ?1
+               AND active_ms > 0
+               AND grapheme_count > 0
+               AND censored = 0
+               AND evidence_weight > 0",
             [language],
             |row| {
                 Ok((
@@ -1114,7 +1113,11 @@ impl Repository {
             .prepare(
                 "SELECT grapheme_count, active_ms * 1.0 / grapheme_count
                  FROM word_observations
-                 WHERE language = ?1 AND active_ms > 0 AND grapheme_count > 0
+                 WHERE language = ?1
+                   AND active_ms > 0
+                   AND grapheme_count > 0
+                   AND censored = 0
+                   AND evidence_weight > 0
                  ORDER BY id DESC
                  LIMIT ?2",
             )?
@@ -1844,7 +1847,7 @@ fn observe_stored_session_baseline(
     let mut statement = connection.prepare(
         "SELECT language, active_ms, grapheme_count, confirmed_error, corrections
          FROM word_observations
-         WHERE session_id = ?1
+         WHERE session_id = ?1 AND censored = 0 AND evidence_weight > 0
          ORDER BY id",
     )?;
     let samples = statement
@@ -2300,7 +2303,7 @@ fn backfill_session_selections(connection: &Connection) -> Result<()> {
         .collect::<rusqlite::Result<Vec<_>>>()?;
     for (session_id, stimuli_json) in sessions {
         let stimuli = serde_json::from_str::<Vec<String>>(&stimuli_json)?;
-        let observations = connection
+        let mut observations = connection
             .prepare(
                 "SELECT word, selection_source, selection_propensity
                  FROM word_observations
@@ -2314,25 +2317,52 @@ fn backfill_session_selections(connection: &Connection) -> Result<()> {
                     row.get::<_, Option<f64>>(2)?,
                 ))
             })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        let mut selections = observations
+            .collect::<rusqlite::Result<Vec<_>>>()?
             .into_iter()
-            .map(|(word, source, propensity)| match (source, propensity) {
-                (Some(source), Some(propensity)) => Ok(Some(WordSelection {
+            .peekable();
+        let mut selections = vec![None; stimuli.len()];
+        for (index, stimulus) in stimuli.iter().enumerate() {
+            let Some(expected) = lexical_stimulus(stimulus) else {
+                continue;
+            };
+            let Some((observed, _, _)) = observations.peek() else {
+                break;
+            };
+            if observed != &expected {
+                anyhow::bail!(
+                    "observação {observed:?} não corresponde ao estímulo {expected:?} na sessão #{session_id}"
+                );
+            }
+            let (word, source, propensity) = observations
+                .next()
+                .expect("a observação acabou de ser verificada");
+            selections[index] = match (source, propensity) {
+                (Some(source), Some(propensity)) => Some(WordSelection {
                     word,
                     source: selection_source_from_db(&source)?,
                     propensity,
-                })),
-                _ => Ok(None),
-            })
-            .collect::<Result<Vec<_>>>()?;
-        selections.resize(stimuli.len().max(selections.len()), None);
+                }),
+                _ => None,
+            };
+        }
+        if let Some((word, _, _)) = observations.next() {
+            anyhow::bail!(
+                "observação {word:?} não possui estímulo correspondente na sessão #{session_id}"
+            );
+        }
         connection.execute(
             "UPDATE sessions SET selections_json = ?2 WHERE id = ?1",
             params![session_id, serde_json::to_string(&selections)?],
         )?;
     }
     Ok(())
+}
+
+fn lexical_stimulus(value: &str) -> Option<String> {
+    let lexical = value
+        .trim_matches(|character: char| !character.is_alphabetic())
+        .to_lowercase();
+    (!lexical.is_empty()).then_some(lexical)
 }
 
 fn selection_source_from_db(value: &str) -> Result<SelectionSource> {
@@ -2517,7 +2547,7 @@ mod tests {
                    terminal_state, config_toml, elapsed_ms, wpm, raw_wpm, accuracy,
                    correct_chars, incorrect_chars, extra_chars, missed_chars,
                    metrics_version, adaptive_version, codec_version, stimuli_json
-                 ) VALUES ('completed', '', 1, 1, 1, 100, 1, 0, 0, 0, 1, 1, 1, '[\"casa\"]');
+                 ) VALUES ('completed', '', 1, 1, 1, 100, 1, 0, 0, 0, 1, 1, 1, '[\"123\",\"casa\"]');
                  INSERT INTO word_observations (
                    session_id, language, word, confirmed_error, corrections,
                    active_ms, afk_ms, grapheme_count, selection_source, selection_propensity
@@ -2544,11 +2574,14 @@ mod tests {
             .unwrap();
         assert_eq!(
             serde_json::from_str::<Vec<Option<WordSelection>>>(&selections).unwrap(),
-            vec![Some(WordSelection {
-                word: "casa".into(),
-                source: SelectionSource::Targeted,
-                propensity: 0.125,
-            })]
+            vec![
+                None,
+                Some(WordSelection {
+                    word: "casa".into(),
+                    source: SelectionSource::Targeted,
+                    propensity: 0.125,
+                })
+            ]
         );
     }
 
@@ -3417,6 +3450,45 @@ mod tests {
     }
 
     #[test]
+    fn reset_de_palavra_reverte_por_inteiro_se_a_reconstrucao_falhar() {
+        let temporary = tempfile::tempdir().unwrap();
+        let repository = Repository::open(&temporary.path().join("history.db")).unwrap();
+        for word in ["casa", "tempo"] {
+            repository
+                .save_session_with_observations(
+                    &TestConfig::default(),
+                    &TestStatus::Failed {
+                        ended_at_ms: 1_000,
+                        word_index: 0,
+                    },
+                    Metrics::default(),
+                    &[word_observation(word, true)],
+                )
+                .unwrap();
+        }
+        let before = repository.load_all_word_skills().unwrap();
+        repository
+            .connection
+            .execute_batch(
+                "CREATE TEMP TRIGGER impedir_reset
+                 BEFORE INSERT ON word_skill
+                 BEGIN SELECT RAISE(ABORT, 'falha injetada'); END;",
+            )
+            .unwrap();
+
+        assert!(repository.reset_word_model("portuguese", "casa").is_err());
+        assert_eq!(repository.load_all_word_skills().unwrap(), before);
+        assert_eq!(
+            repository
+                .connection
+                .query_row("SELECT COUNT(*) FROM adaptive_resets", [], |row| row
+                    .get::<_, u64>(0))
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
     fn baseline_por_idioma_so_ativa_com_amostras_suficientes() {
         let temporary = tempfile::tempdir().unwrap();
         let repository = Repository::open(&temporary.path().join("history.db")).unwrap();
@@ -3454,6 +3526,20 @@ mod tests {
                 )
                 .unwrap();
         }
+        let mut discarded = word_observation("cancelada", true);
+        discarded.active_ms = 1;
+        discarded.fluent_ms = 1;
+        discarded.grapheme_count = 40;
+        discarded.censored = true;
+        discarded.evidence_weight = 0.0;
+        repository
+            .save_session_with_observations(
+                &TestConfig::default(),
+                &TestStatus::Running { started_at_ms: 0 },
+                Metrics::default(),
+                &[discarded],
+            )
+            .unwrap();
         assert_eq!(
             repository.baseline_ms_per_grapheme("portuguese").unwrap(),
             Some(200.0)
