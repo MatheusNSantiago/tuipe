@@ -35,6 +35,11 @@ Unicode pode ser ativado sem recompilar:
 TUIPE_ICONS=unicode tuipe
 ```
 
+As cores são detectadas automaticamente e degradadas de RGB para 256 ou 16
+cores quando necessário. Para diagnosticar uma detecção incorreta, use
+`TUIPE_COLORS=truecolor`, `TUIPE_COLORS=256`, `TUIPE_COLORS=16` ou
+`TUIPE_COLORS=none`.
+
 ## Uso
 
 Basta começar a digitar. Avaliações de progresso, revisões de retenção e testes

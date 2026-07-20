@@ -10,7 +10,8 @@ use ratatui::{
     },
 };
 use spline1d::pchip;
-use std::env;
+use std::{env, sync::OnceLock};
+use supports_color::Stream;
 
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
@@ -37,6 +38,16 @@ const RESULT_GROUP_HEIGHT: u16 = 4;
 const RESULT_CHART_HEIGHT: u16 = 12;
 const RESULT_AXIS_LABEL_WIDTH: u16 = 4;
 const CURVE_SAMPLES_PER_INTERVAL: u16 = 16;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ColorProfile {
+    TrueColor,
+    Ansi256,
+    Ansi16,
+    None,
+}
+
+static COLOR_PROFILE: OnceLock<ColorProfile> = OnceLock::new();
 
 #[derive(Clone, Copy)]
 struct Icons {
@@ -1777,14 +1788,93 @@ fn render_size_requirement(
     );
 }
 
+pub fn uses_true_color() -> bool {
+    color_profile() == ColorProfile::TrueColor
+}
+
+fn color_profile() -> ColorProfile {
+    *COLOR_PROFILE.get_or_init(|| {
+        if let Ok(profile) = env::var("TUIPE_COLORS") {
+            return match profile.as_str() {
+                "truecolor" | "24bit" => ColorProfile::TrueColor,
+                "256" => ColorProfile::Ansi256,
+                "16" => ColorProfile::Ansi16,
+                "none" => ColorProfile::None,
+                _ => detected_color_profile(),
+            };
+        }
+        detected_color_profile()
+    })
+}
+
+fn detected_color_profile() -> ColorProfile {
+    match supports_color::on_cached(Stream::Stdout) {
+        Some(support) if support.has_16m => ColorProfile::TrueColor,
+        Some(support) if support.has_256 => ColorProfile::Ansi256,
+        Some(support) if support.has_basic => ColorProfile::Ansi16,
+        _ => ColorProfile::None,
+    }
+}
+
 fn color(value: &str) -> Color {
+    color_with_profile(value, color_profile())
+}
+
+fn color_with_profile(value: &str, profile: ColorProfile) -> Color {
     value
         .parse::<csscolorparser::Color>()
         .map(|parsed| {
             let [red, green, blue, _] = parsed.to_rgba8();
-            Color::Rgb(red, green, blue)
+            match profile {
+                ColorProfile::TrueColor => Color::Rgb(red, green, blue),
+                ColorProfile::Ansi256 => Color::Indexed(rgb_to_ansi256(red, green, blue)),
+                ColorProfile::Ansi16 => rgb_to_ansi16(red, green, blue),
+                ColorProfile::None => Color::Reset,
+            }
         })
         .unwrap_or(Color::Reset)
+}
+
+fn rgb_to_ansi256(red: u8, green: u8, blue: u8) -> u8 {
+    if red == green && green == blue {
+        return match red {
+            0..=7 => 16,
+            248..=255 => 231,
+            value => 232 + (((u16::from(value) - 8 + 5) / 10).min(23)) as u8,
+        };
+    }
+    let quantize = |value: u8| ((u16::from(value) * 5 + 127) / 255) as u8;
+    16 + 36 * quantize(red) + 6 * quantize(green) + quantize(blue)
+}
+
+fn rgb_to_ansi16(red: u8, green: u8, blue: u8) -> Color {
+    const PALETTE: [(Color, (u8, u8, u8)); 16] = [
+        (Color::Black, (0, 0, 0)),
+        (Color::Red, (128, 0, 0)),
+        (Color::Green, (0, 128, 0)),
+        (Color::Yellow, (128, 128, 0)),
+        (Color::Blue, (0, 0, 128)),
+        (Color::Magenta, (128, 0, 128)),
+        (Color::Cyan, (0, 128, 128)),
+        (Color::Gray, (192, 192, 192)),
+        (Color::DarkGray, (128, 128, 128)),
+        (Color::LightRed, (255, 0, 0)),
+        (Color::LightGreen, (0, 255, 0)),
+        (Color::LightYellow, (255, 255, 0)),
+        (Color::LightBlue, (0, 0, 255)),
+        (Color::LightMagenta, (255, 0, 255)),
+        (Color::LightCyan, (0, 255, 255)),
+        (Color::White, (255, 255, 255)),
+    ];
+    PALETTE
+        .iter()
+        .min_by_key(|(_, candidate)| {
+            let red = i32::from(red) - i32::from(candidate.0);
+            let green = i32::from(green) - i32::from(candidate.1);
+            let blue = i32::from(blue) - i32::from(candidate.2);
+            red * red + green * green + blue * blue
+        })
+        .map_or(Color::Reset, |(color, _)| *color)
 }
 
 #[cfg(test)]
@@ -2075,5 +2165,27 @@ mod tests {
         assert_eq!(curve.first(), Some(&observed[0]));
         assert_eq!(curve.last(), Some(&observed[2]));
         assert_eq!(curve.len(), 33);
+    }
+
+    #[test]
+    fn theme_colors_degrade_to_the_terminal_capability() {
+        assert_eq!(
+            color_with_profile("#123456", ColorProfile::TrueColor),
+            Color::Rgb(0x12, 0x34, 0x56)
+        );
+        assert!(matches!(
+            color_with_profile("#123456", ColorProfile::Ansi256),
+            Color::Indexed(_)
+        ));
+        assert_eq!(
+            color_with_profile("#ff0000", ColorProfile::Ansi16),
+            Color::LightRed
+        );
+        assert_eq!(
+            color_with_profile("#ffffff", ColorProfile::None),
+            Color::Reset
+        );
+        assert_eq!(rgb_to_ansi256(0, 0, 0), 16);
+        assert_eq!(rgb_to_ansi256(255, 255, 255), 231);
     }
 }

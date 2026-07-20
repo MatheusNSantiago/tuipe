@@ -594,7 +594,7 @@ fn run(
                 .catalog
                 .theme(&app.preferences.theme)
                 .context("configured theme is unavailable")?;
-            if theme.caret != last_cursor_color {
+            if ui::uses_true_color() && theme.caret != last_cursor_color {
                 set_cursor_color(&theme.caret)?;
                 last_cursor_color.clone_from(&theme.caret);
             }
