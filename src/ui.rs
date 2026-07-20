@@ -74,6 +74,8 @@ struct Icons {
     estatisticas: &'static str,
     sair: &'static str,
     mouse: &'static str,
+    favorito: &'static str,
+    nao_favorito: &'static str,
 }
 
 const ICONES_UNICODE: Icons = Icons {
@@ -92,6 +94,8 @@ const ICONES_UNICODE: Icons = Icons {
     estatisticas: "⌁",
     sair: "×",
     mouse: "↖",
+    favorito: "♥",
+    nao_favorito: "♡",
 };
 
 const ICONES_NERD: Icons = Icons {
@@ -110,6 +114,8 @@ const ICONES_NERD: Icons = Icons {
     estatisticas: "",
     sair: "",
     mouse: "",
+    favorito: "",
+    nao_favorito: "",
 };
 
 fn icones_do_terminal() -> Icons {
@@ -135,7 +141,14 @@ struct RenderContext<'a> {
     persistence: PersistenceUiState,
     notice: Option<&'a str>,
     focus_warning: bool,
+    quote: Option<QuoteRenderState<'a>>,
     icones: Icons,
+}
+
+#[derive(Clone, Copy)]
+pub struct QuoteRenderState<'a> {
+    pub source: &'a str,
+    pub favorite: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -146,6 +159,7 @@ pub struct RenderState<'a> {
     pub persistence: PersistenceUiState,
     pub notice: Option<&'a str>,
     pub focus_warning: bool,
+    pub quote: Option<QuoteRenderState<'a>>,
 }
 
 #[derive(Clone, Copy)]
@@ -192,6 +206,7 @@ pub fn render(frame: &mut Frame, engine: &TestEngine, theme: &Theme, state: Rend
             persistence: state.persistence,
             notice: state.notice,
             focus_warning: state.focus_warning,
+            quote: state.quote,
             icones: icones_do_terminal(),
         },
     );
@@ -1182,6 +1197,7 @@ fn render_com_icones(
         persistence,
         notice,
         focus_warning,
+        quote,
         icones,
     } = context;
     let viewport = frame.area();
@@ -1236,9 +1252,15 @@ fn render_com_icones(
     );
 
     match engine.status() {
-        TestStatus::Completed { .. } | TestStatus::Failed { .. } => {
-            render_result(frame, result_area, engine, theme, session_kind, icones)
-        }
+        TestStatus::Completed { .. } | TestStatus::Failed { .. } => render_result(
+            frame,
+            result_area,
+            engine,
+            theme,
+            session_kind,
+            quote,
+            icones,
+        ),
         TestStatus::Ready | TestStatus::Running { .. } => {
             render_test(frame, test_area, engine, theme, session_kind, icones)
         }
@@ -1268,6 +1290,7 @@ fn render_com_icones(
             engine,
             theme,
             persistence,
+            quote,
             icones,
         );
     }
@@ -1796,6 +1819,7 @@ fn render_result(
     engine: &TestEngine,
     theme: &Theme,
     session_kind: SessionKind,
+    quote: Option<QuoteRenderState<'_>>,
     icones: Icons,
 ) {
     let metrics = engine.metrics();
@@ -1803,7 +1827,7 @@ fn render_result(
     let details_height = result_details_height(area.width, group_count);
     let required_height = RESULT_CHART_HEIGHT + 1 + details_height;
     if area.height < required_height {
-        render_compact_result(frame, area, engine, &metrics, theme, session_kind, icones);
+        render_compact_result(frame, area, engine, theme, session_kind, quote, icones);
         return;
     }
     let body = centered_height(
@@ -1816,7 +1840,7 @@ fn render_result(
         .max(5)
         .min(body.height);
     let top = Rect::new(body.x, body.y, body.width, top_height);
-    render_result_chart(frame, top, &metrics, theme, session_kind, icones);
+    render_result_chart(frame, top, &metrics, theme, session_kind, quote, icones);
 
     let details_top = top.bottom().saturating_add(1);
     render_result_details(
@@ -1838,11 +1862,12 @@ fn render_compact_result(
     frame: &mut Frame,
     area: Rect,
     engine: &TestEngine,
-    metrics: &Metrics,
     theme: &Theme,
     session_kind: SessionKind,
+    quote: Option<QuoteRenderState<'_>>,
     icones: Icons,
 ) {
+    let metrics = engine.metrics();
     let stats = metrics.characters;
     let lines = vec![
         Line::from(vec![
@@ -1915,6 +1940,17 @@ fn render_compact_result(
     if let Some(kind) = session_kind_descriptor(session_kind, icones) {
         descriptor.push(kind);
     }
+    if let Some(quote) = quote {
+        let heart = if quote.favorite {
+            icones.favorito
+        } else {
+            icones.nao_favorito
+        };
+        descriptor.push(format!(
+            "{heart} f favoritar · {}",
+            quote_source_label(quote.source, 30)
+        ));
+    }
     let descriptor = descriptor.into_iter().map(|line| {
         Line::styled(
             line,
@@ -1926,7 +1962,9 @@ fn render_compact_result(
             .alignment(Alignment::Center),
         centered_height(
             area,
-            if session_kind == SessionKind::Practice {
+            if quote.is_some() {
+                9
+            } else if session_kind == SessionKind::Practice {
                 7
             } else {
                 8
@@ -1941,6 +1979,7 @@ fn render_result_chart(
     metrics: &Metrics,
     theme: &Theme,
     session_kind: SessionKind,
+    quote: Option<QuoteRenderState<'_>>,
     icones: Icons,
 ) {
     let sections = Layout::vertical([
@@ -1965,6 +2004,19 @@ fn render_result_chart(
     {
         title.push(Span::styled(
             format!("   ·   {kind}"),
+            Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
+        ));
+    }
+    if area.width >= 60
+        && let Some(quote) = quote
+    {
+        let heart = if quote.favorite {
+            icones.favorito
+        } else {
+            icones.nao_favorito
+        };
+        title.push(Span::styled(
+            format!("   ·   {heart} {}", quote_source_label(quote.source, 30)),
             Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
         ));
     }
@@ -2270,6 +2322,7 @@ fn render_footer(
     engine: &TestEngine,
     theme: &Theme,
     persistence: PersistenceUiState,
+    quote: Option<QuoteRenderState<'_>>,
     icones: Icons,
 ) {
     if matches!(
@@ -2320,8 +2373,21 @@ fn render_footer(
                 theme,
             ),
         ],
+        TestStatus::Completed { .. } | TestStatus::Failed { .. } if quote.is_some() => vec![
+            result_action_icons(icones, quote, theme),
+            key_hints(
+                &[
+                    ("enter", "próximo"),
+                    ("r", "repetir"),
+                    ("s", "estatísticas"),
+                    ("f", "favoritar"),
+                    ("q", "sair"),
+                ],
+                theme,
+            ),
+        ],
         TestStatus::Completed { .. } | TestStatus::Failed { .. } => vec![
-            result_action_icons(icones, theme),
+            result_action_icons(icones, quote, theme),
             key_hints(
                 &[
                     ("enter", "próximo"),
@@ -2336,17 +2402,29 @@ fn render_footer(
     frame.render_widget(Paragraph::new(lines).alignment(Alignment::Center), area);
 }
 
-fn result_action_icons(icones: Icons, theme: &Theme) -> Line<'static> {
+fn result_action_icons(
+    icones: Icons,
+    quote: Option<QuoteRenderState<'_>>,
+    theme: &Theme,
+) -> Line<'static> {
     let mut spans = Vec::new();
-    for (index, icon) in [
+    let mut icons = vec![
         icones.proximo,
         icones.repeticao,
         icones.estatisticas,
         icones.sair,
-    ]
-    .into_iter()
-    .enumerate()
-    {
+    ];
+    if let Some(quote) = quote {
+        icons.insert(
+            3,
+            if quote.favorite {
+                icones.favorito
+            } else {
+                icones.nao_favorito
+            },
+        );
+    }
+    for (index, icon) in icons.into_iter().enumerate() {
         if index > 0 {
             spans.push(Span::raw("        "));
         }
@@ -2544,6 +2622,15 @@ fn result_descriptor(engine: &TestEngine, icones: Icons) -> String {
         icones.dificuldade,
         modifiers.join(" · ")
     )
+}
+
+fn quote_source_label(source: &str, maximum: usize) -> String {
+    let graphemes = source.graphemes(true).collect::<Vec<_>>();
+    if graphemes.len() <= maximum {
+        source.into()
+    } else {
+        format!("{}…", graphemes[..maximum.saturating_sub(1)].concat())
+    }
 }
 
 fn session_kind_descriptor(session_kind: SessionKind, icones: Icons) -> Option<String> {
@@ -3059,9 +3146,59 @@ mod tests {
                         persistence,
                         notice: None,
                         focus_warning,
+                        quote: None,
                         icones: ICONES_UNICODE,
                     },
                 )
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        (0..height)
+            .map(|y| {
+                (0..width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_owned()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn render_quote_result_at(width: u16, height: u16, favorite: bool) -> String {
+        let config = TestConfig {
+            mode: TestMode::Quote,
+            ..TestConfig::default()
+        };
+        let mut engine = TestEngine::new(config, ["olá".into()]);
+        engine.update(InputEvent::Key {
+            action: KeyAction::Text("olá".into()),
+            at_ms: 10,
+        });
+        let catalog = ContentCatalog::bundled().unwrap();
+        let theme = catalog.theme("arch").unwrap();
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                render_com_icones(
+                    frame,
+                    &engine,
+                    theme,
+                    RenderContext {
+                        settings_open: false,
+                        theme_name: "arch",
+                        session_kind: SessionKind::Transfer,
+                        persistence: PersistenceUiState::Saved,
+                        notice: None,
+                        focus_warning: false,
+                        quote: Some(QuoteRenderState {
+                            source: "Fonte muito boa",
+                            favorite,
+                        }),
+                        icones: ICONES_UNICODE,
+                    },
+                );
             })
             .unwrap();
         let buffer = terminal.backend().buffer();
@@ -3311,6 +3448,16 @@ mod tests {
             assert!(rendered.contains(expected));
             assert!(!rendered.contains("escolher sessão"));
         }
+    }
+
+    #[test]
+    fn resultado_de_citacao_exibe_fonte_e_favorito() {
+        let favorite = render_quote_result_at(100, 28, true);
+        let regular = render_quote_result_at(50, 18, false);
+
+        assert!(favorite.contains("♥ Fonte muito boa"));
+        assert!(favorite.contains("f favoritar"));
+        assert!(regular.contains("♡ f favoritar · Fonte muito boa"));
     }
 
     #[test]

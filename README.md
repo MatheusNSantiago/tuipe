@@ -68,6 +68,7 @@ eles não são escolhas adicionais.
 | `esc` | abrir ou fechar as configurações |
 | `r` | repetir o mesmo teste após o resultado |
 | `s` | abrir as estatísticas após o resultado |
+| `f` | favoritar ou desfavoritar a citação após o resultado |
 | `q` | sair na tela de resultado ou nas configurações |
 
 Os atalhos `r`, `s` e `q` ficam bloqueados por 300 ms após o resultado para

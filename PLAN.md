@@ -369,8 +369,8 @@ Streak:
 ### Fase 3 — conteudo, temas e configuracao
 
 - [x] Integrar pacotes `common`, `1k`, `5k` para portugues/ingles.
-- [ ] Integrar corpus de quotes e favoritos.
-- [ ] Integrar dez temas e schema de tema pessoal.
+- [x] Integrar corpus de quotes e favoritos.
+- [x] Integrar dez temas e schema de tema pessoal.
 - [x] Persistir/restaurar configuracao XDG atomicamente.
 - [x] Validar assets na inicializacao com mensagens de erro acionaveis.
 

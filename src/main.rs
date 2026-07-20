@@ -33,7 +33,7 @@ use unicode_segmentation::UnicodeSegmentation;
 
 use tuipe::{
     adaptive::{AdaptivePolicy, AdaptiveSampler, Observation, mechanics_for_token},
-    content::{ContentCatalog, WordGenerator},
+    content::{ContentCatalog, Quote, WordGenerator},
     persistence::{
         MechanicObservationRecord, Preferences, RawEvent, RawEventCodec, RawSessionEnd, Repository,
         SessionKind, SessionProvenance, StatisticsOverview, WordDetail, WordObservationRecord,
@@ -196,6 +196,8 @@ struct App {
     session_baseline: tuipe::persistence::PersonalBaselineProfile,
     startup_notice: Option<String>,
     focus_lost_at: Option<Instant>,
+    current_quote: Option<Quote>,
+    quote_favorite: bool,
 }
 
 enum StatisticsReset {
@@ -329,8 +331,13 @@ impl App {
             adaptive.set_baseline(language, baseline.rates);
         }
         let session_kind = repository.next_session_kind(&preferences.test)?;
-        let (engine, generator, selections) =
+        let (engine, generator, selections, current_quote) =
             new_test(&catalog, &preferences.test, seed, &adaptive, session_kind)?;
+        let quote_favorite = current_quote
+            .as_ref()
+            .map(|quote| repository.is_quote_favorite(quote.id))
+            .transpose()?
+            .unwrap_or(false);
         Ok(Self {
             preferences,
             catalog,
@@ -355,6 +362,8 @@ impl App {
             session_baseline,
             startup_notice,
             focus_lost_at: None,
+            current_quote,
+            quote_favorite,
         })
     }
 
@@ -390,7 +399,7 @@ impl App {
         );
         self.seed = rand::random();
         let session_kind = repository.next_session_kind(&self.preferences.test)?;
-        let (engine, generator, selections) = new_test(
+        let (engine, generator, selections, current_quote) = new_test(
             &self.catalog,
             &self.preferences.test,
             self.seed,
@@ -400,6 +409,12 @@ impl App {
         self.engine = engine;
         self.generator = generator;
         self.selections = selections;
+        self.quote_favorite = current_quote
+            .as_ref()
+            .map(|quote| repository.is_quote_favorite(quote.id))
+            .transpose()?
+            .unwrap_or(false);
+        self.current_quote = current_quote;
         self.started = Instant::now();
         self.persisted = false;
         self.persistence_pending = false;
@@ -411,7 +426,7 @@ impl App {
 
     fn repeat(&mut self, repository: &Repository) -> Result<()> {
         self.persist_interrupted(repository, RawSessionEnd::Restarted)?;
-        let (engine, generator, selections) = new_test(
+        let (engine, generator, selections, current_quote) = new_test(
             &self.catalog,
             &self.preferences.test,
             self.seed,
@@ -421,6 +436,12 @@ impl App {
         self.engine = engine;
         self.generator = generator;
         self.selections = selections.into_iter().map(|_| None).collect();
+        self.quote_favorite = current_quote
+            .as_ref()
+            .map(|quote| repository.is_quote_favorite(quote.id))
+            .transpose()?
+            .unwrap_or(false);
+        self.current_quote = current_quote;
         self.started = Instant::now();
         self.persisted = false;
         self.persistence_pending = false;
@@ -446,6 +467,13 @@ impl App {
             .as_millis()
             .try_into()
             .unwrap_or(u64::MAX)
+    }
+
+    fn toggle_quote_favorite(&mut self, repository: &Repository) -> Result<()> {
+        if let Some(quote) = &self.current_quote {
+            self.quote_favorite = repository.toggle_quote_favorite(quote.id)?;
+        }
+        Ok(())
     }
 
     fn provenance(&self) -> SessionProvenance {
@@ -960,6 +988,13 @@ fn run(
                         persistence: app.persistence_ui_state(),
                         notice: app.startup_notice.as_deref(),
                         focus_warning: app.focus_warning_visible(),
+                        quote: app
+                            .current_quote
+                            .as_ref()
+                            .map(|quote| ui::QuoteRenderState {
+                                source: &quote.source,
+                                favorite: app.quote_favorite,
+                            }),
                     },
                 );
                 if app.statistics_open {
@@ -1366,6 +1401,10 @@ fn handle_key(
         return Ok(false);
     }
     let resultado_recente = app.bloqueia_atalhos_do_resultado();
+    if matches!(code, KeyCode::Char('f')) && terminal && !resultado_recente {
+        app.toggle_quote_favorite(repository)?;
+        return Ok(false);
+    }
     if matches!(code, KeyCode::Char('q'))
         && matches!(
             app.engine.status(),
@@ -1524,6 +1563,7 @@ type GeneratedTest = (
     TestEngine,
     Option<WordGenerator<SmallRng>>,
     Vec<Option<tuipe::adaptive::WordSelection>>,
+    Option<Quote>,
 );
 
 fn new_test(
@@ -1534,35 +1574,39 @@ fn new_test(
     session_kind: SessionKind,
 ) -> Result<GeneratedTest> {
     let mut rng = SmallRng::seed_from_u64(seed);
-    let (words, generator, selections) = match config.mode {
+    let (words, generator, selections, quote) = match config.mode {
         TestMode::Quote => {
             let quotes = catalog.quotes(&config.language, config.quote_length);
-            let quote = quotes.choose(&mut rng).context("language has no quotes")?;
+            let quote = (*quotes
+                .choose(&mut rng)
+                .context("o idioma não possui citações")?)
+            .clone();
             let words = quote
                 .text
                 .split_whitespace()
                 .map(|word| format!("{word} "))
                 .collect::<Vec<_>>();
             let selections = vec![None; words.len()];
-            (without_last_commit(words), None, selections)
+            (without_last_commit(words), None, selections, Some(quote))
         }
         TestMode::Words { count } => {
             let mut generator = word_generator(catalog, config, rng, adaptive, session_kind)?;
             let (words, selections) = generate(&mut generator, usize::from(count));
-            (without_last_commit(words), None, selections)
+            (without_last_commit(words), None, selections, None)
         }
         TestMode::Time { .. } => {
             let mut generator = word_generator(catalog, config, rng, adaptive, session_kind)?;
             // O buffer inicial precisa preencher três linhas reais também em
             // terminais ultrawide, como o gerador contínuo do Monkeytype.
             let (words, selections) = generate(&mut generator, 120);
-            (words, Some(generator), selections)
+            (words, Some(generator), selections, None)
         }
     };
     Ok((
         TestEngine::new(config.clone(), words),
         generator,
         selections,
+        quote,
     ))
 }
 
@@ -1575,7 +1619,7 @@ fn word_generator(
 ) -> Result<WordGenerator<SmallRng>> {
     let configured_words = catalog
         .word_pack(&config.language, &config.word_pack)
-        .context("configured word pack is unavailable")?;
+        .context("o pacote de palavras configurado não está disponível")?;
     let partitioned = match session_kind {
         SessionKind::Transfer => configured_words
             .iter()

@@ -250,6 +250,39 @@ impl Repository {
         Ok(())
     }
 
+    pub fn is_quote_favorite(&self, quote_id: u32) -> Result<bool> {
+        self.connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM favorite_quotes WHERE quote_id = ?1)",
+                [quote_id],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
+    }
+
+    /// Alterna o favorito e devolve o novo estado em uma única transação.
+    pub fn toggle_quote_favorite(&self, quote_id: u32) -> Result<bool> {
+        let transaction = self.connection.unchecked_transaction()?;
+        let favorite = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM favorite_quotes WHERE quote_id = ?1)",
+            [quote_id],
+            |row| row.get::<_, bool>(0),
+        )?;
+        if favorite {
+            transaction.execute(
+                "DELETE FROM favorite_quotes WHERE quote_id = ?1",
+                [quote_id],
+            )?;
+        } else {
+            transaction.execute(
+                "INSERT INTO favorite_quotes (quote_id) VALUES (?1)",
+                [quote_id],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(!favorite)
+    }
+
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
@@ -1678,6 +1711,18 @@ mod tests {
             )
             .unwrap();
         assert_eq!(id, 1);
+    }
+
+    #[test]
+    fn favorito_de_citacao_alterna_sem_duplicar() {
+        let temporary = tempfile::tempdir().unwrap();
+        let repository = Repository::open(&temporary.path().join("history.db")).unwrap();
+
+        assert!(!repository.is_quote_favorite(42).unwrap());
+        assert!(repository.toggle_quote_favorite(42).unwrap());
+        assert!(repository.is_quote_favorite(42).unwrap());
+        assert!(!repository.toggle_quote_favorite(42).unwrap());
+        assert!(!repository.is_quote_favorite(42).unwrap());
     }
 
     #[test]
