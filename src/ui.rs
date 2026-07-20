@@ -17,17 +17,18 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::{
     content::Theme,
-    persistence::{PriorityPattern, PriorityWord, SessionSummary, StatisticsOverview},
+    persistence::{PriorityPattern, PriorityWord, SessionKind, SessionSummary, StatisticsOverview},
     typing::{Difficulty, Metrics, QuoteLength, TestEngine, TestMode, TestStatus},
 };
 
 const MIN_PAGE_PADDING: u16 = 2;
 const WORD_GAP: usize = 1;
-const CONFIG_MIN_WIDTH: u16 = 76;
-const CONFIG_QUOTE_WIDTH: u16 = 82;
 const CONFIG_CARD_GAP: u16 = 2;
 const CONFIG_MODIFIER_WIDTH: u16 = 26;
-const CONFIG_MODE_WIDTH: u16 = 26;
+// O grupo central é o mais largo. A largura inclui as bordas e precisa caber
+// tanto com Nerd Font quanto com o fallback Unicode, cujos rótulos não têm a
+// mesma largura de célula.
+const CONFIG_MODE_WIDTH: u16 = 31;
 const CONFIG_COMPACT_VALUE_WIDTH: u16 = 20;
 const CONFIG_QUOTE_VALUE_WIDTH: u16 = 26;
 const RESULT_WIDE_WIDTH: u16 = 90;
@@ -46,6 +47,10 @@ struct Icons {
     citacao: &'static str,
     idioma: &'static str,
     dificuldade: &'static str,
+    avaliacao: &'static str,
+    transferencia: &'static str,
+    retencao: &'static str,
+    repeticao: &'static str,
 }
 
 const ICONES_UNICODE: Icons = Icons {
@@ -56,6 +61,10 @@ const ICONES_UNICODE: Icons = Icons {
     citacao: "❝",
     idioma: "◎",
     dificuldade: "★",
+    avaliacao: "↗",
+    transferencia: "⇄",
+    retencao: "↺",
+    repeticao: "↻",
 };
 
 const ICONES_NERD: Icons = Icons {
@@ -66,6 +75,10 @@ const ICONES_NERD: Icons = Icons {
     citacao: "",
     idioma: "",
     dificuldade: "",
+    avaliacao: "",
+    transferencia: "",
+    retencao: "",
+    repeticao: "",
 };
 
 fn icones_do_terminal() -> Icons {
@@ -81,6 +94,7 @@ pub fn render(
     theme: &Theme,
     settings_open: bool,
     theme_name: &str,
+    session_kind: SessionKind,
 ) {
     render_com_icones(
         frame,
@@ -88,6 +102,7 @@ pub fn render(
         theme,
         settings_open,
         theme_name,
+        session_kind,
         icones_do_terminal(),
     );
 }
@@ -99,6 +114,10 @@ pub fn render_statistics(frame: &mut Frame, statistics: &StatisticsOverview, the
         Block::default().style(Style::default().bg(color(&theme.bg))),
         viewport,
     );
+    if viewport.width < 60 || viewport.height < 18 {
+        render_size_requirement(frame, viewport, theme, 60, 18, "ver as estatísticas");
+        return;
+    }
     let content = page_content(viewport);
     if statistics.completed_tests == 0 {
         frame.render_widget(
@@ -107,6 +126,14 @@ pub fn render_statistics(frame: &mut Frame, statistics: &StatisticsOverview, the
                 Line::from(""),
                 Line::styled(
                     "ainda não há testes concluídos",
+                    Style::default().fg(color(&theme.sub)),
+                ),
+                Line::styled(
+                    "volte e comece a digitar",
+                    Style::default().fg(color(&theme.main)),
+                ),
+                Line::styled(
+                    "o treino é escolhido automaticamente",
                     Style::default().fg(color(&theme.sub)),
                 ),
                 Line::from(""),
@@ -388,6 +415,7 @@ fn render_com_icones(
     theme: &Theme,
     settings_open: bool,
     theme_name: &str,
+    session_kind: SessionKind,
     icones: Icons,
 ) {
     let viewport = frame.area();
@@ -395,6 +423,10 @@ fn render_com_icones(
         Block::default().style(Style::default().bg(color(&theme.bg))),
         viewport,
     );
+    if viewport.width < 50 || viewport.height < 14 {
+        render_size_requirement(frame, viewport, theme, 50, 14, "fazer um teste");
+        return;
+    }
 
     let content = page_content(viewport);
     let ready = matches!(engine.status(), TestStatus::Ready);
@@ -437,10 +469,10 @@ fn render_com_icones(
 
     match engine.status() {
         TestStatus::Completed { .. } | TestStatus::Failed { .. } => {
-            render_result(frame, result_area, engine, theme, icones)
+            render_result(frame, result_area, engine, theme, session_kind, icones)
         }
         TestStatus::Ready | TestStatus::Running { .. } => {
-            render_test(frame, test_area, engine, theme, icones)
+            render_test(frame, test_area, engine, theme, session_kind, icones)
         }
     }
     if ready
@@ -499,7 +531,9 @@ fn render_settings(
             frame.buffer_mut()[(x, y)].set_style(style.add_modifier(Modifier::DIM));
         }
     }
-    let area = centered_width(centered_height(viewport, 21), 58);
+    let compact = viewport.width < 62 || viewport.height < 21;
+    let modal_height = if compact { 14 } else { 21 };
+    let area = centered_width(centered_height(viewport, modal_height), 58);
     frame.render_widget(Clear, area);
     frame.render_widget(
         Block::default()
@@ -516,12 +550,11 @@ fn render_settings(
         height: area.height.saturating_sub(4),
     };
     let config = engine.config();
-    let lines = vec![
+    let sections = vec![
         Line::styled(
             format!("{} configurações do teste", icones.configuracoes),
             Style::default().fg(color(&theme.sub)),
         ),
-        Line::from(""),
         button_group(
             &[
                 ("p pontuação", config.punctuation),
@@ -529,7 +562,6 @@ fn render_settings(
             ],
             theme,
         ),
-        Line::from(""),
         button_group(
             &[
                 ("m tempo", matches!(config.mode, TestMode::Time { .. })),
@@ -567,7 +599,6 @@ fn render_settings(
                 theme,
             ),
         },
-        Line::from(""),
         button_group(
             &[
                 ("d normal", config.difficulty == Difficulty::Normal),
@@ -577,7 +608,6 @@ fn render_settings(
             theme,
         ),
         button_group(&[("a adaptativo", config.adaptive)], theme),
-        Line::from(""),
         button_group(
             &[
                 ("l português", config.language == "portuguese"),
@@ -597,9 +627,23 @@ fn render_settings(
             Span::styled("t tema  ", Style::default().fg(color(&theme.sub))),
             chip(theme_name.to_owned(), true, theme),
         ]),
-        Line::from(""),
         Line::styled("esc fechar", Style::default().fg(color(&theme.sub))),
     ];
+    let lines = if compact {
+        sections
+    } else {
+        sections
+            .into_iter()
+            .enumerate()
+            .flat_map(|(index, line)| {
+                if matches!(index, 1 | 3 | 5 | 7 | 9) {
+                    vec![Line::from(""), line]
+                } else {
+                    vec![line]
+                }
+            })
+            .collect()
+    };
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
@@ -699,12 +743,7 @@ pub fn config_card_areas(viewport: Rect, mode: &TestMode) -> Option<[Rect; 3]> {
     };
     let row_width =
         CONFIG_MODIFIER_WIDTH + CONFIG_CARD_GAP + CONFIG_MODE_WIDTH + CONFIG_CARD_GAP + value_width;
-    let minimum_width = if matches!(mode, TestMode::Quote) {
-        CONFIG_QUOTE_WIDTH
-    } else {
-        CONFIG_MIN_WIDTH
-    };
-    if area.width < minimum_width {
+    if area.width < row_width {
         return None;
     }
     let row = centered_width(area, row_width);
@@ -737,7 +776,14 @@ fn render_card(frame: &mut Frame, area: Rect, line: Line<'static>, theme: &Theme
     frame.render_widget(Paragraph::new(line).alignment(Alignment::Center), text);
 }
 
-fn render_test(frame: &mut Frame, area: Rect, engine: &TestEngine, theme: &Theme, icones: Icons) {
+fn render_test(
+    frame: &mut Frame,
+    area: Rect,
+    engine: &TestEngine,
+    theme: &Theme,
+    session_kind: SessionKind,
+    icones: Icons,
+) {
     let text_width = area.width;
     if text_width < 20 || area.height < 4 {
         frame.render_widget(
@@ -765,7 +811,7 @@ fn render_test(frame: &mut Frame, area: Rect, engine: &TestEngine, theme: &Theme
     let first_word_y = area.y + 2;
 
     frame.render_widget(
-        Paragraph::new(test_descriptor(engine, icones))
+        Paragraph::new(test_descriptor(engine, session_kind, icones))
             .style(Style::default().fg(color(&theme.sub)))
             .alignment(Alignment::Center),
         Rect::new(area.x, area.y, area.width, 1),
@@ -801,8 +847,19 @@ const fn first_visible_line(active_line: usize) -> usize {
     active_line.saturating_sub(2)
 }
 
-fn render_result(frame: &mut Frame, area: Rect, engine: &TestEngine, theme: &Theme, icones: Icons) {
+fn render_result(
+    frame: &mut Frame,
+    area: Rect,
+    engine: &TestEngine,
+    theme: &Theme,
+    session_kind: SessionKind,
+    icones: Icons,
+) {
     let metrics = engine.metrics();
+    if area.height < 18 {
+        render_compact_result(frame, area, engine, &metrics, theme, icones);
+        return;
+    }
     let group_count = 7;
     let details_height = result_details_height(area.width, group_count);
     let body = centered_height(
@@ -815,7 +872,7 @@ fn render_result(frame: &mut Frame, area: Rect, engine: &TestEngine, theme: &The
         .max(5)
         .min(body.height);
     let top = Rect::new(body.x, body.y, body.width, top_height);
-    render_result_chart(frame, top, &metrics, theme);
+    render_result_chart(frame, top, &metrics, theme, session_kind, icones);
 
     let details_top = top.bottom().saturating_add(1);
     render_result_details(
@@ -833,24 +890,102 @@ fn render_result(frame: &mut Frame, area: Rect, engine: &TestEngine, theme: &The
     );
 }
 
-fn render_result_chart(frame: &mut Frame, area: Rect, metrics: &Metrics, theme: &Theme) {
+fn render_compact_result(
+    frame: &mut Frame,
+    area: Rect,
+    engine: &TestEngine,
+    metrics: &Metrics,
+    theme: &Theme,
+    icones: Icons,
+) {
+    let stats = metrics.characters;
+    let lines = vec![
+        Line::from(vec![
+            Span::styled("wpm ", Style::default().fg(color(&theme.sub))),
+            Span::styled(
+                format!("{:.0}", metrics.wpm),
+                Style::default().fg(color(&theme.main)),
+            ),
+            Span::raw("    "),
+            Span::styled("precisão ", Style::default().fg(color(&theme.sub))),
+            Span::styled(
+                format!("{:.0}%", metrics.accuracy),
+                Style::default().fg(color(&theme.main)),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("bruto ", Style::default().fg(color(&theme.sub))),
+            Span::styled(
+                format!("{:.0}", metrics.raw_wpm),
+                Style::default().fg(color(&theme.main)),
+            ),
+            Span::raw("    "),
+            Span::styled("consistência ", Style::default().fg(color(&theme.sub))),
+            Span::styled(
+                format!("{:.0}%", metrics.consistency),
+                Style::default().fg(color(&theme.main)),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("caracteres ", Style::default().fg(color(&theme.sub))),
+            Span::styled(
+                format!(
+                    "{}/{}/{}/{}",
+                    stats.correct_word, stats.incorrect, stats.extra, stats.missed
+                ),
+                Style::default().fg(color(&theme.main)),
+            ),
+            Span::raw("    "),
+            Span::styled("tempo ", Style::default().fg(color(&theme.sub))),
+            Span::styled(
+                format!("{:.1}s", metrics.duration_ms as f64 / 1_000.0),
+                Style::default().fg(color(&theme.main)),
+            ),
+        ]),
+        Line::from(""),
+    ];
+    let descriptor_text = result_descriptor(engine, icones);
+    let descriptor = descriptor_text
+        .lines()
+        .map(|line| Line::styled(line.to_owned(), Style::default().fg(color(&theme.main))));
+    frame.render_widget(
+        Paragraph::new(lines.into_iter().chain(descriptor).collect::<Vec<_>>())
+            .alignment(Alignment::Center),
+        centered_height(area, 7),
+    );
+}
+
+fn render_result_chart(
+    frame: &mut Frame,
+    area: Rect,
+    metrics: &Metrics,
+    theme: &Theme,
+    session_kind: SessionKind,
+    icones: Icons,
+) {
     let sections = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(4),
         Constraint::Length(1),
     ])
     .split(area);
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(
-                "wpm ao longo do tempo",
-                Style::default().fg(color(&theme.text)),
-            ),
-            Span::raw("   "),
-            Span::styled("× erros", Style::default().fg(color(&theme.error))),
-        ])),
-        sections[0],
-    );
+    let mut title = vec![
+        Span::styled(
+            "wpm ao longo do tempo",
+            Style::default().fg(color(&theme.text)),
+        ),
+        Span::raw("   "),
+        Span::styled("× erros", Style::default().fg(color(&theme.error))),
+    ];
+    if area.width >= 60
+        && let Some(kind) = session_kind_descriptor(session_kind, icones)
+    {
+        title.push(Span::styled(
+            format!("   ·   {kind}"),
+            Style::default().fg(color(&theme.sub)),
+        ));
+    }
+    frame.render_widget(Paragraph::new(Line::from(title)), sections[0]);
 
     let chart_columns = Layout::horizontal([
         Constraint::Length(RESULT_AXIS_LABEL_WIDTH),
@@ -1135,17 +1270,21 @@ fn render_footer(
     theme: &Theme,
     _icones: Icons,
 ) {
-    let line = match engine.status() {
-        TestStatus::Ready => key_hints(
+    let lines = match engine.status() {
+        TestStatus::Ready => vec![key_hints(
             &[
                 ("enter", "reiniciar"),
                 ("esc", "configurações"),
                 ("q", "sair"),
             ],
             theme,
-        ),
+        )],
         TestStatus::Running { .. } => return,
-        TestStatus::Completed { .. } | TestStatus::Failed { .. } => key_hints(
+        TestStatus::Completed { .. } | TestStatus::Failed { .. } if area.width < 60 => vec![
+            key_hints(&[("enter", "próximo"), ("r", "repetir")], theme),
+            key_hints(&[("s", "estatísticas"), ("q", "sair")], theme),
+        ],
+        TestStatus::Completed { .. } | TestStatus::Failed { .. } => vec![key_hints(
             &[
                 ("enter", "próximo"),
                 ("r", "repetir"),
@@ -1153,9 +1292,9 @@ fn render_footer(
                 ("q", "sair"),
             ],
             theme,
-        ),
+        )],
     };
-    frame.render_widget(Paragraph::new(line).alignment(Alignment::Center), area);
+    frame.render_widget(Paragraph::new(lines).alignment(Alignment::Center), area);
 }
 
 struct StyledWord {
@@ -1265,7 +1404,7 @@ fn mini_progress(engine: &TestEngine) -> String {
     }
 }
 
-fn test_descriptor(engine: &TestEngine, icones: Icons) -> String {
+fn test_descriptor(engine: &TestEngine, session_kind: SessionKind, icones: Icons) -> String {
     let config = engine.config();
     let mut modifiers = vec![difficulty_name(config.difficulty)];
     if config.punctuation {
@@ -1274,13 +1413,18 @@ fn test_descriptor(engine: &TestEngine, icones: Icons) -> String {
     if config.numbers {
         modifiers.push("números");
     }
-    format!(
+    let mut descriptor = format!(
         "{} {} · {} {}",
         icones.idioma,
         language_descriptor(&config.language, &config.word_pack),
         icones.dificuldade,
         modifiers.join(" · ")
-    )
+    );
+    if let Some(kind) = session_kind_descriptor(session_kind, icones) {
+        descriptor.push_str(" · ");
+        descriptor.push_str(&kind);
+    }
+    descriptor
 }
 
 fn result_descriptor(engine: &TestEngine, icones: Icons) -> String {
@@ -1304,6 +1448,17 @@ fn result_descriptor(engine: &TestEngine, icones: Icons) -> String {
         icones.dificuldade,
         modifiers.join(" · ")
     )
+}
+
+fn session_kind_descriptor(session_kind: SessionKind, icones: Icons) -> Option<String> {
+    let descriptor = match session_kind {
+        SessionKind::Practice => return None,
+        SessionKind::Assessment => format!("{} avaliação de progresso", icones.avaliacao),
+        SessionKind::Transfer => format!("{} palavras novas", icones.transferencia),
+        SessionKind::Retention => format!("{} revisão de retenção", icones.retencao),
+        SessionKind::Repeat => format!("{} repetição", icones.repeticao),
+    };
+    Some(descriptor)
 }
 
 fn language_name(language: &str) -> &str {
@@ -1433,6 +1588,37 @@ fn centered_height(area: Rect, height: u16) -> Rect {
     }
 }
 
+fn render_size_requirement(
+    frame: &mut Frame,
+    area: Rect,
+    theme: &Theme,
+    minimum_width: u16,
+    minimum_height: u16,
+    action: &str,
+) {
+    let lines = vec![
+        Line::styled(
+            "mais espaço, por favor",
+            Style::default()
+                .fg(color(&theme.text))
+                .add_modifier(Modifier::BOLD),
+        ),
+        Line::from(""),
+        Line::styled(
+            format!("para {action}: {minimum_width}×{minimum_height}"),
+            Style::default().fg(color(&theme.sub)),
+        ),
+        Line::styled(
+            format!("terminal atual: {}×{}", area.width, area.height),
+            Style::default().fg(color(&theme.main)),
+        ),
+    ];
+    frame.render_widget(
+        Paragraph::new(lines).alignment(Alignment::Center),
+        centered_height(area, 4),
+    );
+}
+
 fn color(value: &str) -> Color {
     value
         .parse::<csscolorparser::Color>()
@@ -1471,13 +1657,31 @@ mod tests {
         engine: &TestEngine,
         settings_open: bool,
     ) -> String {
+        render_engine_with_kind(width, height, engine, settings_open, SessionKind::Practice)
+    }
+
+    fn render_engine_with_kind(
+        width: u16,
+        height: u16,
+        engine: &TestEngine,
+        settings_open: bool,
+        session_kind: SessionKind,
+    ) -> String {
         let catalog = ContentCatalog::bundled().unwrap();
         let theme = catalog.theme("arch").unwrap();
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
             .draw(|frame| {
-                render_com_icones(frame, engine, theme, settings_open, "arch", ICONES_UNICODE)
+                render_com_icones(
+                    frame,
+                    engine,
+                    theme,
+                    settings_open,
+                    "arch",
+                    session_kind,
+                    ICONES_UNICODE,
+                )
             })
             .unwrap();
         let buffer = terminal.backend().buffer();
@@ -1503,8 +1707,30 @@ mod tests {
                 "tempo"
             }));
             assert!(rendered.contains("olá"));
+            if width >= 90 {
+                assert!(rendered.contains("citação"));
+            }
             assert!(!rendered.contains("adaptativo"));
             insta::assert_snapshot!(format!("test_{width}x{height}"), rendered);
+        }
+    }
+
+    #[test]
+    fn automatic_session_kind_is_explained_without_becoming_a_setting() {
+        let engine = TestEngine::new(
+            TestConfig::default(),
+            ["olá ".into(), "mundo ".into(), "prática ".into()],
+        );
+
+        for (kind, expected) in [
+            (SessionKind::Assessment, "avaliação de progresso"),
+            (SessionKind::Transfer, "palavras novas"),
+            (SessionKind::Retention, "revisão de retenção"),
+            (SessionKind::Repeat, "repetição"),
+        ] {
+            let rendered = render_engine_with_kind(100, 28, &engine, false, kind);
+            assert!(rendered.contains(expected));
+            assert!(!rendered.contains("escolher sessão"));
         }
     }
 
@@ -1564,6 +1790,38 @@ mod tests {
             "settings_100x28",
             render_engine_with_settings(100, 28, &engine, true)
         );
+        insta::assert_snapshot!(
+            "settings_50x14",
+            render_engine_with_settings(50, 14, &engine, true)
+        );
+    }
+
+    #[test]
+    fn undersized_terminal_gets_an_actionable_message() {
+        let rendered = render_at(40, 10);
+        assert!(rendered.contains("mais espaço, por favor"));
+        assert!(rendered.contains("50×14"));
+        assert!(rendered.contains("40×10"));
+    }
+
+    #[test]
+    fn compact_result_prioritizes_the_metrics_instead_of_clipping_the_chart() {
+        let mut engine = TestEngine::new(
+            TestConfig::default(),
+            ["olá ".into(), "mundo ".into(), "prática ".into()],
+        );
+        engine.update(InputEvent::Key {
+            action: KeyAction::Text("olá mundo prática ".into()),
+            at_ms: 100,
+        });
+        engine.update(InputEvent::Tick { at_ms: 30_100 });
+
+        let rendered = render_engine_at(50, 14, &engine);
+        assert!(rendered.contains("wpm"));
+        assert!(rendered.contains("precisão"));
+        assert!(rendered.contains("caracteres"));
+        assert!(!rendered.contains("wpm ao longo do tempo"));
+        insta::assert_snapshot!("test_result_50x14", rendered);
     }
 
     #[test]

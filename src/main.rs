@@ -605,6 +605,7 @@ fn run(
                     theme,
                     app.settings_open,
                     &app.preferences.theme,
+                    app.session_kind,
                 );
                 if app.statistics_open {
                     ui::render_statistics(frame, &app.statistics, theme);

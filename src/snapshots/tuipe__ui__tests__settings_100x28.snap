@@ -7,17 +7,17 @@ expression: "render_engine_with_settings(100, 28, &engine, true)"
      ⌨ tuipe
                      ╭────────────────────────────────────────────────────────╮
                      │                                                        │
-            ╭────────│ ⚙ configurações do teste                               │────────╮
-            │  @ pont│                                                        │60  120 │
-            ╰────────│  p pontuação    n números                              │────────╯
-                     │                                                        │
+         ╭───────────│ ⚙ configurações do teste                               │──────────╮
+         │  @ pontuaç│                                                        │  60  120 │
+         ╰───────────│  p pontuação    n números                              │──────────╯
                      │  m tempo    m palavras    m citação                    │
+                     │                                                        │
                      │  v 15    v 30    v 60    v 120                         │
-                     │                                                        │
-     olá mundo prátic│  d normal    d especialista    d mestre                │
+                     │  d normal    d especialista    d mestre                │
+     olá mundo prátic│                                                        │
                      │  a adaptativo                                          │
-                     │                                                        │
                      │  l português    l inglês                               │
+                     │                                                        │
                      │  k comum    k 1k    k 5k                               │
                      │ t tema   arch                                          │
                      │                                                        │
