@@ -108,12 +108,15 @@ Replicar visualmente a tela principal do Monkeytype dentro das limitacoes de uma
 3. no maximo tres linhas visiveis, com reflow responsivo e rolagem por linha;
 4. palavras futuras em cor secundaria discreta;
 5. texto correto, erro, letra extra e cursor usando papeis distintos do tema;
-6. linha discreta `portuguese common · expert · adaptive` acima do texto;
+6. linha discreta `português · especialista` acima do texto, sem expor detalhes
+   internos do adaptativo;
 7. progresso `mini`, sem estatisticas ao vivo;
 8. chrome reduzido durante digitacao para preservar foco;
 9. dicas de teclas no rodape quando o teste esta ocioso.
 
-O marcador `adaptive` informa apenas que o modo esta ligado. Nunca destacar quais palavras foram escolhidas pelo algoritmo.
+Avaliação de progresso, palavras novas, revisão de retenção e repetição podem ser
+identificadas discretamente para explicar o contexto atual. Elas nunca se tornam
+uma escolha adicional nem revelam os pesos internos do algoritmo.
 
 ### Entrada
 
@@ -132,8 +135,7 @@ Copiar as formulas e a hierarquia do resultado do Monkeytype:
 - WPM, raw WPM, accuracy, consistency, caracteres corretos/incorretos/extras/perdidos e duracao;
 - WPM ao longo do tempo com erros marcados;
 - tipo do teste e modificadores;
-- acoes: proximo teste, repetir mesmo teste, historico de palavras e abrir estatisticas;
-- falha de `expert`/`master` mostra o erro causador.
+- acoes: proximo teste, repetir mesmo teste e abrir estatisticas.
 
 Tentativas que falham automaticamente sao persistidas e alimentam o adaptativo, mas nao entram em recordes nem medias de testes concluidos. Restart, saida ou troca manual de configuracao nao atualizam o modelo adaptativo.
 
@@ -357,7 +359,7 @@ Streak:
 
 - [x] Implementar lifecycle seguro de terminal com Ratatui/Crossterm.
 - [x] Construir tela de teste de tres linhas, reflow, rolagem, cursor e papeis de cor.
-- [x] Implementar seletores, mini progress, foco limpo e indicador adaptive.
+- [x] Implementar seletores, mini progress, foco limpo e contexto das sessoes automaticas.
 - [ ] Implementar mouse, resize e keymap configuravel.
 - [x] Construir tela de resultado e grafico terminal.
 - [x] Criar snapshots em tamanhos pequeno, medio e ultrawide para cada estado importante.
@@ -400,7 +402,8 @@ Streak:
 
 ### Fase 6 — stats, XP e streak
 
-- [ ] Implementar overview, historico filtravel e detalhe de sessao.
+- [x] Implementar overview e diagnostico acionavel de palavras e padroes.
+- [ ] Implementar historico filtravel e detalhe de sessao.
 - [ ] Implementar graficos de evolucao, distribuicao e atividade diaria.
 - [ ] Implementar lista minimalista de palavras e drill-down.
 - [x] Portar XP, levels, daily bonus e streak.
@@ -415,8 +418,25 @@ Streak:
 - [ ] Corrigir qualquer hitch de SQLite, recomputacao ou resize.
 - [ ] Testar terminais com true color e fallback 256 cores.
 - [ ] Testar UTF-8/acentos, terminais pequenos, mouse e keybindings conflitantes.
-- [ ] Criar README com instalacao via Cargo, paths XDG, temas e controles.
+- [x] Criar README com instalacao via Cargo, paths XDG, temas e controles.
 - [ ] Gerar binario Linux release e smoke test em ambiente limpo.
+
+### Experiência e prontidão de produto
+
+- [x] Manter a jornada principal utilizável em 50x14 e apresentar uma mensagem
+  acionável abaixo do tamanho mínimo.
+- [x] Adaptar configurações, resultado e estatísticas sem cortar controles ou
+  esconder atalhos em terminais compactos.
+- [x] Explicar sessões automáticas sem pedir que o usuário escolha um exercício.
+- [ ] Validar a primeira execução com usuários que nunca usaram o tuipe.
+- [ ] Testar todos os dez temas com Nerd Font e fallback Unicode, incluindo
+  contraste e informação que não dependa somente de cor.
+- [ ] Validar teclado, mouse, resize, colagem, IME, layouts não US e leitores de
+  tela nos terminais suportados.
+- [ ] Projetar recuperação acionável para banco corrompido, migration interrompida
+  e configuração inválida, sem exigir que o usuário encontre arquivos internos.
+- [ ] Definir canal de feedback, notas de versão, compatibilidade de dados e
+  estratégia de atualização antes da primeira release pública.
 
 **Pronto quando:** o teste permanece responsivo sob carga, o terminal sempre e restaurado e a checklist de paridade esta fechada.
 
