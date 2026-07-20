@@ -72,14 +72,14 @@ impl ContentCatalog {
 
         for (language, pack, source) in bundled_word_packs() {
             let asset: LanguageAsset = serde_json::from_str(source)
-                .with_context(|| format!("invalid bundled {language}/{pack} word pack"))?;
+                .with_context(|| format!("pacote embarcado inválido: {language}/{pack}"))?;
             let expected_name = if pack == "common" {
                 language.to_owned()
             } else {
                 format!("{language}_{pack}")
             };
             if asset.name != expected_name || asset.words.is_empty() {
-                anyhow::bail!("invalid bundled {language}/{pack} word pack");
+                anyhow::bail!("pacote embarcado inválido: {language}/{pack}");
             }
             catalog
                 .word_packs
@@ -88,13 +88,16 @@ impl ContentCatalog {
 
         for (language, source) in bundled_quotes() {
             let asset: QuoteAsset = serde_json::from_str(source)
-                .with_context(|| format!("invalid bundled {language} quotes"))?;
+                .with_context(|| format!("citações embarcadas inválidas: {language}"))?;
             catalog.quotes.insert(language.into(), asset.quotes);
         }
 
         for (name, source) in bundled_themes() {
             let theme: Theme = serde_json::from_str(source)
-                .with_context(|| format!("invalid bundled {name} theme"))?;
+                .with_context(|| format!("tema embarcado inválido: {name}"))?;
+            theme
+                .validate()
+                .with_context(|| format!("tema embarcado inválido: {name}"))?;
             catalog.themes.insert(name.into(), theme);
         }
 
@@ -125,11 +128,12 @@ impl ContentCatalog {
     }
 
     /// Temas fornecidos pelo usuário são arquivos TOML declarativos com o nome
-    /// do tema. Os temas embarcados continuam disponíveis se um arquivo falhar.
-    pub fn load_user_themes(&mut self, directory: &Path) -> Result<()> {
+    /// do tema. Um arquivo inválido é ignorado sem esconder os demais temas.
+    pub fn load_user_themes(&mut self, directory: &Path) -> Result<Vec<String>> {
         if !directory.exists() {
-            return Ok(());
+            return Ok(Vec::new());
         }
+        let mut warnings = Vec::new();
         for entry in fs::read_dir(directory)? {
             let entry = entry?;
             if entry
@@ -137,17 +141,48 @@ impl ContentCatalog {
                 .extension()
                 .is_some_and(|extension| extension == "toml")
             {
-                let source = fs::read_to_string(entry.path())?;
-                let theme: Theme = toml::from_str(&source)
-                    .with_context(|| format!("invalid custom theme {}", entry.path().display()))?;
                 let name = entry
                     .path()
                     .file_stem()
                     .expect("theme extension implies a file stem")
                     .to_string_lossy()
                     .into_owned();
-                self.themes.insert(name, theme);
+                let loaded = fs::read_to_string(entry.path())
+                    .map_err(anyhow::Error::from)
+                    .and_then(|source| toml::from_str::<Theme>(&source).map_err(Into::into))
+                    .and_then(|theme| {
+                        theme.validate()?;
+                        Ok(theme)
+                    });
+                match loaded {
+                    Ok(theme) => {
+                        self.themes.insert(name, theme);
+                    }
+                    Err(error) => warnings.push(format!("tema {name} ignorado: {error}")),
+                }
             }
+        }
+        Ok(warnings)
+    }
+}
+
+impl Theme {
+    fn validate(&self) -> Result<()> {
+        for (role, value) in [
+            ("fundo", &self.bg),
+            ("principal", &self.main),
+            ("cursor", &self.caret),
+            ("secundária", &self.sub),
+            ("fundo secundário", &self.sub_alt),
+            ("texto", &self.text),
+            ("erro", &self.error),
+            ("erro extra", &self.error_extra),
+            ("erro colorido", &self.colorful_error),
+            ("erro extra colorido", &self.colorful_error_extra),
+        ] {
+            value
+                .parse::<csscolorparser::Color>()
+                .with_context(|| format!("cor {role} inválida: {value}"))?;
         }
         Ok(())
     }
@@ -256,5 +291,39 @@ mod tests {
         );
         assert!(long.iter().all(|quote| quote.length >= 301));
         assert_eq!(short.len() + medium.len() + long.len(), 109);
+    }
+
+    #[test]
+    fn tema_pessoal_valido_entra_no_catalogo_e_invalido_nao_bloqueia() {
+        let temporary = tempfile::tempdir().unwrap();
+        fs::write(
+            temporary.path().join("meu-tema.toml"),
+            r##"
+bg = "#101010"
+main = "#80cbc4"
+caret = "#ffffff"
+sub = "#777777"
+subAlt = "#202020"
+text = "#eeeeee"
+error = "#ff5555"
+errorExtra = "#aa3333"
+colorfulError = "#ff5555"
+colorfulErrorExtra = "#aa3333"
+"##,
+        )
+        .unwrap();
+        fs::write(
+            temporary.path().join("quebrado.toml"),
+            "bg = 'não é uma cor'",
+        )
+        .unwrap();
+        let mut catalog = ContentCatalog::bundled().unwrap();
+
+        let warnings = catalog.load_user_themes(temporary.path()).unwrap();
+
+        assert!(catalog.theme("meu-tema").is_some());
+        assert!(catalog.theme("quebrado").is_none());
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("quebrado"));
     }
 }

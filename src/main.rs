@@ -52,17 +52,36 @@ fn main() -> Result<()> {
     }
     let (config_path, database_path) = paths();
     let loaded = Preferences::load_recovering(&config_path)?;
-    let startup_notice = loaded.quarantined.map(|path| {
-        format!(
-            "configuração inválida isolada em {}; padrões restaurados",
-            path.display()
-        )
-    });
-    let catalog = ContentCatalog::bundled()?;
+    let mut notices = loaded
+        .quarantined
+        .map(|path| {
+            format!(
+                "configuração inválida isolada em {}; padrões restaurados",
+                path.display()
+            )
+        })
+        .into_iter()
+        .collect::<Vec<_>>();
+    let mut catalog = ContentCatalog::bundled()?;
+    let themes_directory = config_path
+        .parent()
+        .expect("o caminho da configuração deve ter um diretório pai")
+        .join("themes");
+    notices.extend(catalog.load_user_themes(&themes_directory)?);
+    let mut preferences = loaded.preferences;
+    if catalog.theme(&preferences.theme).is_none() {
+        notices.push(format!(
+            "tema {} indisponível; arch restaurado",
+            preferences.theme
+        ));
+        preferences.theme = "arch".into();
+        preferences.save(&config_path)?;
+    }
+    let startup_notice = (!notices.is_empty()).then(|| notices.join(" · "));
     let repository = Repository::open(&database_path)?;
     let mut persistence = PersistenceWorker::start(database_path)?;
     let mut app = App::new(
-        loaded.preferences,
+        preferences,
         catalog,
         config_path,
         startup_notice,

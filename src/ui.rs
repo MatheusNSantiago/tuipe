@@ -368,7 +368,11 @@ pub fn statistics_word_at(
         return (position.y >= first_row
             && position.x >= content.x
             && position.x < content.right()
-            && index < statistics.priority_words.len().min(compact_diagnostic_limit(content.height)))
+            && index
+                < statistics
+                    .priority_words
+                    .len()
+                    .min(compact_diagnostic_limit(content.height)))
         .then_some(index);
     }
     let sections = Layout::vertical([
@@ -3271,19 +3275,11 @@ mod tests {
     fn clique_na_palavra_prioritaria_abre_seu_detalhe() {
         let statistics = statistics_fixture();
         assert_eq!(
-            statistics_word_at(
-                Rect::new(0, 0, 100, 28),
-                &statistics,
-                Position::new(6, 17),
-            ),
+            statistics_word_at(Rect::new(0, 0, 100, 28), &statistics, Position::new(6, 17),),
             Some(0)
         );
         assert_eq!(
-            statistics_word_at(
-                Rect::new(0, 0, 50, 14),
-                &statistics,
-                Position::new(2, 6),
-            ),
+            statistics_word_at(Rect::new(0, 0, 50, 14), &statistics, Position::new(2, 6),),
             Some(0)
         );
     }

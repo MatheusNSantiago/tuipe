@@ -42,6 +42,13 @@ cores quando necessário. Para diagnosticar uma detecção incorreta, use
 necessário durante a renderização; os arquivos originais dos temas não são
 alterados.
 
+Temas pessoais podem ser adicionados como TOML em
+`$XDG_CONFIG_HOME/tuipe/themes/NOME.toml` (ou
+`~/.config/tuipe/themes/NOME.toml`). O arquivo usa os campos `bg`, `main`,
+`caret`, `sub`, `subAlt`, `text`, `error`, `errorExtra`, `colorfulError` e
+`colorfulErrorExtra`, todos com cores CSS. Um tema inválido é ignorado com um
+aviso na interface e não impede o aplicativo de abrir.
+
 ## Uso
 
 Basta começar a digitar. Avaliações de progresso, revisões de retenção e testes
