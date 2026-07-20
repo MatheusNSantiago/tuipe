@@ -114,8 +114,8 @@ pub fn render_statistics(frame: &mut Frame, statistics: &StatisticsOverview, the
         Block::default().style(Style::default().bg(color(&theme.bg))),
         viewport,
     );
-    if viewport.width < 60 || viewport.height < 18 {
-        render_size_requirement(frame, viewport, theme, 60, 18, "ver as estatísticas");
+    if viewport.width < 50 || viewport.height < 14 {
+        render_size_requirement(frame, viewport, theme, 50, 14, "ver as estatísticas");
         return;
     }
     let content = page_content(viewport);
@@ -144,6 +144,10 @@ pub fn render_statistics(frame: &mut Frame, statistics: &StatisticsOverview, the
         );
         return;
     }
+    if viewport.width < 80 || viewport.height < 24 {
+        render_statistics_compact(frame, content, statistics, theme);
+        return;
+    }
 
     let sections = Layout::vertical([
         Constraint::Length(1),
@@ -168,6 +172,160 @@ pub fn render_statistics(frame: &mut Frame, statistics: &StatisticsOverview, the
         Paragraph::new("esc voltar").style(Style::default().fg(color(&theme.sub))),
         sections[4],
     );
+}
+
+fn render_statistics_compact(
+    frame: &mut Frame,
+    area: Rect,
+    statistics: &StatisticsOverview,
+    theme: &Theme,
+) {
+    let mut lines = vec![
+        Line::styled("estatísticas", Style::default().fg(color(&theme.text))),
+        Line::from(vec![
+            Span::styled(
+                format!("{} testes", statistics.completed_tests),
+                Style::default().fg(color(&theme.main)),
+            ),
+            Span::styled("  ·  ", Style::default().fg(color(&theme.sub))),
+            Span::styled(
+                format!("{:.0} wpm", statistics.average_wpm),
+                Style::default().fg(color(&theme.main)),
+            ),
+            Span::styled("  ·  ", Style::default().fg(color(&theme.sub))),
+            Span::styled(
+                format!("{:.0}% precisão", statistics.average_accuracy),
+                Style::default().fg(color(&theme.main)),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                format!("nível {}", statistics.level),
+                Style::default().fg(color(&theme.main)),
+            ),
+            Span::styled("  ·  ", Style::default().fg(color(&theme.sub))),
+            Span::styled(
+                format!("streak {} dias", statistics.streak),
+                Style::default().fg(color(&theme.main)),
+            ),
+        ]),
+        compact_trend(&statistics.recent_tests, theme),
+        Line::from(""),
+        Line::styled(
+            "palavras prioritárias",
+            Style::default().fg(color(&theme.text)),
+        ),
+    ];
+
+    if statistics.priority_words.is_empty() {
+        lines.push(Line::styled(
+            "sem evidência suficiente",
+            Style::default().fg(color(&theme.sub)),
+        ));
+    } else {
+        lines.extend(
+            statistics
+                .priority_words
+                .iter()
+                .take(compact_diagnostic_limit(area.height))
+                .map(|word| {
+                    let chance = if area.width < 60 {
+                        format!("  chance {:.1}%  ", word.estimated_session_chance * 100.0)
+                    } else {
+                        format!(
+                            "  ·  {:.1}% no próximo teste  ·  ",
+                            word.estimated_session_chance * 100.0
+                        )
+                    };
+                    Line::from(vec![
+                        Span::styled(word.word.clone(), Style::default().fg(color(&theme.main))),
+                        Span::styled(chance, Style::default().fg(color(&theme.sub))),
+                        Span::styled(
+                            format!("falha {:.0}%", word.uncorrected_error_rate * 100.0),
+                            Style::default().fg(color(&theme.error)),
+                        ),
+                    ])
+                }),
+        );
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::styled(
+        "padrões que pedem treino",
+        Style::default().fg(color(&theme.text)),
+    ));
+    if statistics.priority_patterns.is_empty() {
+        lines.push(Line::styled(
+            "sem evidência em palavras distintas",
+            Style::default().fg(color(&theme.sub)),
+        ));
+    } else {
+        lines.extend(
+            statistics
+                .priority_patterns
+                .iter()
+                .take(compact_diagnostic_limit(area.height))
+                .map(|pattern| {
+                    let kind = if pattern.kind == "mecânica" {
+                        "mec"
+                    } else {
+                        "seq"
+                    };
+                    let label = if area.width < 60 {
+                        format!("{kind} {}", pattern.pattern)
+                    } else {
+                        format!("{} {}", pattern.kind, pattern.pattern)
+                    };
+                    let contexts = if area.width < 60 {
+                        format!("  {} palavras  ", pattern.distinct_words)
+                    } else {
+                        format!("  ·  {} palavras  ·  ", pattern.distinct_words)
+                    };
+                    Line::from(vec![
+                        Span::styled(label, Style::default().fg(color(&theme.main))),
+                        Span::styled(contexts, Style::default().fg(color(&theme.sub))),
+                        Span::styled(
+                            format!("falha {:.0}%", pattern.uncorrected_error_rate * 100.0),
+                            Style::default().fg(color(&theme.error)),
+                        ),
+                    ])
+                }),
+        );
+    }
+
+    while lines.len() < area.height.saturating_sub(1) as usize {
+        lines.push(Line::from(""));
+    }
+    lines.truncate(area.height.saturating_sub(1) as usize);
+    lines.push(Line::styled(
+        "esc voltar",
+        Style::default().fg(color(&theme.sub)),
+    ));
+    frame.render_widget(Paragraph::new(lines), area);
+}
+
+fn compact_trend(sessions: &[SessionSummary], theme: &Theme) -> Line<'static> {
+    let Some((first, last)) = sessions.first().zip(sessions.last()) else {
+        return Line::styled(
+            "tendência ainda indisponível",
+            Style::default().fg(color(&theme.sub)),
+        );
+    };
+    Line::from(vec![
+        Span::styled(
+            format!("testes #{}–#{}", first.id, last.id),
+            Style::default().fg(color(&theme.sub)),
+        ),
+        Span::styled("  ·  ", Style::default().fg(color(&theme.sub))),
+        Span::styled(
+            format!("{:.0} → {:.0} wpm", first.wpm, last.wpm),
+            Style::default().fg(color(&theme.main)),
+        ),
+    ])
+}
+
+fn compact_diagnostic_limit(height: u16) -> usize {
+    if height >= 20 { 3 } else { 1 }
 }
 
 fn render_statistics_chart(
@@ -1697,6 +1855,77 @@ mod tests {
             .join("\n")
     }
 
+    fn statistics_fixture() -> StatisticsOverview {
+        StatisticsOverview {
+            completed_tests: 42,
+            active_ms: 3_661_000,
+            average_wpm: 84.0,
+            average_accuracy: 96.0,
+            best_wpm: 112.0,
+            recent_tests: (1_u16..=12)
+                .map(|id| SessionSummary {
+                    id: u64::from(id),
+                    elapsed_ms: 15_000,
+                    wpm: 70.0 + f64::from(id),
+                    accuracy: 90.0 + f64::from(id) / 2.0,
+                    raw_wpm: 70.0 + f64::from(id),
+                    correct_chars: 100,
+                    incorrect_chars: 0,
+                    extra_chars: 0,
+                    config: TestConfig::default(),
+                    kind: SessionKind::Assessment,
+                })
+                .collect(),
+            priority_words: vec![PriorityWord {
+                word: "através".into(),
+                difficulty: 0.4,
+                confirmed_errors: 3.0,
+                corrections: 2.0,
+                observations: 12,
+                effective_exposures: 10.0,
+                uncorrected_error_rate: 0.3,
+                corrected_error_rate: 0.2,
+                estimated_session_chance: 0.18,
+            }],
+            priority_patterns: vec![PriorityPattern {
+                pattern: "acento agudo".into(),
+                kind: "mecânica",
+                difficulty: 0.3,
+                effective_exposures: 14.0,
+                uncorrected_error_rate: 0.21,
+                corrected_error_rate: 0.14,
+                distinct_words: 5,
+            }],
+            total_xp: 0,
+            level: 0,
+            streak: 0,
+        }
+    }
+
+    fn render_statistics_at(width: u16, height: u16) -> String {
+        let catalog = ContentCatalog::bundled().unwrap();
+        let theme = catalog.theme("arch").unwrap();
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                frame.render_widget(Paragraph::new("resíduo da tela anterior"), frame.area());
+                render_statistics(frame, &statistics_fixture(), theme);
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        (0..height)
+            .map(|y| {
+                (0..width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_owned()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     #[test]
     fn test_screen_renders_at_small_medium_and_ultrawide_sizes() {
         for (width, height) in [(50, 14), (100, 28), (180, 40)] {
@@ -1826,75 +2055,8 @@ mod tests {
 
     #[test]
     fn statistics_overview_remains_readable() {
-        let catalog = ContentCatalog::bundled().unwrap();
-        let theme = catalog.theme("arch").unwrap();
-        let backend = TestBackend::new(100, 28);
-        let mut terminal = Terminal::new(backend).unwrap();
-        terminal
-            .draw(|frame| {
-                frame.render_widget(Paragraph::new("resíduo da tela anterior"), frame.area());
-                render_statistics(
-                    frame,
-                    &StatisticsOverview {
-                        completed_tests: 42,
-                        active_ms: 3_661_000,
-                        average_wpm: 84.0,
-                        average_accuracy: 96.0,
-                        best_wpm: 112.0,
-                        recent_tests: (1_u16..=12)
-                            .map(|id| SessionSummary {
-                                id: u64::from(id),
-                                elapsed_ms: 15_000,
-                                wpm: 70.0 + f64::from(id),
-                                accuracy: 90.0 + f64::from(id) / 2.0,
-                                raw_wpm: 70.0 + f64::from(id),
-                                correct_chars: 100,
-                                incorrect_chars: 0,
-                                extra_chars: 0,
-                                config: TestConfig::default(),
-                                kind: crate::persistence::SessionKind::Assessment,
-                            })
-                            .collect(),
-                        priority_words: vec![PriorityWord {
-                            word: "através".into(),
-                            difficulty: 0.4,
-                            confirmed_errors: 3.0,
-                            corrections: 2.0,
-                            observations: 12,
-                            effective_exposures: 10.0,
-                            uncorrected_error_rate: 0.3,
-                            corrected_error_rate: 0.2,
-                            estimated_session_chance: 0.18,
-                        }],
-                        priority_patterns: vec![PriorityPattern {
-                            pattern: "acento agudo".into(),
-                            kind: "mecânica",
-                            difficulty: 0.3,
-                            effective_exposures: 14.0,
-                            uncorrected_error_rate: 0.21,
-                            corrected_error_rate: 0.14,
-                            distinct_words: 5,
-                        }],
-                        total_xp: 0,
-                        level: 0,
-                        streak: 0,
-                    },
-                    theme,
-                )
-            })
-            .unwrap();
-        let buffer = terminal.backend().buffer();
-        let rendered = (0..28)
-            .map(|y| {
-                (0..100)
-                    .map(|x| buffer[(x, y)].symbol())
-                    .collect::<String>()
-                    .trim_end()
-                    .to_owned()
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        insta::assert_snapshot!("statistics_100x28", rendered);
+        insta::assert_snapshot!("statistics_100x28", render_statistics_at(100, 28));
+        insta::assert_snapshot!("statistics_50x14", render_statistics_at(50, 14));
     }
 
     #[test]

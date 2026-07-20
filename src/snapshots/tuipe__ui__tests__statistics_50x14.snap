@@ -1,0 +1,18 @@
+---
+source: src/ui.rs
+expression: "render_statistics_at(50, 14)"
+---
+  estatísticas
+  42 testes  ·  84 wpm  ·  96% precisão
+  nível 0  ·  streak 0 dias
+  testes #1–#12  ·  71 → 82 wpm
+
+  palavras prioritárias
+  através  chance 18.0%  falha 30%
+
+  padrões que pedem treino
+  mec acento agudo  5 palavras  falha 21%
+
+
+
+  esc voltar
