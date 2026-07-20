@@ -413,7 +413,7 @@ Streak:
 
 ### Fase 7 — validacao final e entrega
 
-- [ ] Fazer comparacao lado a lado com Monkeytype em `time 30`, `words 50` e quotes.
+- [x] Fazer comparacao lado a lado com Monkeytype em `time 30`, `words 50` e quotes.
 - [ ] Medir p50/p95/p99 de input -> state -> render em release.
 - [ ] Corrigir qualquer hitch de SQLite, recomputacao ou resize.
 - [ ] Testar terminais com true color e fallback 256 cores.
@@ -429,7 +429,7 @@ Streak:
   esconder atalhos em terminais compactos.
 - [x] Explicar sessões automáticas sem pedir que o usuário escolha um exercício.
 - [ ] Validar a primeira execução com usuários que nunca usaram o tuipe.
-- [ ] Testar todos os dez temas com Nerd Font e fallback Unicode, incluindo
+- [x] Testar todos os dez temas com Nerd Font e fallback Unicode, incluindo
   contraste e informação que não dependa somente de cor.
 - [ ] Validar teclado, mouse, resize, colagem, IME, layouts não US e leitores de
   tela nos terminais suportados.

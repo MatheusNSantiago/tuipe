@@ -3823,6 +3823,51 @@ mod tests {
         )
     }
 
+    fn render_engine_variant(
+        width: u16,
+        height: u16,
+        engine: &TestEngine,
+        theme_name: &str,
+        icones: Icons,
+    ) -> String {
+        let catalog = ContentCatalog::bundled().unwrap();
+        let theme = catalog.theme(theme_name).unwrap();
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let keymap = Keymap::default();
+        terminal
+            .draw(|frame| {
+                render_com_icones(
+                    frame,
+                    engine,
+                    theme,
+                    RenderContext {
+                        settings_open: false,
+                        theme_name,
+                        session_kind: SessionKind::Practice,
+                        persistence: PersistenceUiState::Saved,
+                        notice: None,
+                        focus_warning: false,
+                        quote: None,
+                        keymap: &keymap,
+                        icones,
+                    },
+                )
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        (0..height)
+            .map(|y| {
+                (0..width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_owned()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     fn render_engine_with_persistence(
         width: u16,
         height: u16,
@@ -4163,6 +4208,93 @@ mod tests {
             }
             assert!(!rendered.contains("adaptativo"));
             insta::assert_snapshot!(format!("test_{width}x{height}"), rendered);
+        }
+    }
+
+    #[test]
+    fn modos_de_referencia_preservam_a_hierarquia_do_monkeytype() {
+        let base = [
+            "casa", "tempo", "mundo", "pessoa", "trabalho", "depois", "cidade", "parte", "forma",
+            "lugar", "fazer", "direito", "governo", "grande", "sempre", "vida",
+        ];
+        let practice_words = (0..50)
+            .map(|index| format!("{} ", base[index % base.len()]))
+            .collect::<Vec<_>>();
+        let quote_words = "A prática constante transforma hesitação em confiança e permite que cada palavra encontre seu ritmo sem sacrificar a precisão durante o caminho."
+            .split_whitespace()
+            .enumerate()
+            .map(|(index, word)| {
+                if index == 21 {
+                    word.to_owned()
+                } else {
+                    format!("{word} ")
+                }
+            })
+            .collect::<Vec<_>>();
+        let cases = [
+            (
+                "tempo_30",
+                TestConfig::default(),
+                practice_words.clone(),
+                "15  30  60  120",
+            ),
+            (
+                "palavras_50",
+                TestConfig {
+                    mode: TestMode::Words { count: 50 },
+                    ..TestConfig::default()
+                },
+                practice_words,
+                "10  25  50  100",
+            ),
+            (
+                "citacao",
+                TestConfig {
+                    mode: TestMode::Quote,
+                    adaptive: false,
+                    ..TestConfig::default()
+                },
+                quote_words,
+                "todas",
+            ),
+        ];
+
+        for (name, config, words, values) in cases {
+            let rendered = render_engine_at(100, 28, &TestEngine::new(config, words));
+            assert!(rendered.contains("pontuação"));
+            assert!(rendered.contains("tempo"));
+            assert!(rendered.contains("palavras"));
+            assert!(rendered.contains("citação"));
+            assert!(rendered.contains(values));
+            assert!(rendered.contains("português"));
+            assert!(rendered.contains("especialista"));
+            insta::assert_snapshot!(format!("referencia_{name}_100x28"), rendered);
+        }
+    }
+
+    #[test]
+    fn todos_os_temas_funcionam_com_nerd_font_e_fallback_unicode() {
+        let catalog = ContentCatalog::bundled().unwrap();
+        let engine = TestEngine::new(
+            TestConfig::default(),
+            ["olá ".into(), "mundo ".into(), "prática ".into()],
+        );
+
+        for theme_name in catalog.theme_names() {
+            for (icones, teclado, tempo) in [
+                (ICONES_NERD, ICONES_NERD.teclado, ICONES_NERD.tempo),
+                (ICONES_UNICODE, ICONES_UNICODE.teclado, ICONES_UNICODE.tempo),
+            ] {
+                let wide = render_engine_variant(100, 28, &engine, theme_name, icones);
+                let compact = render_engine_variant(50, 14, &engine, theme_name, icones);
+                assert!(wide.contains(teclado), "tema {theme_name} perdeu o ícone");
+                assert!(wide.contains(tempo), "tema {theme_name} perdeu o modo");
+                assert!(wide.contains("tuipe"));
+                assert!(wide.contains("português"));
+                assert!(wide.contains("especialista"));
+                assert!(compact.contains("configurações"));
+                assert!(compact.contains("estatísticas"));
+            }
         }
     }
 
