@@ -394,7 +394,8 @@ Streak:
 - [x] Implementar word skill, n-gram skill e mechanics separados.
 - [x] Implementar `AdaptivePolicy`, sigmoide e sampler misto.
 - [x] Implementar compartilhamento entre packs e aprendizagem passiva de quote.
-- [ ] Implementar decaimento, recuperacao entre sessoes e desconto de repeated test.
+- [x] Implementar espaçamento longitudinal, recuperação por novas evidências e
+  desconto de repeated test sem ressuscitar dificuldade só pela passagem do tempo.
 - [x] Implementar reset por palavra/modelo e versionamento/rebuild.
 - [x] Criar simulador deterministico de milhares de sessoes para calibracao.
 

@@ -2099,6 +2099,27 @@ mod tests {
     }
 
     #[test]
+    fn repeticao_manual_nao_reforca_o_modelo_adaptativo() {
+        let config = tuipe::typing::TestConfig {
+            mode: TestMode::Words { count: 1 },
+            difficulty: tuipe::typing::Difficulty::Normal,
+            ..tuipe::typing::TestConfig::default()
+        };
+        let mut app = app_de_teste(config, &["casa"]);
+        app.repeated_test = true;
+        app.update(InputEvent::Key {
+            action: KeyAction::Text("casa".into()),
+            at_ms: 500,
+        });
+
+        let observations = app.observations(&Default::default());
+        assert_eq!(observations.len(), 1);
+        assert_eq!(observations[0].evidence_weight, 0.0);
+        assert!(observations[0].selection_source.is_none());
+        assert!(observations[0].selection_propensity.is_none());
+    }
+
+    #[test]
     fn tempo_de_correcao_fica_separado_da_execucao_fluente() {
         let config = tuipe::typing::TestConfig {
             mode: TestMode::Time { seconds: 1 },

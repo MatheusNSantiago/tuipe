@@ -978,6 +978,23 @@ mod tests {
     }
 
     #[test]
+    fn bons_resultados_posteriores_reduzem_a_dificuldade_gradualmente() {
+        let policy = AdaptivePolicy::default();
+        let mut skill = WordSkill::default();
+        observe(&mut skill, 8, 0, 8);
+        let before = policy.difficulty(&skill);
+        observe(&mut skill, 0, 0, 32);
+        let after = policy.difficulty(&skill);
+
+        assert!(before > 0.0);
+        assert!(after < before);
+        assert!(
+            after > 0.0,
+            "a recuperação não deve apagar o histórico de uma vez"
+        );
+    }
+
+    #[test]
     fn sampler_respeita_as_duas_palavras_anteriores_e_registra_propensao() {
         let words = ["a", "b", "c"]
             .into_iter()
