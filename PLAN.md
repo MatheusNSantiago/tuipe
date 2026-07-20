@@ -382,7 +382,7 @@ Streak:
 - [x] Implementar WAL, transacoes curtas e worker de persistencia.
 - [x] Implementar codec Postcard + Zstandard versionado.
 - [x] Persistir sessoes concluidas, falhas e restarts com classificacao correta.
-- [ ] Implementar rebuild de metricas/materialized skills a partir dos eventos.
+- [x] Implementar rebuild de metricas/materialized skills a partir dos eventos.
 - [x] Testar recovery de crash, migracao e blob corrompido.
 
 **Pronto quando:** nenhuma escrita entra no caminho critico e todo estado derivado pode ser reconstruido.

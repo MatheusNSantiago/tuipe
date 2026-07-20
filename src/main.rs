@@ -141,7 +141,7 @@ fn handle_cli() -> Result<bool> {
     match command.as_str() {
         "-h" | "--help" | "help" => {
             println!(
-                "tuipe — treinador de digitação adaptativo e offline\n\nUSO:\n    tuipe\n    tuipe doctor\n    tuipe backup [DESTINO]\n    tuipe --version\n\nCOMANDOS:\n    doctor           valida configuração, banco e eventos sem alterar dados\n    backup [DESTINO] cria uma cópia SQLite consistente e privada\n\nDentro do aplicativo, pressione esc para configurações e q para sair."
+                "tuipe — treinador de digitação adaptativo e offline\n\nUSO:\n    tuipe\n    tuipe doctor\n    tuipe backup [DESTINO]\n    tuipe rebuild\n    tuipe --version\n\nCOMANDOS:\n    doctor           valida configuração, banco e eventos sem alterar dados\n    backup [DESTINO] cria uma cópia SQLite consistente e privada\n    rebuild          recalcula métricas e o modelo usando os eventos brutos\n\nDentro do aplicativo, pressione esc para configurações e q para sair."
             );
         }
         "-V" | "--version" | "version" => println!("tuipe {}", env!("CARGO_PKG_VERSION")),
@@ -173,6 +173,22 @@ fn handle_cli() -> Result<bool> {
                 .with_context(|| format!("abrir banco em {}", database_path.display()))?;
             repository.backup(&destination)?;
             println!("backup criado em {}", destination.display());
+        }
+        "rebuild" => {
+            anyhow::ensure!(arguments.next().is_none(), "rebuild não recebe argumentos");
+            let (_, database_path) = paths();
+            anyhow::ensure!(
+                database_path.exists(),
+                "o banco ainda não existe: {}",
+                database_path.display()
+            );
+            let repository = Repository::open(&database_path)
+                .with_context(|| format!("abrir banco em {}", database_path.display()))?;
+            let report = repository.rebuild_derived_data()?;
+            println!(
+                "reconstrução concluída\nmétricas: {}\nobservações: {}\npalavras: {}\nn-gramas: {}\nmecânicas: {}",
+                report.metrics, report.observations, report.words, report.ngrams, report.mechanics
+            );
         }
         _ => anyhow::bail!("comando desconhecido: {command}. Use tuipe --help"),
     }

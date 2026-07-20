@@ -165,6 +165,18 @@ tuipe backup caminho/para/copia.db
 Sem um destino explícito, o arquivo recebe data e hora no nome. O comando não
 sobrescreve uma cópia existente.
 
+As métricas consultáveis e o modelo adaptativo podem ser recalculados usando a
+configuração, os estímulos e os eventos brutos guardados em cada sessão:
+
+```sh
+tuipe rebuild
+```
+
+Sessões antigas que não registravam os estímulos continuam preservadas e são
+ignoradas nessa reconstrução. As métricas só são trocadas depois que todas as
+sessões reconstruíveis forem validadas; as projeções adaptativas seguem a mesma
+regra antes da troca.
+
 ## Desenvolvimento
 
 A referência comportamental congelada é o commit

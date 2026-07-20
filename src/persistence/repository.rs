@@ -12,14 +12,17 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use anyhow::{Context, Result};
 use chrono::{Datelike, Duration, Local, NaiveDate};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
+use unicode_segmentation::UnicodeSegmentation;
 
 use crate::adaptive::{
     MechanicSkill, NgramSkill, Observation, PersonalBaseline, ReviewState, SelectionSource,
     WordSkill, lexical_ngrams,
 };
 use crate::gamification::{StreakState, XpState, award};
-use crate::persistence::{RawEvent, RawEventCodec};
-use crate::typing::{Metrics, TestConfig, TestStatus};
+use crate::persistence::{RawEvent, RawEventCodec, RawEventKind, RawSessionEnd};
+use crate::typing::{
+    InputEvent, KeyAction, Metrics, RecordedInputKind, TestConfig, TestEngine, TestStatus,
+};
 
 pub struct Repository {
     connection: Connection,
@@ -51,6 +54,7 @@ pub struct SessionProvenance {
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RebuildReport {
+    pub metrics: usize,
     pub observations: usize,
     pub words: usize,
     pub ngrams: usize,
@@ -866,6 +870,7 @@ impl Repository {
         }
 
         let report = RebuildReport {
+            metrics: 0,
             observations: observations.len(),
             words: words.len(),
             ngrams: ngrams.len(),
@@ -925,6 +930,70 @@ impl Repository {
             )?;
         }
         transaction.commit()?;
+        Ok(report)
+    }
+
+    /// Recalcula métricas consultáveis e projeções adaptativas usando apenas
+    /// configuração, estímulos e eventos brutos persistidos.
+    pub fn rebuild_derived_data(&self) -> Result<RebuildReport> {
+        let mut statement = self.connection.prepare(
+            "SELECT s.id, s.terminal_state, s.config_toml, s.stimuli_json,
+                    r.codec_version, r.uncompressed_size, r.blob
+             FROM sessions s
+             JOIN raw_events r ON r.session_id = s.id
+             ORDER BY s.id",
+        )?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, u16>(4)?,
+                    row.get::<_, i64>(5)?,
+                    row.get::<_, Vec<u8>>(6)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut rebuilt = Vec::new();
+        for (id, terminal_state, config, stimuli, version, size, blob) in rows {
+            let size =
+                usize::try_from(size).context("tamanho negativo nos eventos brutos persistidos")?;
+            let events = RawEventCodec::decode(version, size, &blob)?;
+            let config = toml::from_str::<TestConfig>(&config)?;
+            let stimuli = serde_json::from_str::<Vec<String>>(&stimuli)?;
+            if stimuli.is_empty() {
+                continue;
+            }
+            let metrics = replay_metrics(config, stimuli, &events, &terminal_state)
+                .with_context(|| format!("reconstruir métricas da sessão #{id}"))?;
+            rebuilt.push((id, metrics));
+        }
+        let transaction = self.connection.unchecked_transaction()?;
+        for (id, metrics) in &rebuilt {
+            transaction.execute(
+                "UPDATE sessions SET
+                    elapsed_ms = ?2, wpm = ?3, raw_wpm = ?4, accuracy = ?5,
+                    correct_chars = ?6, incorrect_chars = ?7, extra_chars = ?8,
+                    missed_chars = ?9, metrics_version = 2
+                 WHERE id = ?1",
+                params![
+                    id,
+                    metrics.duration_ms as i64,
+                    metrics.wpm,
+                    metrics.raw_wpm,
+                    metrics.accuracy,
+                    metrics.characters.correct_word,
+                    metrics.characters.incorrect,
+                    metrics.characters.extra,
+                    metrics.characters.missed,
+                ],
+            )?;
+        }
+        transaction.commit()?;
+        let mut report = self.rebuild_adaptive_projections()?;
+        report.metrics = rebuilt.len();
         Ok(report)
     }
 
@@ -1668,6 +1737,102 @@ impl Repository {
     }
 }
 
+fn replay_metrics(
+    config: TestConfig,
+    stimuli: Vec<String>,
+    events: &[RawEvent],
+    stored_terminal_state: &str,
+) -> Result<Metrics> {
+    let mut engine = TestEngine::new(config, stimuli);
+    let mut at_ms = 0_u64;
+    let mut raw_end = None;
+    for raw in events {
+        at_ms = at_ms.saturating_add(u64::from(raw.delta_ms));
+        match &raw.kind {
+            RawEventKind::Input { word_index, event } => {
+                anyhow::ensure!(
+                    engine.active_word() == *word_index as usize,
+                    "o índice do evento não corresponde à palavra ativa"
+                );
+                match event {
+                    RecordedInputKind::Insert { grapheme, .. }
+                    | RecordedInputKind::InsertDelta { grapheme, .. } => {
+                        engine.update(InputEvent::Key {
+                            action: KeyAction::Text(grapheme.clone()),
+                            at_ms,
+                        });
+                    }
+                    RecordedInputKind::Delete {
+                        deleted,
+                        whole_word,
+                        ..
+                    } => replay_delete(
+                        &mut engine,
+                        deleted.graphemes(true).count(),
+                        *whole_word,
+                        at_ms,
+                    ),
+                    RecordedInputKind::DeleteDelta {
+                        deleted_graphemes,
+                        whole_word,
+                        ..
+                    } => replay_delete(
+                        &mut engine,
+                        usize::from(*deleted_graphemes),
+                        *whole_word,
+                        at_ms,
+                    ),
+                    RecordedInputKind::Focus { .. }
+                    | RecordedInputKind::Paste { .. }
+                    | RecordedInputKind::PasteRedacted { .. } => {}
+                }
+            }
+            RawEventKind::Terminal(end) => {
+                raw_end = Some(*end);
+                engine.update(InputEvent::Tick { at_ms });
+            }
+        }
+    }
+    let raw_end = raw_end.context("a sessão não possui causa terminal")?;
+    let expected_state = match raw_end {
+        RawSessionEnd::Completed => "completed",
+        RawSessionEnd::Failed => "failed",
+        RawSessionEnd::Restarted | RawSessionEnd::Quit => "restart",
+    };
+    anyhow::ensure!(
+        stored_terminal_state == expected_state,
+        "a causa terminal bruta ({expected_state}) diverge do estado persistido ({stored_terminal_state})"
+    );
+    match raw_end {
+        RawSessionEnd::Completed => anyhow::ensure!(
+            matches!(engine.status(), TestStatus::Completed { .. }),
+            "o replay não concluiu a sessão"
+        ),
+        RawSessionEnd::Failed => anyhow::ensure!(
+            matches!(engine.status(), TestStatus::Failed { .. }),
+            "o replay não reproduziu a falha"
+        ),
+        RawSessionEnd::Restarted | RawSessionEnd::Quit => {}
+    }
+    Ok(engine.metrics())
+}
+
+fn replay_delete(engine: &mut TestEngine, count: usize, whole_word: bool, at_ms: u64) {
+    if whole_word {
+        engine.update(InputEvent::Key {
+            action: KeyAction::DeleteWordBackward,
+            at_ms,
+        });
+    } else {
+        for _ in 0..count {
+            engine.update(InputEvent::Key {
+                action: KeyAction::Backspace,
+                at_ms,
+            });
+        }
+    }
+}
+
 fn session_history_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionHistoryItem> {
     let state = row.get::<_, String>(2)?;
     let outcome = match state.as_str() {
@@ -2057,7 +2222,7 @@ fn table_has_column(connection: &Connection, table: &str, column: &str) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::typing::TestStatus;
+    use crate::typing::{TestMode, TestStatus};
 
     fn word_observation(word: &str, confirmed_error: bool) -> WordObservationRecord {
         WordObservationRecord {
@@ -2298,6 +2463,86 @@ mod tests {
             )
             .unwrap();
         assert_eq!(repository.session_provenance(id).unwrap(), Some(provenance));
+    }
+
+    #[test]
+    fn rebuild_reproduz_metricas_originais_a_partir_dos_eventos() {
+        let temporary = tempfile::tempdir().unwrap();
+        let repository = Repository::open(&temporary.path().join("history.db")).unwrap();
+        let config = TestConfig {
+            mode: TestMode::Words { count: 1 },
+            ..TestConfig::default()
+        };
+        let stimuli = vec!["casa".to_owned()];
+        let mut engine = TestEngine::new(config.clone(), stimuli.clone());
+        for (index, grapheme) in ["c", "a", "s", "a"].into_iter().enumerate() {
+            engine.update(InputEvent::Key {
+                action: KeyAction::Text(grapheme.to_owned()),
+                at_ms: 100 + index as u64 * 100,
+            });
+        }
+        assert!(matches!(engine.status(), TestStatus::Completed { .. }));
+        let expected = engine.metrics();
+        let raw =
+            RawEventCodec::materialize(engine.recorded_events(), 400, RawSessionEnd::Completed);
+        let id = repository
+            .save_session_with_provenance(
+                &config,
+                engine.status(),
+                expected.clone(),
+                &[],
+                &raw,
+                &SessionProvenance {
+                    stimuli,
+                    ..SessionProvenance::default()
+                },
+            )
+            .unwrap();
+        repository
+            .connection
+            .execute(
+                "UPDATE sessions SET elapsed_ms = 1, wpm = 1, raw_wpm = 1,
+                 accuracy = 1, correct_chars = 1, incorrect_chars = 1,
+                 extra_chars = 1, missed_chars = 1, metrics_version = 0
+                 WHERE id = ?1",
+                [id],
+            )
+            .unwrap();
+
+        let report = repository.rebuild_derived_data().unwrap();
+        let rebuilt = repository
+            .connection
+            .query_row(
+                "SELECT elapsed_ms, wpm, raw_wpm, accuracy, correct_chars,
+                        incorrect_chars, extra_chars, missed_chars, metrics_version
+                 FROM sessions WHERE id = ?1",
+                [id],
+                |row| {
+                    Ok((
+                        row.get::<_, u64>(0)?,
+                        row.get::<_, f64>(1)?,
+                        row.get::<_, f64>(2)?,
+                        row.get::<_, f64>(3)?,
+                        row.get::<_, u32>(4)?,
+                        row.get::<_, u32>(5)?,
+                        row.get::<_, u32>(6)?,
+                        row.get::<_, u32>(7)?,
+                        row.get::<_, u16>(8)?,
+                    ))
+                },
+            )
+            .unwrap();
+
+        assert_eq!(report.metrics, 1);
+        assert_eq!(rebuilt.0, expected.duration_ms);
+        assert_eq!(rebuilt.1, expected.wpm);
+        assert_eq!(rebuilt.2, expected.raw_wpm);
+        assert_eq!(rebuilt.3, expected.accuracy);
+        assert_eq!(rebuilt.4, expected.characters.correct_word);
+        assert_eq!(rebuilt.5, expected.characters.incorrect);
+        assert_eq!(rebuilt.6, expected.characters.extra);
+        assert_eq!(rebuilt.7, expected.characters.missed);
+        assert_eq!(rebuilt.8, 2);
     }
 
     #[test]
