@@ -10,7 +10,7 @@ use ratatui::{
     },
 };
 use spline1d::pchip;
-use std::{env, sync::OnceLock};
+use std::{cell::RefCell, collections::HashMap, env, sync::OnceLock};
 use supports_color::Stream;
 
 use unicode_segmentation::UnicodeSegmentation;
@@ -39,7 +39,7 @@ const RESULT_CHART_HEIGHT: u16 = 12;
 const RESULT_AXIS_LABEL_WIDTH: u16 = 4;
 const CURVE_SAMPLES_PER_INTERVAL: u16 = 16;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 enum ColorProfile {
     TrueColor,
     Ansi256,
@@ -48,6 +48,12 @@ enum ColorProfile {
 }
 
 static COLOR_PROFILE: OnceLock<ColorProfile> = OnceLock::new();
+
+type ThemeColorKey = ((u8, u8, u8), (u8, u8, u8), u16, ColorProfile);
+
+thread_local! {
+    static THEME_COLOR_CACHE: RefCell<HashMap<ThemeColorKey, Color>> = RefCell::new(HashMap::new());
+}
 
 #[derive(Clone, Copy)]
 struct Icons {
@@ -133,22 +139,28 @@ pub fn render_statistics(frame: &mut Frame, statistics: &StatisticsOverview, the
     if statistics.completed_tests == 0 {
         frame.render_widget(
             Paragraph::new(vec![
-                Line::styled("estatísticas", Style::default().fg(color(&theme.text))),
+                Line::styled(
+                    "estatísticas",
+                    Style::default().fg(theme_color(theme, &theme.text, 4.5)),
+                ),
                 Line::from(""),
                 Line::styled(
                     "ainda não há testes concluídos",
-                    Style::default().fg(color(&theme.sub)),
+                    Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
                 ),
                 Line::styled(
                     "volte e comece a digitar",
-                    Style::default().fg(color(&theme.main)),
+                    Style::default().fg(theme_color(theme, &theme.main, 3.0)),
                 ),
                 Line::styled(
                     "o treino é escolhido automaticamente",
-                    Style::default().fg(color(&theme.sub)),
+                    Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
                 ),
                 Line::from(""),
-                Line::styled("esc voltar", Style::default().fg(color(&theme.sub))),
+                Line::styled(
+                    "esc voltar",
+                    Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
+                ),
             ])
             .alignment(Alignment::Center),
             centered_height(content, 7),
@@ -169,7 +181,11 @@ pub fn render_statistics(frame: &mut Frame, statistics: &StatisticsOverview, the
     ])
     .split(content);
     frame.render_widget(
-        Paragraph::new("estatísticas").style(Style::default().fg(color(&theme.text))),
+        Paragraph::new("estatísticas").style(Style::default().fg(theme_color(
+            theme,
+            &theme.text,
+            4.5,
+        ))),
         sections[0],
     );
     render_statistics_chart(frame, sections[1], &statistics.recent_tests, theme);
@@ -180,7 +196,8 @@ pub fn render_statistics(frame: &mut Frame, statistics: &StatisticsOverview, the
     render_priority_words(frame, details[0], &statistics.priority_words, theme);
     render_priority_patterns(frame, details[1], &statistics.priority_patterns, theme);
     frame.render_widget(
-        Paragraph::new("esc voltar").style(Style::default().fg(color(&theme.sub))),
+        Paragraph::new("esc voltar")
+            .style(Style::default().fg(theme_color(theme, &theme.sub, 2.0))),
         sections[4],
     );
 }
@@ -192,46 +209,58 @@ fn render_statistics_compact(
     theme: &Theme,
 ) {
     let mut lines = vec![
-        Line::styled("estatísticas", Style::default().fg(color(&theme.text))),
+        Line::styled(
+            "estatísticas",
+            Style::default().fg(theme_color(theme, &theme.text, 4.5)),
+        ),
         Line::from(vec![
             Span::styled(
                 format!("{} testes", statistics.completed_tests),
-                Style::default().fg(color(&theme.main)),
+                Style::default().fg(theme_color(theme, &theme.main, 3.0)),
             ),
-            Span::styled("  ·  ", Style::default().fg(color(&theme.sub))),
+            Span::styled(
+                "  ·  ",
+                Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
+            ),
             Span::styled(
                 format!("{:.0} wpm", statistics.average_wpm),
-                Style::default().fg(color(&theme.main)),
+                Style::default().fg(theme_color(theme, &theme.main, 3.0)),
             ),
-            Span::styled("  ·  ", Style::default().fg(color(&theme.sub))),
+            Span::styled(
+                "  ·  ",
+                Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
+            ),
             Span::styled(
                 format!("{:.0}% precisão", statistics.average_accuracy),
-                Style::default().fg(color(&theme.main)),
+                Style::default().fg(theme_color(theme, &theme.main, 3.0)),
             ),
         ]),
         Line::from(vec![
             Span::styled(
                 format!("nível {}", statistics.level),
-                Style::default().fg(color(&theme.main)),
+                Style::default().fg(theme_color(theme, &theme.main, 3.0)),
             ),
-            Span::styled("  ·  ", Style::default().fg(color(&theme.sub))),
+            Span::styled(
+                "  ·  ",
+                Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
+            ),
             Span::styled(
                 format!("streak {} dias", statistics.streak),
-                Style::default().fg(color(&theme.main)),
+                Style::default().fg(theme_color(theme, &theme.main, 3.0)),
             ),
         ]),
         compact_trend(&statistics.recent_tests, theme),
         Line::from(""),
         Line::styled(
             "palavras prioritárias",
-            Style::default().fg(color(&theme.text)),
+            Style::default().fg(theme_color(theme, &theme.text, 4.5)),
         ),
     ];
 
     if statistics.priority_words.is_empty() {
         lines.push(Line::styled(
             "sem evidência suficiente",
-            Style::default().fg(color(&theme.sub)),
+            Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
         ));
     } else {
         lines.extend(
@@ -249,11 +278,17 @@ fn render_statistics_compact(
                         )
                     };
                     Line::from(vec![
-                        Span::styled(word.word.clone(), Style::default().fg(color(&theme.main))),
-                        Span::styled(chance, Style::default().fg(color(&theme.sub))),
+                        Span::styled(
+                            word.word.clone(),
+                            Style::default().fg(theme_color(theme, &theme.main, 3.0)),
+                        ),
+                        Span::styled(
+                            chance,
+                            Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
+                        ),
                         Span::styled(
                             format!("falha {:.0}%", word.uncorrected_error_rate * 100.0),
-                            Style::default().fg(color(&theme.error)),
+                            Style::default().fg(theme_color(theme, &theme.error, 3.0)),
                         ),
                     ])
                 }),
@@ -263,12 +298,12 @@ fn render_statistics_compact(
     lines.push(Line::from(""));
     lines.push(Line::styled(
         "padrões que pedem treino",
-        Style::default().fg(color(&theme.text)),
+        Style::default().fg(theme_color(theme, &theme.text, 4.5)),
     ));
     if statistics.priority_patterns.is_empty() {
         lines.push(Line::styled(
             "sem evidência em palavras distintas",
-            Style::default().fg(color(&theme.sub)),
+            Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
         ));
     } else {
         lines.extend(
@@ -293,11 +328,17 @@ fn render_statistics_compact(
                         format!("  ·  {} palavras  ·  ", pattern.distinct_words)
                     };
                     Line::from(vec![
-                        Span::styled(label, Style::default().fg(color(&theme.main))),
-                        Span::styled(contexts, Style::default().fg(color(&theme.sub))),
+                        Span::styled(
+                            label,
+                            Style::default().fg(theme_color(theme, &theme.main, 3.0)),
+                        ),
+                        Span::styled(
+                            contexts,
+                            Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
+                        ),
                         Span::styled(
                             format!("falha {:.0}%", pattern.uncorrected_error_rate * 100.0),
-                            Style::default().fg(color(&theme.error)),
+                            Style::default().fg(theme_color(theme, &theme.error, 3.0)),
                         ),
                     ])
                 }),
@@ -310,7 +351,7 @@ fn render_statistics_compact(
     lines.truncate(area.height.saturating_sub(1) as usize);
     lines.push(Line::styled(
         "esc voltar",
-        Style::default().fg(color(&theme.sub)),
+        Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
     ));
     frame.render_widget(Paragraph::new(lines), area);
 }
@@ -319,18 +360,21 @@ fn compact_trend(sessions: &[SessionSummary], theme: &Theme) -> Line<'static> {
     let Some((first, last)) = sessions.first().zip(sessions.last()) else {
         return Line::styled(
             "tendência ainda indisponível",
-            Style::default().fg(color(&theme.sub)),
+            Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
         );
     };
     Line::from(vec![
         Span::styled(
             format!("testes #{}–#{}", first.id, last.id),
-            Style::default().fg(color(&theme.sub)),
+            Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
         ),
-        Span::styled("  ·  ", Style::default().fg(color(&theme.sub))),
+        Span::styled(
+            "  ·  ",
+            Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
+        ),
         Span::styled(
             format!("{:.0} → {:.0} wpm", first.wpm, last.wpm),
-            Style::default().fg(color(&theme.main)),
+            Style::default().fg(theme_color(theme, &theme.main, 3.0)),
         ),
     ])
 }
@@ -360,11 +404,11 @@ fn render_statistics_chart(
                 } else {
                     "wpm por teste"
                 },
-                Style::default().fg(color(&theme.text)),
+                Style::default().fg(theme_color(theme, &theme.text, 4.5)),
             ),
             Span::styled(
                 format!("  ·  {} testes mais recentes", sessions.len()),
-                Style::default().fg(color(&theme.sub)),
+                Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
             ),
         ])),
         Rect::new(area.x, area.y, area.width, 1),
@@ -396,7 +440,7 @@ fn render_statistics_chart(
             .block(
                 Block::default()
                     .borders(Borders::LEFT | Borders::BOTTOM)
-                    .border_style(Style::default().fg(color(&theme.main))),
+                    .border_style(Style::default().fg(theme_color(theme, &theme.main, 3.0))),
             )
             .x_bounds([
                 points.first().map_or(0.0, |point| point.0),
@@ -406,7 +450,7 @@ fn render_statistics_chart(
             .paint(|context| {
                 context.draw(&Points {
                     coords: &points,
-                    color: color(&theme.main),
+                    color: theme_color(theme, &theme.main, 3.0),
                 });
             }),
         canvas_area,
@@ -431,7 +475,7 @@ fn render_statistics_chart(
         ] {
             frame.render_widget(
                 Paragraph::new(value)
-                    .style(Style::default().fg(color(&theme.sub)))
+                    .style(Style::default().fg(theme_color(theme, &theme.sub, 2.0)))
                     .alignment(alignment),
                 label,
             );
@@ -460,8 +504,14 @@ fn render_statistics_summary(
     {
         frame.render_widget(
             Paragraph::new(vec![
-                Line::styled(label, Style::default().fg(color(&theme.sub))),
-                Line::styled(value, Style::default().fg(color(&theme.main))),
+                Line::styled(
+                    label,
+                    Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
+                ),
+                Line::styled(
+                    value,
+                    Style::default().fg(theme_color(theme, &theme.main, 3.0)),
+                ),
             ]),
             *area,
         );
@@ -471,17 +521,17 @@ fn render_statistics_summary(
 fn render_priority_words(frame: &mut Frame, area: Rect, words: &[PriorityWord], theme: &Theme) {
     let mut lines = vec![Line::styled(
         "palavras prioritárias",
-        Style::default().fg(color(&theme.text)),
+        Style::default().fg(theme_color(theme, &theme.text, 4.5)),
     )];
     if words.is_empty() {
         lines.push(Line::styled(
             "sem evidência suficiente",
-            Style::default().fg(color(&theme.sub)),
+            Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
         ));
     } else {
         lines.push(Line::styled(
             "palavra       chance   falha   corr   exp",
-            Style::default().fg(color(&theme.sub)),
+            Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
         ));
         lines.extend(
             words
@@ -491,23 +541,23 @@ fn render_priority_words(frame: &mut Frame, area: Rect, words: &[PriorityWord], 
                     Line::from(vec![
                         Span::styled(
                             format!("{:<14}", word.word),
-                            Style::default().fg(color(&theme.main)),
+                            Style::default().fg(theme_color(theme, &theme.main, 3.0)),
                         ),
                         Span::styled(
                             format!("{:>5.1}%   ", word.estimated_session_chance * 100.0),
-                            Style::default().fg(color(&theme.main)),
+                            Style::default().fg(theme_color(theme, &theme.main, 3.0)),
                         ),
                         Span::styled(
                             format!("{:>4.0}%  ", word.uncorrected_error_rate * 100.0),
-                            Style::default().fg(color(&theme.error)),
+                            Style::default().fg(theme_color(theme, &theme.error, 3.0)),
                         ),
                         Span::styled(
                             format!("{:>4.0}%  ", word.corrected_error_rate * 100.0),
-                            Style::default().fg(color(&theme.sub)),
+                            Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
                         ),
                         Span::styled(
                             format!("{:>3.0}", word.effective_exposures),
-                            Style::default().fg(color(&theme.sub)),
+                            Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
                         ),
                     ])
                 }),
@@ -524,17 +574,17 @@ fn render_priority_patterns(
 ) {
     let mut lines = vec![Line::styled(
         "padrões que pedem treino",
-        Style::default().fg(color(&theme.text)),
+        Style::default().fg(theme_color(theme, &theme.text, 4.5)),
     )];
     if patterns.is_empty() {
         lines.push(Line::styled(
             "sem evidência em palavras distintas",
-            Style::default().fg(color(&theme.sub)),
+            Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
         ));
     } else {
         lines.push(Line::styled(
             "tipo/padrão       falha corr exp ctx",
-            Style::default().fg(color(&theme.sub)),
+            Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
         ));
         lines.extend(
             patterns
@@ -553,23 +603,23 @@ fn render_priority_patterns(
                     Line::from(vec![
                         Span::styled(
                             format!("{label:<18}"),
-                            Style::default().fg(color(&theme.main)),
+                            Style::default().fg(theme_color(theme, &theme.main, 3.0)),
                         ),
                         Span::styled(
                             format!("{:>4.0}% ", pattern.uncorrected_error_rate * 100.0),
-                            Style::default().fg(color(&theme.error)),
+                            Style::default().fg(theme_color(theme, &theme.error, 3.0)),
                         ),
                         Span::styled(
                             format!("{:>3.0}% ", pattern.corrected_error_rate * 100.0),
-                            Style::default().fg(color(&theme.sub)),
+                            Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
                         ),
                         Span::styled(
                             format!("{:>3.0} ", pattern.effective_exposures),
-                            Style::default().fg(color(&theme.sub)),
+                            Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
                         ),
                         Span::styled(
                             pattern.distinct_words.to_string(),
-                            Style::default().fg(color(&theme.sub)),
+                            Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
                         ),
                     ])
                 }),
@@ -673,12 +723,12 @@ fn render_header(frame: &mut Frame, area: Rect, theme: &Theme, icones: Icons) {
         Paragraph::new(Line::from(vec![
             Span::styled(
                 format!("{} ", icones.teclado),
-                Style::default().fg(color(&theme.main)),
+                Style::default().fg(theme_color(theme, &theme.main, 3.0)),
             ),
             Span::styled(
                 "tuipe",
                 Style::default()
-                    .fg(color(&theme.text))
+                    .fg(theme_color(theme, &theme.text, 4.5))
                     .add_modifier(Modifier::BOLD),
             ),
         ])),
@@ -722,7 +772,7 @@ fn render_settings(
     let sections = vec![
         Line::styled(
             format!("{} configurações do teste", icones.configuracoes),
-            Style::default().fg(color(&theme.sub)),
+            Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
         ),
         button_group(
             &[
@@ -793,10 +843,16 @@ fn render_settings(
             theme,
         ),
         Line::from(vec![
-            Span::styled("t tema  ", Style::default().fg(color(&theme.sub))),
+            Span::styled(
+                "t tema  ",
+                Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
+            ),
             chip(theme_name.to_owned(), true, theme),
         ]),
-        Line::styled("esc fechar", Style::default().fg(color(&theme.sub))),
+        Line::styled(
+            "esc fechar",
+            Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
+        ),
     ];
     let lines = if compact {
         sections
@@ -832,7 +888,7 @@ fn render_config_bar(
             card,
             Line::styled(
                 format!("{}  configurações", icones.configuracoes),
-                Style::default().fg(color(&theme.sub)),
+                Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
             ),
             theme,
         );
@@ -840,9 +896,9 @@ fn render_config_bar(
     };
 
     let active = Style::default()
-        .fg(color(&theme.main))
+        .fg(theme_color(theme, &theme.main, 3.0))
         .add_modifier(Modifier::BOLD);
-    let idle = Style::default().fg(color(&theme.sub));
+    let idle = Style::default().fg(theme_color(theme, &theme.sub, 2.0));
 
     let modifiers = Line::from(vec![
         selector("@ pontuação", config.punctuation, active, idle),
@@ -958,7 +1014,7 @@ fn render_test(
         frame.render_widget(
             Paragraph::new("terminal pequeno demais")
                 .alignment(Alignment::Center)
-                .style(Style::default().fg(color(&theme.error))),
+                .style(Style::default().fg(theme_color(theme, &theme.error, 3.0))),
             area,
         );
         return;
@@ -981,19 +1037,23 @@ fn render_test(
 
     frame.render_widget(
         Paragraph::new(test_descriptor(engine, session_kind, icones))
-            .style(Style::default().fg(color(&theme.sub)))
+            .style(Style::default().fg(theme_color(theme, &theme.sub, 2.0)))
             .alignment(Alignment::Center),
         Rect::new(area.x, area.y, area.width, 1),
     );
     if matches!(engine.status(), TestStatus::Running { .. }) {
         frame.render_widget(
-            Paragraph::new(mini_progress(engine)).style(Style::default().fg(color(&theme.main))),
+            Paragraph::new(mini_progress(engine)).style(Style::default().fg(theme_color(
+                theme,
+                &theme.main,
+                3.0,
+            ))),
             Rect::new(area.x, area.y + 1, area.width, 1),
         );
     }
     for (index, line) in visible.into_iter().enumerate() {
         frame.render_widget(
-            Paragraph::new(line).style(Style::default().fg(color(&theme.sub))),
+            Paragraph::new(line).style(Style::default().fg(theme_color(theme, &theme.sub, 2.0))),
             Rect::new(
                 area.x,
                 first_word_y + u16::try_from(index).unwrap_or(0) * word_step,
@@ -1070,53 +1130,74 @@ fn render_compact_result(
     let stats = metrics.characters;
     let lines = vec![
         Line::from(vec![
-            Span::styled("wpm ", Style::default().fg(color(&theme.sub))),
+            Span::styled(
+                "wpm ",
+                Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
+            ),
             Span::styled(
                 format!("{:.0}", metrics.wpm),
-                Style::default().fg(color(&theme.main)),
+                Style::default().fg(theme_color(theme, &theme.main, 3.0)),
             ),
             Span::raw("    "),
-            Span::styled("precisão ", Style::default().fg(color(&theme.sub))),
+            Span::styled(
+                "precisão ",
+                Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
+            ),
             Span::styled(
                 format!("{:.0}%", metrics.accuracy),
-                Style::default().fg(color(&theme.main)),
+                Style::default().fg(theme_color(theme, &theme.main, 3.0)),
             ),
         ]),
         Line::from(vec![
-            Span::styled("bruto ", Style::default().fg(color(&theme.sub))),
+            Span::styled(
+                "bruto ",
+                Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
+            ),
             Span::styled(
                 format!("{:.0}", metrics.raw_wpm),
-                Style::default().fg(color(&theme.main)),
+                Style::default().fg(theme_color(theme, &theme.main, 3.0)),
             ),
             Span::raw("    "),
-            Span::styled("consistência ", Style::default().fg(color(&theme.sub))),
+            Span::styled(
+                "consistência ",
+                Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
+            ),
             Span::styled(
                 format!("{:.0}%", metrics.consistency),
-                Style::default().fg(color(&theme.main)),
+                Style::default().fg(theme_color(theme, &theme.main, 3.0)),
             ),
         ]),
         Line::from(vec![
-            Span::styled("caracteres ", Style::default().fg(color(&theme.sub))),
+            Span::styled(
+                "caracteres ",
+                Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
+            ),
             Span::styled(
                 format!(
                     "{}/{}/{}/{}",
                     stats.correct_word, stats.incorrect, stats.extra, stats.missed
                 ),
-                Style::default().fg(color(&theme.main)),
+                Style::default().fg(theme_color(theme, &theme.main, 3.0)),
             ),
             Span::raw("    "),
-            Span::styled("tempo ", Style::default().fg(color(&theme.sub))),
+            Span::styled(
+                "tempo ",
+                Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
+            ),
             Span::styled(
                 format!("{:.1}s", metrics.duration_ms as f64 / 1_000.0),
-                Style::default().fg(color(&theme.main)),
+                Style::default().fg(theme_color(theme, &theme.main, 3.0)),
             ),
         ]),
         Line::from(""),
     ];
     let descriptor_text = result_descriptor(engine, icones);
-    let descriptor = descriptor_text
-        .lines()
-        .map(|line| Line::styled(line.to_owned(), Style::default().fg(color(&theme.main))));
+    let descriptor = descriptor_text.lines().map(|line| {
+        Line::styled(
+            line.to_owned(),
+            Style::default().fg(theme_color(theme, &theme.main, 3.0)),
+        )
+    });
     frame.render_widget(
         Paragraph::new(lines.into_iter().chain(descriptor).collect::<Vec<_>>())
             .alignment(Alignment::Center),
@@ -1141,17 +1222,20 @@ fn render_result_chart(
     let mut title = vec![
         Span::styled(
             "wpm ao longo do tempo",
-            Style::default().fg(color(&theme.text)),
+            Style::default().fg(theme_color(theme, &theme.text, 4.5)),
         ),
         Span::raw("   "),
-        Span::styled("× erros", Style::default().fg(color(&theme.error))),
+        Span::styled(
+            "× erros",
+            Style::default().fg(theme_color(theme, &theme.error, 3.0)),
+        ),
     ];
     if area.width >= 60
         && let Some(kind) = session_kind_descriptor(session_kind, icones)
     {
         title.push(Span::styled(
             format!("   ·   {kind}"),
-            Style::default().fg(color(&theme.sub)),
+            Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
         ));
     }
     frame.render_widget(Paragraph::new(Line::from(title)), sections[0]);
@@ -1192,14 +1276,14 @@ fn render_result_chart(
             .block(
                 Block::default()
                     .borders(Borders::LEFT | Borders::BOTTOM)
-                    .border_style(Style::default().fg(color(&theme.main))),
+                    .border_style(Style::default().fg(theme_color(theme, &theme.main, 3.0))),
             )
             .x_bounds([0.0, last_point.max(1.0)])
             .y_bounds([0.0, chart_ceiling])
             .paint(|context| {
                 context.draw(&Points {
                     coords: &wpm_points,
-                    color: color(&theme.main),
+                    color: theme_color(theme, &theme.main, 3.0),
                 });
                 for points in smooth_wpm_points.windows(2) {
                     context.draw(&CanvasLine {
@@ -1207,14 +1291,14 @@ fn render_result_chart(
                         y1: points[0].1,
                         x2: points[1].0,
                         y2: points[1].1,
-                        color: color(&theme.main),
+                        color: theme_color(theme, &theme.main, 3.0),
                     });
                 }
                 context.layer();
                 context.marker(Marker::Custom('×'));
                 context.draw(&Points {
                     coords: &error_points,
-                    color: color(&theme.error),
+                    color: theme_color(theme, &theme.error, 3.0),
                 });
             }),
         plot,
@@ -1247,7 +1331,7 @@ fn smooth_wpm_points(points: &[(f64, f64)]) -> Vec<(f64, f64)> {
 }
 
 fn render_chart_y_labels(frame: &mut Frame, area: Rect, plot: Rect, ceiling: f64, theme: &Theme) {
-    let style = Style::default().fg(color(&theme.main));
+    let style = Style::default().fg(theme_color(theme, &theme.main, 3.0));
     for (offset, label) in [
         (0, format!("{ceiling:.0}")),
         (
@@ -1270,7 +1354,7 @@ fn render_chart_x_labels(
     metrics: &Metrics,
     theme: &Theme,
 ) {
-    let style = Style::default().fg(color(&theme.main));
+    let style = Style::default().fg(theme_color(theme, &theme.main, 3.0));
     let duration = format_chart_duration(metrics.duration_ms);
     frame.render_widget(
         Paragraph::new(Line::styled("1", style)),
@@ -1422,13 +1506,14 @@ fn result_detail_areas(area: Rect, group_count: usize) -> Vec<Rect> {
 fn result_group_lines(name: &str, result: String, theme: &Theme) -> Vec<Line<'static>> {
     let mut lines = vec![Line::styled(
         name.to_owned(),
-        Style::default().fg(color(&theme.sub)),
+        Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
     )];
-    lines.extend(
-        result
-            .lines()
-            .map(|line| Line::styled(line.to_owned(), Style::default().fg(color(&theme.main)))),
-    );
+    lines.extend(result.lines().map(|line| {
+        Line::styled(
+            line.to_owned(),
+            Style::default().fg(theme_color(theme, &theme.main, 3.0)),
+        )
+    }));
     lines
 }
 
@@ -1497,11 +1582,15 @@ fn styled_words(engine: &TestEngine, theme: &Theme) -> Vec<StyledWord> {
                 let expected = target_graphemes.get(index).copied();
                 let mut style = match (typed, expected) {
                     (Some(actual), Some(expected)) if actual == expected => {
-                        Style::default().fg(color(&theme.text))
+                        Style::default().fg(theme_color(theme, &theme.text, 4.5))
                     }
-                    (Some(_), Some(_)) => Style::default().fg(color(&theme.error)),
-                    (Some(_), None) => Style::default().fg(color(&theme.error_extra)),
-                    (None, Some(_)) => Style::default().fg(color(&theme.sub)),
+                    (Some(_), Some(_)) => {
+                        Style::default().fg(theme_color(theme, &theme.error, 3.0))
+                    }
+                    (Some(_), None) => {
+                        Style::default().fg(theme_color(theme, &theme.error_extra, 3.0))
+                    }
+                    (None, Some(_)) => Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
                     (None, None) => unreachable!(),
                 };
                 if attempt.committed && input != target_text {
@@ -1653,11 +1742,11 @@ fn key_hints(hints: &[(&str, &str)], theme: &Theme) -> Line<'static> {
         }
         spans.push(Span::styled(
             (*key).to_owned(),
-            Style::default().fg(color(&theme.text)),
+            Style::default().fg(theme_color(theme, &theme.text, 4.5)),
         ));
         spans.push(Span::styled(
             format!(" {action}"),
-            Style::default().fg(color(&theme.sub)),
+            Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
         ));
     }
     Line::from(spans)
@@ -1676,10 +1765,12 @@ fn button_group(buttons: &[(&str, bool)], theme: &Theme) -> Line<'static> {
 
 fn chip(text: String, active: bool, theme: &Theme) -> Span<'static> {
     let style = if active {
-        Style::default().fg(color(&theme.bg)).bg(color(&theme.main))
+        Style::default()
+            .fg(color(&theme.bg))
+            .bg(theme_color(theme, &theme.main, 3.0))
     } else {
         Style::default()
-            .fg(color(&theme.sub))
+            .fg(theme_color(theme, &theme.sub, 2.0))
             .bg(color(&theme.sub_alt))
     };
     Span::styled(format!(" {text} "), style)
@@ -1769,17 +1860,17 @@ fn render_size_requirement(
         Line::styled(
             "mais espaço, por favor",
             Style::default()
-                .fg(color(&theme.text))
+                .fg(theme_color(theme, &theme.text, 4.5))
                 .add_modifier(Modifier::BOLD),
         ),
         Line::from(""),
         Line::styled(
             format!("para {action}: {minimum_width}×{minimum_height}"),
-            Style::default().fg(color(&theme.sub)),
+            Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
         ),
         Line::styled(
             format!("terminal atual: {}×{}", area.width, area.height),
-            Style::default().fg(color(&theme.main)),
+            Style::default().fg(theme_color(theme, &theme.main, 3.0)),
         ),
     ];
     frame.render_widget(
@@ -1820,19 +1911,99 @@ fn color(value: &str) -> Color {
     color_with_profile(value, color_profile())
 }
 
+fn theme_color(theme: &Theme, value: &str, minimum_contrast: f64) -> Color {
+    let foreground = parse_rgb(value);
+    let background = parse_rgb(&theme.bg);
+    match (foreground, background) {
+        (Some(foreground), Some(background)) => {
+            let profile = color_profile();
+            let minimum = (minimum_contrast * 100.0).round() as u16;
+            let key = (foreground, background, minimum, profile);
+            THEME_COLOR_CACHE.with(|cache| {
+                if let Some(color) = cache.borrow().get(&key) {
+                    return *color;
+                }
+                let adjusted = ensure_contrast(foreground, background, minimum_contrast);
+                let resolved = color_from_rgb(adjusted, profile);
+                cache.borrow_mut().insert(key, resolved);
+                resolved
+            })
+        }
+        _ => Color::Reset,
+    }
+}
+
 fn color_with_profile(value: &str, profile: ColorProfile) -> Color {
-    value
-        .parse::<csscolorparser::Color>()
-        .map(|parsed| {
-            let [red, green, blue, _] = parsed.to_rgba8();
-            match profile {
-                ColorProfile::TrueColor => Color::Rgb(red, green, blue),
-                ColorProfile::Ansi256 => Color::Indexed(rgb_to_ansi256(red, green, blue)),
-                ColorProfile::Ansi16 => rgb_to_ansi16(red, green, blue),
-                ColorProfile::None => Color::Reset,
-            }
-        })
-        .unwrap_or(Color::Reset)
+    parse_rgb(value).map_or(Color::Reset, |rgb| color_from_rgb(rgb, profile))
+}
+
+fn parse_rgb(value: &str) -> Option<(u8, u8, u8)> {
+    value.parse::<csscolorparser::Color>().ok().map(|parsed| {
+        let [red, green, blue, _] = parsed.to_rgba8();
+        (red, green, blue)
+    })
+}
+
+fn color_from_rgb((red, green, blue): (u8, u8, u8), profile: ColorProfile) -> Color {
+    match profile {
+        ColorProfile::TrueColor => Color::Rgb(red, green, blue),
+        ColorProfile::Ansi256 => Color::Indexed(rgb_to_ansi256(red, green, blue)),
+        ColorProfile::Ansi16 => rgb_to_ansi16(red, green, blue),
+        ColorProfile::None => Color::Reset,
+    }
+}
+
+fn ensure_contrast(
+    foreground: (u8, u8, u8),
+    background: (u8, u8, u8),
+    minimum: f64,
+) -> (u8, u8, u8) {
+    if contrast_ratio(foreground, background) >= minimum {
+        return foreground;
+    }
+    let black = (0, 0, 0);
+    let white = (255, 255, 255);
+    let target = if contrast_ratio(white, background) >= contrast_ratio(black, background) {
+        white
+    } else {
+        black
+    };
+    let mut low = 0.0;
+    let mut high = 1.0;
+    for _ in 0..12 {
+        let middle = (low + high) / 2.0;
+        if contrast_ratio(mix_rgb(foreground, target, middle), background) >= minimum {
+            high = middle;
+        } else {
+            low = middle;
+        }
+    }
+    mix_rgb(foreground, target, high)
+}
+
+fn mix_rgb(from: (u8, u8, u8), to: (u8, u8, u8), amount: f64) -> (u8, u8, u8) {
+    let mix = |from: u8, to: u8| {
+        (f64::from(from) + (f64::from(to) - f64::from(from)) * amount).round() as u8
+    };
+    (mix(from.0, to.0), mix(from.1, to.1), mix(from.2, to.2))
+}
+
+fn contrast_ratio(first: (u8, u8, u8), second: (u8, u8, u8)) -> f64 {
+    let first = relative_luminance(first);
+    let second = relative_luminance(second);
+    (first.max(second) + 0.05) / (first.min(second) + 0.05)
+}
+
+fn relative_luminance((red, green, blue): (u8, u8, u8)) -> f64 {
+    let linear = |value: u8| {
+        let value = f64::from(value) / 255.0;
+        if value <= 0.04045 {
+            value / 12.92
+        } else {
+            ((value + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    0.2126 * linear(red) + 0.7152 * linear(green) + 0.0722 * linear(blue)
 }
 
 fn rgb_to_ansi256(red: u8, green: u8, blue: u8) -> u8 {
@@ -2187,5 +2358,27 @@ mod tests {
         );
         assert_eq!(rgb_to_ansi256(0, 0, 0), 16);
         assert_eq!(rgb_to_ansi256(255, 255, 255), 231);
+    }
+
+    #[test]
+    fn semantic_theme_roles_keep_a_legible_contrast() {
+        let catalog = ContentCatalog::bundled().unwrap();
+        for name in catalog.theme_names() {
+            let theme = catalog.theme(name).unwrap();
+            let background = parse_rgb(&theme.bg).unwrap();
+            for (role, value, minimum) in [
+                ("principal", theme.main.as_str(), 3.0),
+                ("secundária", theme.sub.as_str(), 2.0),
+                ("texto", theme.text.as_str(), 4.5),
+                ("erro", theme.error.as_str(), 3.0),
+                ("erro extra", theme.error_extra.as_str(), 3.0),
+            ] {
+                let resolved = ensure_contrast(parse_rgb(value).unwrap(), background, minimum);
+                assert!(
+                    contrast_ratio(resolved, background) >= minimum - 0.02,
+                    "tema {name}, papel {role} ficou abaixo do contraste mínimo"
+                );
+            }
+        }
     }
 }
