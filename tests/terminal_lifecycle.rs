@@ -11,7 +11,7 @@ use std::{
 
 use portable_pty::{Child, CommandBuilder, MasterPty, NativePtySystem, PtySize, PtySystem};
 use tuipe::{
-    persistence::{RawEventCodec, RawEventKind},
+    persistence::{RawEventCodec, RawEventKind, Repository},
     typing::RecordedInputKind,
 };
 
@@ -169,6 +169,37 @@ fn backup_em_instalacao_vazia_falha_sem_criar_banco() {
     );
     assert!(!home.path().join("data/tuipe/tuipe.db").exists());
     assert!(!destino.exists());
+}
+
+#[test]
+fn rollback_da_politica_funciona_pela_interface_operacional() {
+    let home = tempfile::tempdir().expect("criar diretório temporário");
+    let database = home.path().join("data/tuipe/tuipe.db");
+    Repository::open(&database).expect("criar banco");
+    let command = |action: &str| {
+        Command::new(env!("CARGO_BIN_EXE_tuipe"))
+            .args(["policy", action])
+            .env("HOME", home.path())
+            .env("XDG_CONFIG_HOME", home.path().join("config"))
+            .env("XDG_DATA_HOME", home.path().join("data"))
+            .env("XDG_STATE_HOME", home.path().join("state"))
+            .output()
+            .expect("executar policy")
+    };
+
+    let status = command("status");
+    assert!(status.status.success());
+    assert!(String::from_utf8_lossy(&status.stdout).contains("adaptativa v2"));
+
+    let rollback = command("rollback");
+    assert!(rollback.status.success());
+    let output = String::from_utf8_lossy(&rollback.stdout);
+    assert!(output.contains("uniforme (modo seguro)"));
+    assert!(output.contains("shadow: adaptativa v2"));
+
+    let restore = command("rollback");
+    assert!(restore.status.success());
+    assert!(String::from_utf8_lossy(&restore.stdout).contains("política ativa: adaptativa v2"));
 }
 
 #[test]
