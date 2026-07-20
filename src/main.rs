@@ -36,8 +36,8 @@ use tuipe::{
     content::{ContentCatalog, Quote, WordGenerator},
     persistence::{
         MechanicObservationRecord, Preferences, RawEvent, RawEventCodec, RawSessionEnd, Repository,
-        SessionKind, SessionProvenance, StatisticsOverview, WordDetail, WordObservationRecord,
-        paths,
+        SessionDetail, SessionKind, SessionOutcome, SessionProvenance, StatisticsOverview,
+        WordDetail, WordObservationRecord, paths,
     },
     typing::{
         ExternalEvent, InputEvent, KeyAction, QuoteLength, RecordedInputKind, TestEngine, TestMode,
@@ -77,8 +77,15 @@ fn main() -> Result<()> {
         preferences.theme = "arch".into();
         preferences.save(&config_path)?;
     }
+    let opened = Repository::open_recovering(&database_path)?;
+    if let Some(path) = opened.quarantined {
+        notices.push(format!(
+            "histórico corrompido preservado em {}; um banco novo foi criado",
+            path.display()
+        ));
+    }
+    let repository = opened.repository;
     let startup_notice = (!notices.is_empty()).then(|| notices.join(" · "));
-    let repository = Repository::open(&database_path)?;
     let mut persistence = PersistenceWorker::start(database_path)?;
     let mut app = App::new(
         preferences,
@@ -183,8 +190,12 @@ struct App {
     config_path: PathBuf,
     settings_open: bool,
     statistics_open: bool,
+    statistics_page: ui::StatisticsPage,
     statistics_selected_word: usize,
+    statistics_selected_session: usize,
+    statistics_history_filter: ui::HistoryFilter,
     statistics_detail: Option<WordDetail>,
+    statistics_session_detail: Option<SessionDetail>,
     statistics_reset: Option<StatisticsReset>,
     statistics: StatisticsOverview,
     generator: Option<WordGenerator<SmallRng>>,
@@ -349,8 +360,12 @@ impl App {
             config_path,
             settings_open: false,
             statistics_open: false,
+            statistics_page: ui::StatisticsPage::Overview,
             statistics_selected_word: 0,
+            statistics_selected_session: 0,
+            statistics_history_filter: ui::HistoryFilter::All,
             statistics_detail: None,
+            statistics_session_detail: None,
             statistics_reset: None,
             statistics: StatisticsOverview::default(),
             generator,
@@ -830,8 +845,8 @@ impl App {
     }
 
     fn load_statistics(&mut self, repository: &Repository) -> Result<()> {
-        let mut statistics = repository.statistics_overview()?;
         let config = self.engine.config();
+        let mut statistics = repository.statistics_overview_for(config)?;
         statistics
             .priority_words
             .retain(|word| word.language == config.language);
@@ -867,7 +882,9 @@ impl App {
             .statistics_selected_word
             .min(self.statistics.priority_words.len().saturating_sub(1));
         self.statistics_detail = None;
+        self.statistics_session_detail = None;
         self.statistics_reset = None;
+        self.clamp_statistics_selection();
         Ok(())
     }
 
@@ -900,6 +917,39 @@ impl App {
                 detail.priority.estimated_session_chance = priority.estimated_session_chance;
                 detail
             });
+        Ok(())
+    }
+
+    fn filtered_history(&self) -> impl Iterator<Item = &tuipe::persistence::SessionHistoryItem> {
+        self.statistics
+            .history
+            .iter()
+            .filter(|session| match self.statistics_history_filter {
+                ui::HistoryFilter::All => true,
+                ui::HistoryFilter::Completed => session.outcome == SessionOutcome::Completed,
+                ui::HistoryFilter::Failed => session.outcome == SessionOutcome::Failed,
+            })
+    }
+
+    fn clamp_statistics_selection(&mut self) {
+        let count = self.filtered_history().count();
+        self.statistics_selected_session = self
+            .statistics_selected_session
+            .min(count.saturating_sub(1));
+        self.statistics_selected_word = self
+            .statistics_selected_word
+            .min(self.statistics.priority_words.len().saturating_sub(1));
+    }
+
+    fn open_statistics_session(&mut self, repository: &Repository) -> Result<()> {
+        let id = self
+            .filtered_history()
+            .nth(self.statistics_selected_session)
+            .map(|session| session.id);
+        self.statistics_session_detail = id
+            .map(|id| repository.session_detail(id))
+            .transpose()?
+            .flatten();
         Ok(())
     }
 }
@@ -1002,8 +1052,12 @@ fn run(
                         frame,
                         &app.statistics,
                         ui::StatisticsRenderState {
+                            page: app.statistics_page,
                             selected_word: app.statistics_selected_word,
+                            selected_session: app.statistics_selected_session,
+                            history_filter: app.statistics_history_filter,
                             word_detail: app.statistics_detail.as_ref(),
+                            session_detail: app.statistics_session_detail.as_ref(),
                         },
                         theme,
                     );
@@ -1126,7 +1180,34 @@ fn handle_mouse(
         }
         let position = ratatui::layout::Position::new(mouse.column, mouse.row);
         if app.statistics_detail.is_none()
-            && let Some(index) = ui::statistics_word_at(viewport, &app.statistics, position)
+            && app.statistics_session_detail.is_none()
+            && let Some(action) = ui::statistics_action_at(
+                viewport,
+                &app.statistics,
+                app.statistics_page,
+                app.statistics_selected_session,
+                app.statistics_history_filter,
+                position,
+            )
+        {
+            match action {
+                ui::StatisticsAction::Page(page) => app.statistics_page = page,
+                ui::StatisticsAction::Session(index) => {
+                    app.statistics_selected_session = index;
+                    app.open_statistics_session(repository)?;
+                }
+            }
+            return Ok(true);
+        }
+        if app.statistics_page == ui::StatisticsPage::Overview
+            && app.statistics_detail.is_none()
+            && app.statistics_session_detail.is_none()
+            && let Some(index) = ui::statistics_word_at(
+                viewport,
+                &app.statistics,
+                app.statistics_selected_word,
+                position,
+            )
         {
             app.open_statistics_word(repository, index)?;
             return Ok(true);
@@ -1134,6 +1215,8 @@ fn handle_mouse(
         if mouse.row >= terminal.height.saturating_sub(2) {
             if app.statistics_detail.is_some() {
                 app.statistics_detail = None;
+            } else if app.statistics_session_detail.is_some() {
+                app.statistics_session_detail = None;
             } else {
                 app.statistics_open = false;
             }
@@ -1160,10 +1243,12 @@ fn handle_mouse(
         let padding = (terminal.width / 20).max(2);
         let content_width = terminal.width.saturating_sub(padding * 2).max(1);
         let relative = mouse.column.saturating_sub(padding).min(content_width - 1);
-        let action = match (relative * 4 / content_width).min(3) {
+        let actions = if app.current_quote.is_some() { 5 } else { 4 };
+        let action = match (relative * actions / content_width).min(actions - 1) {
             0 => KeyCode::Enter,
             1 => KeyCode::Char('r'),
             2 => KeyCode::Char('s'),
+            3 if actions == 5 => KeyCode::Char('f'),
             _ => KeyCode::Char('q'),
         };
         return handle_key(app, repository, action, KeyModifiers::NONE);
@@ -1340,9 +1425,6 @@ fn handle_key(
                 KeyCode::Esc | KeyCode::Char('n') => {}
                 _ => app.statistics_reset = Some(reset),
             }
-        } else if matches!(code, KeyCode::Char('s')) {
-            app.statistics_open = false;
-            app.statistics_detail = None;
         } else if app.statistics_detail.is_some() {
             match code {
                 KeyCode::Esc | KeyCode::Enter | KeyCode::Backspace => {
@@ -1357,19 +1439,76 @@ fn handle_key(
                 }
                 _ => {}
             }
+        } else if app.statistics_session_detail.is_some() {
+            if matches!(code, KeyCode::Esc | KeyCode::Enter | KeyCode::Backspace) {
+                app.statistics_session_detail = None;
+            }
         } else {
             match code {
+                KeyCode::Char('1') => app.statistics_page = ui::StatisticsPage::Overview,
+                KeyCode::Char('2') => app.statistics_page = ui::StatisticsPage::Progress,
+                KeyCode::Char('3') => app.statistics_page = ui::StatisticsPage::History,
+                KeyCode::Tab | KeyCode::Right => {
+                    app.statistics_page = match app.statistics_page {
+                        ui::StatisticsPage::Overview => ui::StatisticsPage::Progress,
+                        ui::StatisticsPage::Progress => ui::StatisticsPage::History,
+                        ui::StatisticsPage::History => ui::StatisticsPage::Overview,
+                    };
+                }
+                KeyCode::BackTab | KeyCode::Left => {
+                    app.statistics_page = match app.statistics_page {
+                        ui::StatisticsPage::Overview => ui::StatisticsPage::History,
+                        ui::StatisticsPage::Progress => ui::StatisticsPage::Overview,
+                        ui::StatisticsPage::History => ui::StatisticsPage::Progress,
+                    };
+                }
+                _ => {}
+            }
+            match code {
                 KeyCode::Esc | KeyCode::Backspace => app.statistics_open = false,
-                KeyCode::Char('R') => app.statistics_reset = Some(StatisticsReset::Model),
-                KeyCode::Up | KeyCode::Char('k') => {
+                KeyCode::Char('R') if app.statistics_page == ui::StatisticsPage::Overview => {
+                    app.statistics_reset = Some(StatisticsReset::Model)
+                }
+                KeyCode::Up | KeyCode::Char('k')
+                    if app.statistics_page == ui::StatisticsPage::Overview =>
+                {
                     app.statistics_selected_word = app.statistics_selected_word.saturating_sub(1);
                 }
-                KeyCode::Down | KeyCode::Char('j') => {
+                KeyCode::Down | KeyCode::Char('j')
+                    if app.statistics_page == ui::StatisticsPage::Overview =>
+                {
                     app.statistics_selected_word = (app.statistics_selected_word + 1)
                         .min(app.statistics.priority_words.len().saturating_sub(1));
                 }
-                KeyCode::Enter if !app.statistics.priority_words.is_empty() => {
+                KeyCode::Enter
+                    if app.statistics_page == ui::StatisticsPage::Overview
+                        && !app.statistics.priority_words.is_empty() =>
+                {
                     app.open_statistics_word(repository, app.statistics_selected_word)?;
+                }
+                KeyCode::Up | KeyCode::Char('k')
+                    if app.statistics_page == ui::StatisticsPage::History =>
+                {
+                    app.statistics_selected_session =
+                        app.statistics_selected_session.saturating_sub(1);
+                }
+                KeyCode::Down | KeyCode::Char('j')
+                    if app.statistics_page == ui::StatisticsPage::History =>
+                {
+                    let count = app.filtered_history().count();
+                    app.statistics_selected_session =
+                        (app.statistics_selected_session + 1).min(count.saturating_sub(1));
+                }
+                KeyCode::Char('f') if app.statistics_page == ui::StatisticsPage::History => {
+                    app.statistics_history_filter = match app.statistics_history_filter {
+                        ui::HistoryFilter::All => ui::HistoryFilter::Completed,
+                        ui::HistoryFilter::Completed => ui::HistoryFilter::Failed,
+                        ui::HistoryFilter::Failed => ui::HistoryFilter::All,
+                    };
+                    app.statistics_selected_session = 0;
+                }
+                KeyCode::Enter if app.statistics_page == ui::StatisticsPage::History => {
+                    app.open_statistics_session(repository)?;
                 }
                 _ => {}
             }
@@ -1380,6 +1519,14 @@ fn handle_key(
         app.engine.status(),
         TestStatus::Completed { .. } | TestStatus::Failed { .. }
     );
+    if matches!(code, KeyCode::Char('s'))
+        && modifiers.contains(KeyModifiers::CONTROL)
+        && matches!(app.engine.status(), TestStatus::Ready)
+    {
+        app.load_statistics(repository)?;
+        app.statistics_open = true;
+        return Ok(false);
+    }
     if terminal && app.persistence_pending {
         return Ok(false);
     }

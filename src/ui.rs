@@ -5,7 +5,7 @@ use ratatui::{
     symbols::Marker,
     text::{Line, Span},
     widgets::{
-        Block, BorderType, Borders, Clear, Paragraph,
+        Block, BorderType, Borders, Clear, Paragraph, Wrap,
         canvas::{Canvas, Line as CanvasLine, Points},
     },
 };
@@ -19,7 +19,8 @@ use unicode_width::UnicodeWidthStr;
 use crate::{
     content::Theme,
     persistence::{
-        PriorityPattern, PriorityWord, SessionKind, SessionSummary, StatisticsOverview, WordDetail,
+        ActivityDay, PriorityPattern, PriorityWord, SessionDetail, SessionHistoryItem, SessionKind,
+        SessionOutcome, SessionSummary, StatisticsOverview, WordDetail, WpmBucket,
     },
     typing::{Difficulty, Metrics, QuoteLength, TestEngine, TestMode, TestStatus},
 };
@@ -164,8 +165,28 @@ pub struct RenderState<'a> {
 
 #[derive(Clone, Copy)]
 pub struct StatisticsRenderState<'a> {
+    pub page: StatisticsPage,
     pub selected_word: usize,
+    pub selected_session: usize,
+    pub history_filter: HistoryFilter,
     pub word_detail: Option<&'a WordDetail>,
+    pub session_detail: Option<&'a SessionDetail>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum StatisticsPage {
+    #[default]
+    Overview,
+    Progress,
+    History,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum HistoryFilter {
+    #[default]
+    All,
+    Completed,
+    Failed,
 }
 
 #[derive(Clone, Copy)]
@@ -192,6 +213,12 @@ pub enum SettingsAction {
     NextTheme,
     Close,
     Quit,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StatisticsAction {
+    Page(StatisticsPage),
+    Session(usize),
 }
 
 pub fn render(frame: &mut Frame, engine: &TestEngine, theme: &Theme, state: RenderState<'_>) {
@@ -233,7 +260,11 @@ pub fn render_statistics(
         render_word_detail(frame, content, detail, theme);
         return;
     }
-    if statistics.completed_tests == 0 {
+    if let Some(detail) = state.session_detail {
+        render_session_detail(frame, content, detail, theme);
+        return;
+    }
+    if statistics.completed_tests == 0 && statistics.history.is_empty() {
         frame.render_widget(
             Paragraph::new(vec![
                 Line::styled(
@@ -264,53 +295,622 @@ pub fn render_statistics(
         );
         return;
     }
-    if viewport.width < 80 || viewport.height < 24 {
-        render_statistics_compact(frame, content, statistics, state.selected_word, theme);
+    let sections = Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).split(content);
+    render_statistics_navigation(frame, sections[0], statistics, state.page, theme);
+    match state.page {
+        StatisticsPage::Overview => render_statistics_overview(
+            frame,
+            sections[1],
+            statistics,
+            state.selected_word,
+            viewport.width < 80 || viewport.height < 24,
+            theme,
+        ),
+        StatisticsPage::Progress => {
+            render_statistics_progress(frame, sections[1], statistics, theme)
+        }
+        StatisticsPage::History => render_statistics_history(
+            frame,
+            sections[1],
+            &statistics.history,
+            state.selected_session,
+            state.history_filter,
+            theme,
+        ),
+    }
+}
+
+fn render_statistics_overview(
+    frame: &mut Frame,
+    content: Rect,
+    statistics: &StatisticsOverview,
+    selected_word: usize,
+    compact: bool,
+    theme: &Theme,
+) {
+    if compact {
+        render_statistics_compact(frame, content, statistics, selected_word, theme);
         return;
     }
-
     let sections = Layout::vertical([
-        Constraint::Length(1),
         Constraint::Length(11.min(content.height.saturating_sub(9))),
         Constraint::Length(3),
         Constraint::Min(7),
         Constraint::Length(1),
     ])
     .split(content);
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(
-                "estatísticas",
-                Style::default().fg(theme_color(theme, &theme.text, 4.5)),
-            ),
-            Span::styled(
-                format!(
-                    "  ·  nível {}  ·  streak {} dias",
-                    statistics.level, statistics.streak
-                ),
-                Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
-            ),
-        ])),
-        sections[0],
-    );
-    render_statistics_chart(frame, sections[1], &statistics.recent_tests, theme);
-    render_statistics_summary(frame, sections[2], statistics, theme);
+    render_statistics_chart(frame, sections[0], &statistics.recent_tests, theme);
+    render_statistics_summary(frame, sections[1], statistics, theme);
     let details = Layout::horizontal([Constraint::Percentage(58), Constraint::Percentage(42)])
         .spacing(1)
-        .split(sections[3]);
+        .split(sections[2]);
     render_priority_words(
         frame,
         details[0],
         &statistics.priority_words,
-        state.selected_word,
+        selected_word,
         theme,
     );
     render_priority_patterns(frame, details[1], &statistics.priority_patterns, theme);
     frame.render_widget(
         Paragraph::new("↑↓ selecionar   enter detalhes   R zerar modelo   esc voltar")
             .style(Style::default().fg(theme_color(theme, &theme.sub, 2.0))),
-        sections[4],
+        sections[3],
     );
+}
+
+fn render_statistics_navigation(
+    frame: &mut Frame,
+    area: Rect,
+    statistics: &StatisticsOverview,
+    active: StatisticsPage,
+    theme: &Theme,
+) {
+    let compact = area.width < 72;
+    let labels = if compact {
+        ["1 visão", "2 progresso", "3 histórico"]
+    } else {
+        ["1 visão geral", "2 progresso", "3 histórico"]
+    };
+    let mut spans = if compact {
+        Vec::new()
+    } else {
+        vec![Span::styled(
+            "estatísticas  ",
+            Style::default()
+                .fg(theme_color(theme, &theme.text, 4.5))
+                .add_modifier(Modifier::BOLD),
+        )]
+    };
+    for (index, label) in labels.into_iter().enumerate() {
+        if index > 0 {
+            spans.push(Span::styled(
+                "  ",
+                Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
+            ));
+        }
+        let selected = index
+            == match active {
+                StatisticsPage::Overview => 0,
+                StatisticsPage::Progress => 1,
+                StatisticsPage::History => 2,
+            };
+        spans.push(Span::styled(
+            label,
+            if selected {
+                Style::default()
+                    .fg(theme_color(theme, &theme.main, 3.0))
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme_color(theme, &theme.sub, 2.0))
+            },
+        ));
+    }
+    if !compact {
+        spans.push(Span::styled(
+            format!(
+                "  ·  nível {}  ·  sequência {} dias",
+                statistics.level, statistics.streak
+            ),
+            Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
+        ));
+    }
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+fn render_statistics_progress(
+    frame: &mut Frame,
+    area: Rect,
+    statistics: &StatisticsOverview,
+    theme: &Theme,
+) {
+    if area.width < 80 || area.height < 20 {
+        let sections = Layout::vertical([
+            Constraint::Length(3),
+            Constraint::Length(5),
+            Constraint::Min(3),
+            Constraint::Length(1),
+        ])
+        .split(area);
+        render_statistics_summary_compact(frame, sections[0], statistics, theme);
+        render_wpm_distribution(frame, sections[1], &statistics.distribution, theme);
+        render_activity_summary(frame, sections[2], &statistics.daily_activity, theme);
+        frame.render_widget(
+            Paragraph::new("tab navegar   esc voltar")
+                .style(Style::default().fg(theme_color(theme, &theme.sub, 2.0))),
+            sections[3],
+        );
+        return;
+    }
+    let sections = Layout::vertical([
+        Constraint::Length(10),
+        Constraint::Length(3),
+        Constraint::Min(7),
+        Constraint::Length(1),
+    ])
+    .split(area);
+    render_statistics_chart(frame, sections[0], &statistics.recent_tests, theme);
+    render_statistics_summary(frame, sections[1], statistics, theme);
+    let lower = Layout::horizontal([Constraint::Percentage(48), Constraint::Percentage(52)])
+        .spacing(4)
+        .split(sections[2]);
+    render_wpm_distribution(frame, lower[0], &statistics.distribution, theme);
+    render_daily_activity(frame, lower[1], &statistics.daily_activity, theme);
+    frame.render_widget(
+        Paragraph::new("tab ou 1–3 navegar   esc voltar")
+            .style(Style::default().fg(theme_color(theme, &theme.sub, 2.0))),
+        sections[3],
+    );
+}
+
+fn render_activity_summary(frame: &mut Frame, area: Rect, days: &[ActivityDay], theme: &Theme) {
+    let active_days = days.iter().filter(|day| day.tests > 0).count();
+    let tests = days.iter().map(|day| day.tests).sum::<u32>();
+    let active_ms = days.iter().map(|day| day.active_ms).sum::<u64>();
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::styled(
+                "atividade  ·  últimos 14 dias",
+                Style::default().fg(theme_color(theme, &theme.text, 4.5)),
+            ),
+            Line::styled(
+                format!(
+                    "{active_days} dias ativos  ·  {tests} testes  ·  {}",
+                    format_active_time(active_ms)
+                ),
+                Style::default().fg(theme_color(theme, &theme.main, 3.0)),
+            ),
+        ]),
+        area,
+    );
+}
+
+fn render_statistics_summary_compact(
+    frame: &mut Frame,
+    area: Rect,
+    statistics: &StatisticsOverview,
+    theme: &Theme,
+) {
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(vec![
+                Span::styled(
+                    format!("{:.0} wpm médio", statistics.average_wpm),
+                    Style::default().fg(theme_color(theme, &theme.main, 3.0)),
+                ),
+                Span::styled(
+                    format!("  ·  {:.0}% precisão", statistics.average_accuracy),
+                    Style::default().fg(theme_color(theme, &theme.main, 3.0)),
+                ),
+            ]),
+            Line::styled(
+                format!(
+                    "{} comparáveis  ·  melhor {:.0}  ·  {} ativos",
+                    statistics.comparable_tests,
+                    statistics.best_wpm,
+                    format_active_time(statistics.active_ms)
+                ),
+                Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
+            ),
+        ]),
+        area,
+    );
+}
+
+fn render_wpm_distribution(frame: &mut Frame, area: Rect, buckets: &[WpmBucket], theme: &Theme) {
+    let mut lines = vec![Line::styled(
+        "distribuição de wpm",
+        Style::default().fg(theme_color(theme, &theme.text, 4.5)),
+    )];
+    if buckets.is_empty() {
+        lines.push(Line::styled(
+            "ainda sem testes comparáveis",
+            Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
+        ));
+    } else {
+        let maximum = buckets.iter().map(|bucket| bucket.count).max().unwrap_or(1);
+        let visible = area.height.saturating_sub(1) as usize;
+        let start = buckets.len().saturating_sub(visible);
+        let label_width = 9;
+        let bar_width = area.width.saturating_sub(label_width + 5).max(1) as usize;
+        lines.extend(buckets[start..].iter().map(|bucket| {
+            let filled = if maximum == 0 {
+                0
+            } else {
+                (bucket.count as usize * bar_width).div_ceil(maximum as usize)
+            };
+            Line::from(vec![
+                Span::styled(
+                    format!("{:>3}–{:<3} ", bucket.start, bucket.end),
+                    Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
+                ),
+                Span::styled(
+                    "█".repeat(filled),
+                    Style::default().fg(theme_color(theme, &theme.main, 3.0)),
+                ),
+                Span::styled(
+                    format!(" {}", bucket.count),
+                    Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
+                ),
+            ])
+        }));
+    }
+    frame.render_widget(Paragraph::new(lines), area);
+}
+
+fn render_daily_activity(frame: &mut Frame, area: Rect, days: &[ActivityDay], theme: &Theme) {
+    let mut lines = vec![Line::styled(
+        "atividade diária  ·  últimos 14 dias",
+        Style::default().fg(theme_color(theme, &theme.text, 4.5)),
+    )];
+    let visible = area.height.saturating_sub(1) as usize;
+    let start = days.len().saturating_sub(visible);
+    let maximum = days.iter().map(|day| day.active_ms).max().unwrap_or(1);
+    let bar_width = area.width.saturating_sub(30).max(1) as usize;
+    lines.extend(days[start..].iter().map(|day| {
+        let filled = if maximum == 0 || day.active_ms == 0 {
+            0
+        } else {
+            (day.active_ms as usize * bar_width).div_ceil(maximum as usize)
+        };
+        let minutes = day.active_ms as f64 / 60_000.0;
+        let tests = if day.tests == 1 { "teste" } else { "testes" };
+        Line::from(vec![
+            Span::styled(
+                format!("{}  ", day.date.format("%d/%m")),
+                Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
+            ),
+            Span::styled(
+                if filled == 0 {
+                    "·".into()
+                } else {
+                    "█".repeat(filled)
+                },
+                Style::default().fg(theme_color(theme, &theme.main, 3.0)),
+            ),
+            Span::styled(
+                format!("  {:>2} {tests}  {:>4.1} min", day.tests, minutes),
+                Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
+            ),
+        ])
+    }));
+    frame.render_widget(Paragraph::new(lines), area);
+}
+
+fn filtered_history(
+    history: &[SessionHistoryItem],
+    filter: HistoryFilter,
+) -> Vec<&SessionHistoryItem> {
+    history
+        .iter()
+        .filter(|session| match filter {
+            HistoryFilter::All => true,
+            HistoryFilter::Completed => session.outcome == SessionOutcome::Completed,
+            HistoryFilter::Failed => session.outcome == SessionOutcome::Failed,
+        })
+        .collect()
+}
+
+fn render_statistics_history(
+    frame: &mut Frame,
+    area: Rect,
+    history: &[SessionHistoryItem],
+    selected: usize,
+    filter: HistoryFilter,
+    theme: &Theme,
+) {
+    let sessions = filtered_history(history, filter);
+    let filter_label = match filter {
+        HistoryFilter::All => "todos",
+        HistoryFilter::Completed => "concluídos",
+        HistoryFilter::Failed => "falhas",
+    };
+    let sections = Layout::vertical([
+        Constraint::Length(2),
+        Constraint::Min(1),
+        Constraint::Length(1),
+    ])
+    .split(area);
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(vec![
+                Span::styled(
+                    "histórico de sessões",
+                    Style::default().fg(theme_color(theme, &theme.text, 4.5)),
+                ),
+                Span::styled(
+                    format!("  ·  filtro: {filter_label}"),
+                    Style::default().fg(theme_color(theme, &theme.main, 3.0)),
+                ),
+            ]),
+            Line::styled(
+                if area.width < 72 {
+                    "sessão     resultado    wpm   acc   tempo"
+                } else {
+                    "sessão     quando          resultado       modo          wpm  precisão  duração"
+                },
+                Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
+            ),
+        ]),
+        sections[0],
+    );
+    if sessions.is_empty() {
+        frame.render_widget(
+            Paragraph::new("nenhuma sessão neste filtro")
+                .style(Style::default().fg(theme_color(theme, &theme.sub, 2.0))),
+            sections[1],
+        );
+    } else {
+        let visible = sections[1].height as usize;
+        let selected = selected.min(sessions.len().saturating_sub(1));
+        let offset = selected.saturating_sub(visible.saturating_sub(1));
+        let lines = sessions
+            .iter()
+            .enumerate()
+            .skip(offset)
+            .take(visible)
+            .map(|(index, session)| history_line(session, index == selected, area.width, theme))
+            .collect::<Vec<_>>();
+        frame.render_widget(Paragraph::new(lines), sections[1]);
+    }
+    frame.render_widget(
+        Paragraph::new(if area.width < 72 {
+            "↑↓ mover  enter abrir  f filtro  esc voltar"
+        } else {
+            "↑↓ selecionar   enter detalhes   f filtrar   tab navegar   esc voltar"
+        })
+        .style(Style::default().fg(theme_color(theme, &theme.sub, 2.0))),
+        sections[2],
+    );
+}
+
+fn history_line(
+    session: &SessionHistoryItem,
+    selected: bool,
+    width: u16,
+    theme: &Theme,
+) -> Line<'static> {
+    let result = match session.outcome {
+        SessionOutcome::Completed => "concluído",
+        SessionOutcome::Failed => "falhou",
+    };
+    let result_color = if session.outcome == SessionOutcome::Completed {
+        &theme.main
+    } else {
+        &theme.error
+    };
+    let prefix = if selected { "›" } else { " " };
+    let duration = format_session_duration(session.elapsed_ms);
+    if width < 72 {
+        return Line::from(vec![
+            Span::styled(
+                format!("{prefix} #{:<7}", session.id),
+                Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
+            ),
+            Span::styled(
+                format!("{result:<13}"),
+                Style::default().fg(theme_color(theme, result_color, 3.0)),
+            ),
+            Span::styled(
+                format!(
+                    "{:>3.0}  {:>4.0}%  {duration:>6}",
+                    session.wpm, session.accuracy
+                ),
+                Style::default().fg(theme_color(theme, &theme.main, 3.0)),
+            ),
+        ]);
+    }
+    Line::from(vec![
+        Span::styled(
+            format!("{prefix} #{:<7}", session.id),
+            Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
+        ),
+        Span::styled(
+            format!("{:<15}", format_session_date(session.created_at_unix_s)),
+            Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
+        ),
+        Span::styled(
+            format!("{result:<16}"),
+            Style::default().fg(theme_color(theme, result_color, 3.0)),
+        ),
+        Span::styled(
+            format!("{:<14}", test_mode_label(&session.config.mode)),
+            Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
+        ),
+        Span::styled(
+            format!(
+                "{:>3.0}  {:>7.0}%  {duration:>7}",
+                session.wpm, session.accuracy
+            ),
+            Style::default().fg(theme_color(theme, &theme.main, 3.0)),
+        ),
+    ])
+}
+
+fn render_session_detail(frame: &mut Frame, area: Rect, detail: &SessionDetail, theme: &Theme) {
+    let compact = area.width < 80 || area.height < 22;
+    let session = &detail.session;
+    let outcome = match session.outcome {
+        SessionOutcome::Completed => "concluído",
+        SessionOutcome::Failed => "falhou",
+    };
+    let outcome_color = if session.outcome == SessionOutcome::Completed {
+        &theme.main
+    } else {
+        &theme.error
+    };
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled(
+                format!("sessão #{}  ·  ", session.id),
+                Style::default()
+                    .fg(theme_color(theme, &theme.text, 4.5))
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                outcome,
+                Style::default().fg(theme_color(theme, outcome_color, 3.0)),
+            ),
+            Span::styled(
+                format!("  ·  {}", format_session_date(session.created_at_unix_s)),
+                Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
+            ),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            metric_span("wpm", format!("{:.0}", session.wpm), theme),
+            Span::raw("    "),
+            metric_span("precisão", format!("{:.0}%", session.accuracy), theme),
+            Span::raw("    "),
+            metric_span("bruto", format!("{:.0}", session.raw_wpm), theme),
+            Span::raw("    "),
+            metric_span("tempo", format_session_duration(session.elapsed_ms), theme),
+        ]),
+        Line::styled(
+            format!(
+                "{}  ·  {}  ·  {}  ·  {}",
+                test_mode_label(&session.config.mode),
+                language_name(&session.config.language),
+                difficulty_name(session.config.difficulty),
+                session_kind_name(session.kind)
+            ),
+            Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
+        ),
+        Line::from(""),
+        Line::styled(
+            "sinais desta sessão",
+            Style::default().fg(theme_color(theme, &theme.text, 4.5)),
+        ),
+        Line::styled(
+            format!(
+                "{} palavras observadas  ·  {} limpas  ·  {} corrigidas  ·  {} falhas  ·  {} lentas",
+                detail.observed_words,
+                detail.clean_words,
+                detail.corrected_words,
+                detail.failed_words,
+                detail.slow_words
+            ),
+            Style::default().fg(theme_color(theme, &theme.main, 3.0)),
+        ),
+    ];
+    if !detail.challenges.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::styled(
+            "pontos que mais exigiram atenção",
+            Style::default().fg(theme_color(theme, &theme.text, 4.5)),
+        ));
+        let limit = if compact { 4 } else { 8 };
+        lines.extend(detail.challenges.iter().take(limit).map(|challenge| {
+            let signal = if challenge.confirmed_error {
+                "falha"
+            } else if challenge.corrected {
+                "corrigida"
+            } else {
+                "ritmo lento"
+            };
+            let ratio = challenge
+                .latency_ratio
+                .filter(|ratio| ratio.is_finite())
+                .map_or_else(String::new, |ratio| format!("  ·  {ratio:.1}× seu ritmo"));
+            Line::from(vec![
+                Span::styled(
+                    format!("{:<16}", challenge.word),
+                    Style::default().fg(theme_color(theme, &theme.main, 3.0)),
+                ),
+                Span::styled(
+                    format!("{signal}{ratio}"),
+                    Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
+                ),
+            ])
+        }));
+    }
+    if !compact && !detail.stimuli.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::styled(
+            "texto praticado",
+            Style::default().fg(theme_color(theme, &theme.text, 4.5)),
+        ));
+        lines.push(Line::styled(
+            quote_source_label(&detail.stimuli.join(" "), area.width as usize * 2),
+            Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
+        ));
+    }
+    while lines.len() < area.height.saturating_sub(1) as usize {
+        lines.push(Line::from(""));
+    }
+    lines.truncate(area.height.saturating_sub(1) as usize);
+    lines.push(Line::styled(
+        "enter ou esc voltar",
+        Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
+    ));
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
+}
+
+fn metric_span(label: &str, value: String, theme: &Theme) -> Span<'static> {
+    Span::styled(
+        format!("{label} {value}"),
+        Style::default().fg(theme_color(theme, &theme.main, 3.0)),
+    )
+}
+
+fn test_mode_label(mode: &TestMode) -> String {
+    match mode {
+        TestMode::Time { seconds } => format!("{seconds} segundos"),
+        TestMode::Words { count } => format!("{count} palavras"),
+        TestMode::Quote => "citação".into(),
+    }
+}
+
+fn session_kind_name(kind: SessionKind) -> &'static str {
+    match kind {
+        SessionKind::Practice => "treino",
+        SessionKind::Assessment => "avaliação",
+        SessionKind::Transfer => "transferência",
+        SessionKind::Retention => "retenção",
+        SessionKind::Repeat => "repetição",
+    }
+}
+
+fn format_session_date(timestamp: i64) -> String {
+    chrono::DateTime::from_timestamp(timestamp, 0)
+        .map(|date| {
+            date.with_timezone(&chrono::Local)
+                .format("%d/%m %H:%M")
+                .to_string()
+        })
+        .unwrap_or_else(|| "data inválida".into())
+}
+
+fn format_session_duration(milliseconds: u64) -> String {
+    if milliseconds >= 60_000 {
+        format!(
+            "{}m{:02}s",
+            milliseconds / 60_000,
+            milliseconds / 1_000 % 60
+        )
+    } else {
+        format!("{:.1}s", milliseconds as f64 / 1_000.0)
+    }
 }
 
 pub fn render_reset_confirmation(
@@ -371,23 +971,31 @@ pub fn render_reset_confirmation(
 pub fn statistics_word_at(
     viewport: Rect,
     statistics: &StatisticsOverview,
+    selected_word: usize,
     position: Position,
 ) -> Option<usize> {
     if viewport.width < 50 || viewport.height < 14 || statistics.priority_words.is_empty() {
         return None;
     }
     let content = page_content(viewport);
+    let content = Rect::new(
+        content.x,
+        content.y.saturating_add(1),
+        content.width,
+        content.height.saturating_sub(1),
+    );
     if viewport.width < 80 || viewport.height < 24 {
         let first_row = content.y.saturating_add(6);
-        let index = usize::from(position.y.saturating_sub(first_row));
+        let visible = statistics
+            .priority_words
+            .len()
+            .min(compact_diagnostic_limit(content.height));
+        let offset = selected_word.saturating_sub(visible.saturating_sub(1));
+        let index = offset + usize::from(position.y.saturating_sub(first_row));
         return (position.y >= first_row
             && position.x >= content.x
             && position.x < content.right()
-            && index
-                < statistics
-                    .priority_words
-                    .len()
-                    .min(compact_diagnostic_limit(content.height)))
+            && index < statistics.priority_words.len().min(offset + visible))
         .then_some(index);
     }
     let sections = Layout::vertical([
@@ -402,12 +1010,76 @@ pub fn statistics_word_at(
         .spacing(1)
         .split(sections[3]);
     let first_row = details[0].y.saturating_add(2);
-    let index = usize::from(position.y.saturating_sub(first_row));
+    let visible = details[0].height.saturating_sub(2) as usize;
+    let offset = selected_word.saturating_sub(visible.saturating_sub(1));
+    let index = offset + usize::from(position.y.saturating_sub(first_row));
     (position.y >= first_row
         && position.x >= details[0].x
         && position.x < details[0].right()
-        && index < statistics.priority_words.len())
+        && index < statistics.priority_words.len().min(offset + visible))
     .then_some(index)
+}
+
+pub fn statistics_action_at(
+    viewport: Rect,
+    statistics: &StatisticsOverview,
+    page: StatisticsPage,
+    selected_session: usize,
+    filter: HistoryFilter,
+    position: Position,
+) -> Option<StatisticsAction> {
+    if viewport.width < 50 || viewport.height < 14 {
+        return None;
+    }
+    let content = page_content(viewport);
+    if position.y == content.y {
+        let compact = content.width < 72;
+        let mut x = content.x.saturating_add(if compact {
+            0
+        } else {
+            "estatísticas  ".width() as u16
+        });
+        let labels = if compact {
+            [
+                ("1 visão", StatisticsPage::Overview),
+                ("2 progresso", StatisticsPage::Progress),
+                ("3 histórico", StatisticsPage::History),
+            ]
+        } else {
+            [
+                ("1 visão geral", StatisticsPage::Overview),
+                ("2 progresso", StatisticsPage::Progress),
+                ("3 histórico", StatisticsPage::History),
+            ]
+        };
+        for (label, target) in labels {
+            let right = x.saturating_add(label.width() as u16);
+            if (x..right).contains(&position.x) {
+                return Some(StatisticsAction::Page(target));
+            }
+            x = right.saturating_add(2);
+        }
+    }
+    if page != StatisticsPage::History {
+        return None;
+    }
+    let sessions = filtered_history(&statistics.history, filter);
+    let body = Rect::new(
+        content.x,
+        content.y.saturating_add(1),
+        content.width,
+        content.height.saturating_sub(1),
+    );
+    let first_row = body.y.saturating_add(2);
+    if position.y < first_row || position.y >= body.bottom().saturating_sub(1) {
+        return None;
+    }
+    let visible = body.height.saturating_sub(3) as usize;
+    let selected = selected_session.min(sessions.len().saturating_sub(1));
+    let offset = selected.saturating_sub(visible.saturating_sub(1));
+    let index = offset + usize::from(position.y - first_row);
+    (position.x >= body.x && position.x < body.right() && index < sessions.len())
+        .then_some(StatisticsAction::Session(index))
 }
 
 fn render_word_detail(frame: &mut Frame, area: Rect, detail: &WordDetail, theme: &Theme) {
@@ -770,12 +1442,18 @@ fn render_statistics_compact(
             Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
         ));
     } else {
+        let visible = statistics
+            .priority_words
+            .len()
+            .min(compact_diagnostic_limit(area.height));
+        let offset = selected_word.saturating_sub(visible.saturating_sub(1));
         lines.extend(
             statistics
                 .priority_words
                 .iter()
-                .take(compact_diagnostic_limit(area.height))
                 .enumerate()
+                .skip(offset)
+                .take(visible)
                 .map(|(index, word)| {
                     let chance = if area.width < 60 {
                         format!("  chance {:.1}%  ", word.estimated_session_chance * 100.0)
@@ -1092,11 +1770,14 @@ fn render_priority_words(
             "palavra       chance  falha  correção  exposições",
             Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
         ));
+        let visible = area.height.saturating_sub(2) as usize;
+        let offset = selected_word.saturating_sub(visible.saturating_sub(1));
         lines.extend(
             words
                 .iter()
-                .take(area.height.saturating_sub(2) as usize)
                 .enumerate()
+                .skip(offset)
+                .take(visible)
                 .map(|(index, word)| {
                     Line::from(vec![
                         Span::styled(
@@ -2352,8 +3033,16 @@ fn render_footer(
         }
     }
     let lines = match engine.status() {
+        TestStatus::Ready if area.width < 64 => vec![
+            key_hints(&[("comece", "a digitar"), ("esc", "config")], theme),
+            key_hints(&[("ctrl+s", "estatísticas")], theme),
+        ],
         TestStatus::Ready => vec![key_hints(
-            &[("comece", "a digitar"), ("esc", "configurações")],
+            &[
+                ("comece", "a digitar"),
+                ("esc", "configurações"),
+                ("ctrl+s", "estatísticas"),
+            ],
             theme,
         )],
         TestStatus::Running { .. } => return,
@@ -3236,6 +3925,63 @@ mod tests {
                     kind: SessionKind::Assessment,
                 })
                 .collect(),
+            history: vec![
+                SessionHistoryItem {
+                    id: 42,
+                    created_at_unix_s: 1_752_500_000,
+                    outcome: SessionOutcome::Completed,
+                    elapsed_ms: 15_000,
+                    wpm: 92.0,
+                    accuracy: 98.0,
+                    raw_wpm: 94.0,
+                    correct_chars: 115,
+                    incorrect_chars: 0,
+                    extra_chars: 1,
+                    missed_chars: 0,
+                    config: TestConfig::default(),
+                    kind: SessionKind::Assessment,
+                },
+                SessionHistoryItem {
+                    id: 41,
+                    created_at_unix_s: 1_752_413_600,
+                    outcome: SessionOutcome::Failed,
+                    elapsed_ms: 4_200,
+                    wpm: 61.0,
+                    accuracy: 86.0,
+                    raw_wpm: 70.0,
+                    correct_chars: 23,
+                    incorrect_chars: 2,
+                    extra_chars: 1,
+                    missed_chars: 0,
+                    config: TestConfig::default(),
+                    kind: SessionKind::Practice,
+                },
+            ],
+            distribution: vec![
+                WpmBucket {
+                    start: 60,
+                    end: 80,
+                    count: 3,
+                },
+                WpmBucket {
+                    start: 80,
+                    end: 100,
+                    count: 7,
+                },
+                WpmBucket {
+                    start: 100,
+                    end: 120,
+                    count: 2,
+                },
+            ],
+            daily_activity: (7..=20)
+                .map(|day| ActivityDay {
+                    date: chrono::NaiveDate::from_ymd_opt(2026, 7, day).unwrap(),
+                    tests: day % 4,
+                    active_ms: u64::from(day % 4) * 30_000,
+                    average_wpm: 70.0 + f64::from(day),
+                })
+                .collect(),
             priority_words: vec![PriorityWord {
                 language: "portuguese".into(),
                 word: "através".into(),
@@ -3265,6 +4011,10 @@ mod tests {
     }
 
     fn render_statistics_at(width: u16, height: u16) -> String {
+        render_statistics_page_at(width, height, StatisticsPage::Overview)
+    }
+
+    fn render_statistics_page_at(width: u16, height: u16, page: StatisticsPage) -> String {
         let catalog = ContentCatalog::bundled().unwrap();
         let theme = catalog.theme("arch").unwrap();
         let backend = TestBackend::new(width, height);
@@ -3276,8 +4026,12 @@ mod tests {
                     frame,
                     &statistics_fixture(),
                     StatisticsRenderState {
+                        page,
                         selected_word: 0,
+                        selected_session: 0,
+                        history_filter: HistoryFilter::All,
                         word_detail: None,
+                        session_detail: None,
                     },
                     theme,
                 );
@@ -3333,8 +4087,12 @@ mod tests {
                     frame,
                     &statistics,
                     StatisticsRenderState {
+                        page: StatisticsPage::Overview,
                         selected_word: 0,
+                        selected_session: 0,
+                        history_filter: HistoryFilter::All,
                         word_detail: Some(&detail),
+                        session_detail: None,
                     },
                     theme,
                 );
@@ -3412,11 +4170,16 @@ mod tests {
     fn clique_na_palavra_prioritaria_abre_seu_detalhe() {
         let statistics = statistics_fixture();
         assert_eq!(
-            statistics_word_at(Rect::new(0, 0, 100, 28), &statistics, Position::new(6, 17),),
+            statistics_word_at(
+                Rect::new(0, 0, 100, 28),
+                &statistics,
+                0,
+                Position::new(6, 18),
+            ),
             Some(0)
         );
         assert_eq!(
-            statistics_word_at(Rect::new(0, 0, 50, 14), &statistics, Position::new(2, 6),),
+            statistics_word_at(Rect::new(0, 0, 50, 14), &statistics, 0, Position::new(2, 7),),
             Some(0)
         );
     }
@@ -3586,6 +4349,53 @@ mod tests {
     fn statistics_overview_remains_readable() {
         insta::assert_snapshot!("statistics_100x28", render_statistics_at(100, 28));
         insta::assert_snapshot!("statistics_50x14", render_statistics_at(50, 14));
+    }
+
+    #[test]
+    fn progresso_e_historico_sao_telas_proprias_e_responsivas() {
+        let progress = render_statistics_page_at(100, 28, StatisticsPage::Progress);
+        let compact_progress = render_statistics_page_at(50, 14, StatisticsPage::Progress);
+        let history = render_statistics_page_at(100, 28, StatisticsPage::History);
+        let compact_history = render_statistics_page_at(50, 14, StatisticsPage::History);
+
+        assert!(progress.contains("distribuição de wpm"));
+        assert!(progress.contains("atividade diária"));
+        assert!(compact_progress.contains("distribuição de wpm"));
+        assert!(history.contains("#42"));
+        assert!(history.contains("concluído"));
+        assert!(compact_history.contains("#41"));
+        assert!(!history.contains("palavras prioritárias"));
+        insta::assert_snapshot!("statistics_progress_100x28", progress);
+        insta::assert_snapshot!("statistics_progress_50x14", compact_progress);
+        insta::assert_snapshot!("statistics_history_100x28", history);
+        insta::assert_snapshot!("statistics_history_50x14", compact_history);
+    }
+
+    #[test]
+    fn mouse_navega_as_paginas_e_o_historico() {
+        let statistics = statistics_fixture();
+        assert_eq!(
+            statistics_action_at(
+                Rect::new(0, 0, 100, 28),
+                &statistics,
+                StatisticsPage::Overview,
+                0,
+                HistoryFilter::All,
+                Position::new(35, 0),
+            ),
+            Some(StatisticsAction::Page(StatisticsPage::Progress))
+        );
+        assert_eq!(
+            statistics_action_at(
+                Rect::new(0, 0, 100, 28),
+                &statistics,
+                StatisticsPage::History,
+                0,
+                HistoryFilter::All,
+                Position::new(6, 3),
+            ),
+            Some(StatisticsAction::Session(0))
+        );
     }
 
     #[test]

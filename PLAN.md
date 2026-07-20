@@ -379,11 +379,11 @@ Streak:
 ### Fase 4 — persistencia e historico
 
 - [x] Criar migrations e repositories SQLite.
-- [ ] Implementar WAL, transacoes curtas e worker de persistencia.
+- [x] Implementar WAL, transacoes curtas e worker de persistencia.
 - [x] Implementar codec Postcard + Zstandard versionado.
 - [x] Persistir sessoes concluidas, falhas e restarts com classificacao correta.
 - [ ] Implementar rebuild de metricas/materialized skills a partir dos eventos.
-- [ ] Testar recovery de crash, migracao e blob corrompido.
+- [x] Testar recovery de crash, migracao e blob corrompido.
 
 **Pronto quando:** nenhuma escrita entra no caminho critico e todo estado derivado pode ser reconstruido.
 
@@ -403,8 +403,8 @@ Streak:
 ### Fase 6 — stats, XP e streak
 
 - [x] Implementar overview e diagnostico acionavel de palavras e padroes.
-- [ ] Implementar historico filtravel e detalhe de sessao.
-- [ ] Implementar graficos de evolucao, distribuicao e atividade diaria.
+- [x] Implementar historico filtravel e detalhe de sessao.
+- [x] Implementar graficos de evolucao, distribuicao e atividade diaria.
 - [x] Implementar lista minimalista de palavras e drill-down.
 - [x] Portar XP, levels, daily bonus e streak.
 - [x] Excluir falhas de averages/PBs sem perder sua evidencia adaptativa.
@@ -433,7 +433,7 @@ Streak:
   contraste e informação que não dependa somente de cor.
 - [ ] Validar teclado, mouse, resize, colagem, IME, layouts não US e leitores de
   tela nos terminais suportados.
-- [ ] Projetar recuperação acionável para banco corrompido, migration interrompida
+- [x] Projetar recuperação acionável para banco corrompido, migration interrompida
   e configuração inválida, sem exigir que o usuário encontre arquivos internos.
 - [ ] Definir canal de feedback, notas de versão, compatibilidade de dados e
   estratégia de atualização antes da primeira release pública.

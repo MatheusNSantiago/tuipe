@@ -2,6 +2,7 @@
 source: src/ui.rs
 expression: "render_statistics_at(50, 14)"
 ---
+  1 visão  2 progresso  3 histórico
   estatísticas
   42 testes totais  ·  12 comparáveis
   84 wpm  ·  96% precisão  ·  melhor 112
@@ -12,7 +13,6 @@ expression: "render_statistics_at(50, 14)"
 
   padrões que pedem treino
   mec acento agudo  5 palavras  falha 21%
-
 
 
   ↑↓ mover  enter detalhes  R zerar  esc voltar

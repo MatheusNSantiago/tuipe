@@ -7,7 +7,8 @@ mod repository;
 pub use config::{LoadedPreferences, Preferences, paths};
 pub use raw_events::{RawEvent, RawEventCodec, RawSessionEnd};
 pub use repository::{
-    MechanicObservationRecord, PersonalBaselineProfile, PriorityPattern, PriorityWord,
-    RebuildReport, Repository, SessionKind, SessionProvenance, SessionSummary, StatisticsOverview,
-    WordAttemptSummary, WordDetail, WordObservationRecord,
+    ActivityDay, MechanicObservationRecord, OpenedRepository, PersonalBaselineProfile,
+    PriorityPattern, PriorityWord, RebuildReport, Repository, SessionDetail, SessionHistoryItem,
+    SessionKind, SessionOutcome, SessionProvenance, SessionSummary, SessionWordDiagnostic,
+    StatisticsOverview, WordAttemptSummary, WordDetail, WordObservationRecord, WpmBucket,
 };

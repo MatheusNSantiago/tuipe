@@ -64,6 +64,7 @@ eles não são escolhas adicionais.
 | `backspace` | apagar o último caractere |
 | `ctrl+w` ou `ctrl+backspace` | apagar a palavra atual |
 | `ctrl+c` | cancelar o teste atual e voltar ao início |
+| `ctrl+s` | abrir as estatísticas antes de iniciar um teste |
 | `enter` | reiniciar ou abrir o próximo teste |
 | `esc` | abrir ou fechar as configurações |
 | `r` | repetir o mesmo teste após o resultado |
@@ -71,16 +72,22 @@ eles não são escolhas adicionais.
 | `f` | favoritar ou desfavoritar a citação após o resultado |
 | `q` | sair na tela de resultado ou nas configurações |
 
-Os atalhos `r`, `s` e `q` ficam bloqueados por 300 ms após o resultado para
+Os atalhos `r`, `s`, `f` e `q` ficam bloqueados por 300 ms após o resultado para
 evitar uma ação acidental causada pela última tecla do teste.
 
 ### Estatísticas e diagnóstico
 
-Na tela de estatísticas, `↑`/`↓` ou `j`/`k` percorrem as palavras prioritárias e
-`enter` abre o diagnóstico da palavra. O detalhe mostra a chance estimada no
-próximo treino adaptativo, falhas, correções, ritmo contra a base pessoal,
-tendência, recência, sequências relacionadas e tentativas recentes. Também é
-possível clicar diretamente numa palavra.
+As estatísticas possuem três páginas próprias. `1`, `2`, `3`, `tab` ou as setas
+laterais alternam entre visão geral, progresso e histórico. O progresso compara
+somente testes com a mesma configuração e mostra evolução, distribuição de WPM
+e atividade diária. O histórico pode ser filtrado com `f`; `↑`/`↓` ou `j`/`k`
+selecionam uma sessão e `enter` abre seu diagnóstico.
+
+Na visão geral, `↑`/`↓` ou `j`/`k` percorrem as palavras prioritárias e `enter`
+abre o diagnóstico da palavra. O detalhe mostra a chance estimada no próximo
+treino adaptativo, falhas, correções, ritmo contra a base pessoal, tendência,
+recência, sequências relacionadas e tentativas recentes. As páginas, palavras
+e sessões também podem ser abertas com o mouse.
 
 `r` no detalhe solicita o reset daquela palavra. `R` no panorama solicita o
 reset do modelo adaptativo inteiro. Ambos exigem confirmação e preservam
@@ -114,6 +121,10 @@ arquivos respeitam as variáveis XDG:
 O banco guarda sessões, eventos compactados e projeções do modelo adaptativo.
 Uma configuração inválida é isolada com o prefixo `config-corrompida-` e o
 aplicativo volta aos padrões sem destruir o arquivo problemático.
+Se o SQLite confirmar corrupção estrutural, o banco também é preservado com o
+prefixo `tuipe-corrompido-`, um banco novo é criado e a interface explica a
+recuperação. Erros de permissão, disco cheio e bancos de versões futuras nunca
+são tratados como corrupção nem substituídos automaticamente.
 
 Para validar a configuração, a estrutura do banco, a integridade do SQLite e
 todos os eventos compactados sem alterar dados:

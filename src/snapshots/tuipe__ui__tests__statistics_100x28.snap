@@ -2,7 +2,7 @@
 source: src/ui.rs
 expression: "render_statistics_at(100, 28)"
 ---
-     estatísticas  ·  nível 0  ·  streak 0 dias
+     estatísticas  1 visão geral  2 progresso  3 histórico  ·  nível 0  ·  sequência 0 dias
      wpm em avaliações  ·  12 testes mais recentes
       100│
          │                                      ⢀       ⡀       ⡀      ⢀       ⠄       ⠄      ⠠

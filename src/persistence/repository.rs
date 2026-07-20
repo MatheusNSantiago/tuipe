@@ -1,14 +1,16 @@
 use std::{
     collections::{BTreeMap, HashMap},
+    error::Error,
+    fmt,
     fs::{self, OpenOptions},
-    path::Path,
+    path::{Path, PathBuf},
 };
 
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
 use anyhow::{Context, Result};
-use chrono::{Datelike, Local};
+use chrono::{Datelike, Duration, Local, NaiveDate};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 
 use crate::adaptive::{
@@ -22,6 +24,22 @@ use crate::typing::{Metrics, TestConfig, TestStatus};
 pub struct Repository {
     connection: Connection,
 }
+
+pub struct OpenedRepository {
+    pub repository: Repository,
+    pub quarantined: Option<PathBuf>,
+}
+
+#[derive(Debug)]
+struct CorruptDatabase(String);
+
+impl fmt::Display for CorruptDatabase {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "banco SQLite corrompido: {}", self.0)
+    }
+}
+
+impl Error for CorruptDatabase {}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SessionProvenance {
@@ -70,11 +88,72 @@ pub struct StatisticsOverview {
     pub average_accuracy: f64,
     pub best_wpm: f64,
     pub recent_tests: Vec<SessionSummary>,
+    pub history: Vec<SessionHistoryItem>,
+    pub distribution: Vec<WpmBucket>,
+    pub daily_activity: Vec<ActivityDay>,
     pub priority_words: Vec<PriorityWord>,
     pub priority_patterns: Vec<PriorityPattern>,
     pub total_xp: u64,
     pub level: u64,
     pub streak: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionOutcome {
+    Completed,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SessionHistoryItem {
+    pub id: u64,
+    pub created_at_unix_s: i64,
+    pub outcome: SessionOutcome,
+    pub elapsed_ms: u64,
+    pub wpm: f64,
+    pub accuracy: f64,
+    pub raw_wpm: f64,
+    pub correct_chars: u32,
+    pub incorrect_chars: u32,
+    pub extra_chars: u32,
+    pub missed_chars: u32,
+    pub config: TestConfig,
+    pub kind: SessionKind,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SessionWordDiagnostic {
+    pub word: String,
+    pub confirmed_error: bool,
+    pub corrected: bool,
+    pub latency_ratio: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SessionDetail {
+    pub session: SessionHistoryItem,
+    pub stimuli: Vec<String>,
+    pub observed_words: u32,
+    pub clean_words: u32,
+    pub corrected_words: u32,
+    pub failed_words: u32,
+    pub slow_words: u32,
+    pub challenges: Vec<SessionWordDiagnostic>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct WpmBucket {
+    pub start: u32,
+    pub end: u32,
+    pub count: u32,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ActivityDay {
+    pub date: NaiveDate,
+    pub tests: u32,
+    pub active_ms: u64,
+    pub average_wpm: f64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -293,6 +372,11 @@ impl Repository {
             create_private_file(path)?;
         }
         let connection = Connection::open(path)?;
+        let quick_check =
+            connection.query_row("PRAGMA quick_check(1)", [], |row| row.get::<_, String>(0))?;
+        if quick_check != "ok" {
+            return Err(CorruptDatabase(quick_check).into());
+        }
         validate_schema_version(&connection)?;
         if !new_database {
             restrict_file(path)?;
@@ -302,6 +386,26 @@ impl Repository {
         connection.pragma_update(None, "foreign_keys", "ON")?;
         migrate(&connection)?;
         Ok(Self { connection })
+    }
+
+    /// Preserva um banco comprovadamente corrompido e reabre com armazenamento
+    /// vazio. Erros de permissão, disco e versão futura continuam sendo
+    /// devolvidos, pois substituir o arquivo nesses casos esconderia a causa.
+    pub fn open_recovering(path: &Path) -> Result<OpenedRepository> {
+        match Self::open(path) {
+            Ok(repository) => Ok(OpenedRepository {
+                repository,
+                quarantined: None,
+            }),
+            Err(error) if is_database_corruption(&error) => {
+                let quarantine = quarantine_database(path)?;
+                Ok(OpenedRepository {
+                    repository: Self::open(path)?,
+                    quarantined: Some(quarantine),
+                })
+            }
+            Err(error) => Err(error),
+        }
     }
 
     pub fn save_session(
@@ -1060,10 +1164,22 @@ impl Repository {
     }
 
     pub fn statistics_overview(&self) -> Result<StatisticsOverview> {
+        self.statistics_overview_for(&TestConfig::default())
+    }
+
+    /// Calcula velocidade, precisão, recorde e evolução apenas entre sessões
+    /// com a mesma configuração. Misturar duração, modo ou dificuldade cria
+    /// uma tendência enganosa e não ajuda a avaliar progresso real.
+    pub fn statistics_overview_for(
+        &self,
+        comparable_config: &TestConfig,
+    ) -> Result<StatisticsOverview> {
+        let config_toml = toml::to_string(comparable_config)?;
         let assessment_count = self.connection.query_row(
             "SELECT COUNT(*) FROM sessions
-             WHERE terminal_state = 'completed' AND session_kind = 'assessment'",
-            [],
+             WHERE terminal_state = 'completed' AND session_kind = 'assessment'
+               AND config_toml = ?1",
+            [&config_toml],
             |row| row.get::<_, u64>(0),
         )?;
         let assessments_only = assessment_count >= 2;
@@ -1071,12 +1187,12 @@ impl Repository {
             "SELECT
                 COUNT(*),
                 COALESCE(SUM(elapsed_ms), 0),
-                COALESCE(AVG(CASE WHEN ?1 = 0 OR session_kind = 'assessment' THEN wpm END), 0),
-                COALESCE(AVG(CASE WHEN ?1 = 0 OR session_kind = 'assessment' THEN accuracy END), 0),
-                COALESCE(MAX(CASE WHEN ?1 = 0 OR session_kind = 'assessment' THEN wpm END), 0)
+                COALESCE(AVG(CASE WHEN config_toml = ?1 AND (?2 = 0 OR session_kind = 'assessment') THEN wpm END), 0),
+                COALESCE(AVG(CASE WHEN config_toml = ?1 AND (?2 = 0 OR session_kind = 'assessment') THEN accuracy END), 0),
+                COALESCE(MAX(CASE WHEN config_toml = ?1 AND (?2 = 0 OR session_kind = 'assessment') THEN wpm END), 0)
              FROM sessions
              WHERE terminal_state = 'completed'",
-            [assessments_only],
+            params![config_toml, assessments_only],
             |row| {
                 Ok(StatisticsOverview {
                     completed_tests: row.get(0)?,
@@ -1086,6 +1202,9 @@ impl Repository {
                     average_accuracy: row.get(3)?,
                     best_wpm: row.get(4)?,
                     recent_tests: Vec::new(),
+                    history: Vec::new(),
+                    distribution: Vec::new(),
+                    daily_activity: Vec::new(),
                     priority_words: Vec::new(),
                     priority_patterns: Vec::new(),
                     total_xp: 0,
@@ -1094,22 +1213,25 @@ impl Repository {
                 })
             },
         )?;
-        overview.comparable_tests = if assessments_only {
-            assessment_count
-        } else {
-            overview.completed_tests
-        };
+        overview.comparable_tests = self.connection.query_row(
+            "SELECT COUNT(*) FROM sessions
+             WHERE terminal_state = 'completed' AND config_toml = ?1
+               AND (?2 = 0 OR session_kind = 'assessment')",
+            params![config_toml, assessments_only],
+            |row| row.get(0),
+        )?;
         let mut statement = self.connection.prepare(
             "SELECT id, elapsed_ms, wpm, accuracy, raw_wpm, correct_chars,
                     incorrect_chars, extra_chars, config_toml, session_kind
              FROM sessions
              WHERE terminal_state = 'completed'
-               AND (?1 = 0 OR session_kind = 'assessment')
+               AND config_toml = ?1
+               AND (?2 = 0 OR session_kind = 'assessment')
              ORDER BY id DESC
              LIMIT 12",
         )?;
         overview.recent_tests = statement
-            .query_map([assessments_only], |row| {
+            .query_map(params![config_toml, assessments_only], |row| {
                 Ok(SessionSummary {
                     id: row.get::<_, i64>(0)? as u64,
                     elapsed_ms: row.get::<_, i64>(1)? as u64,
@@ -1131,6 +1253,9 @@ impl Repository {
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         overview.recent_tests.reverse();
+        overview.history = self.session_history(50)?;
+        overview.distribution = self.wpm_distribution(&config_toml, assessments_only)?;
+        overview.daily_activity = self.daily_activity(14)?;
         overview.priority_words = self.priority_words()?;
         overview.priority_patterns = self.priority_patterns()?;
         let (xp, streak) = self.progress()?;
@@ -1138,6 +1263,185 @@ impl Repository {
         overview.level = crate::gamification::level_from_total_xp(xp.total);
         overview.streak = streak.current;
         Ok(overview)
+    }
+
+    /// Retorna tentativas recentes que representam um resultado observável.
+    /// Reinícios voluntários ficam na fonte bruta, mas não poluem o histórico.
+    pub fn session_history(&self, limit: usize) -> Result<Vec<SessionHistoryItem>> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, unixepoch(created_at), terminal_state, elapsed_ms, wpm,
+                    accuracy, raw_wpm, correct_chars, incorrect_chars, extra_chars,
+                    missed_chars, config_toml, session_kind
+             FROM sessions
+             WHERE terminal_state IN ('completed', 'failed')
+             ORDER BY id DESC
+             LIMIT ?1",
+        )?;
+        Ok(statement
+            .query_map([limit as i64], session_history_from_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn session_detail(&self, id: u64) -> Result<Option<SessionDetail>> {
+        let session = self
+            .connection
+            .query_row(
+                "SELECT id, unixepoch(created_at), terminal_state, elapsed_ms, wpm,
+                        accuracy, raw_wpm, correct_chars, incorrect_chars, extra_chars,
+                        missed_chars, config_toml, session_kind
+                 FROM sessions
+                 WHERE id = ?1 AND terminal_state IN ('completed', 'failed')",
+                [id],
+                session_history_from_row,
+            )
+            .optional()?;
+        let Some(session) = session else {
+            return Ok(None);
+        };
+        let stimuli = self.connection.query_row(
+            "SELECT stimuli_json FROM sessions WHERE id = ?1",
+            [id],
+            |row| {
+                let json = row.get::<_, String>(0)?;
+                serde_json::from_str(&json).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        0,
+                        rusqlite::types::Type::Text,
+                        Box::new(error),
+                    )
+                })
+            },
+        )?;
+        let (observed_words, clean_words, corrected_words, failed_words, slow_words) =
+            self.connection.query_row(
+                "SELECT COUNT(*),
+                        COALESCE(SUM(confirmed_error = 0 AND corrections = 0), 0),
+                        COALESCE(SUM(confirmed_error = 0 AND corrections > 0), 0),
+                        COALESCE(SUM(confirmed_error = 1), 0),
+                        COALESCE(SUM(slow = 1), 0)
+                 FROM word_observations WHERE session_id = ?1",
+                [id],
+                |row| {
+                    Ok((
+                        row.get::<_, u32>(0)?,
+                        row.get::<_, u32>(1)?,
+                        row.get::<_, u32>(2)?,
+                        row.get::<_, u32>(3)?,
+                        row.get::<_, u32>(4)?,
+                    ))
+                },
+            )?;
+        let mut statement = self.connection.prepare(
+            "SELECT word, confirmed_error, corrections > 0, latency_ratio
+             FROM word_observations
+             WHERE session_id = ?1
+               AND (confirmed_error = 1 OR corrections > 0 OR slow = 1)
+             ORDER BY confirmed_error DESC, corrections DESC,
+                      COALESCE(latency_ratio, 0) DESC, id
+             LIMIT 8",
+        )?;
+        let challenges = statement
+            .query_map([id], |row| {
+                Ok(SessionWordDiagnostic {
+                    word: row.get(0)?,
+                    confirmed_error: row.get(1)?,
+                    corrected: row.get(2)?,
+                    latency_ratio: row.get(3)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(Some(SessionDetail {
+            session,
+            stimuli,
+            observed_words,
+            clean_words,
+            corrected_words,
+            failed_words,
+            slow_words,
+            challenges,
+        }))
+    }
+
+    fn wpm_distribution(
+        &self,
+        config_toml: &str,
+        assessments_only: bool,
+    ) -> Result<Vec<WpmBucket>> {
+        let mut statement = self.connection.prepare(
+            "SELECT wpm FROM sessions
+             WHERE terminal_state = 'completed'
+               AND config_toml = ?1
+               AND (?2 = 0 OR session_kind = 'assessment')
+             ORDER BY wpm",
+        )?;
+        let values = statement
+            .query_map(params![config_toml, assessments_only], |row| {
+                row.get::<_, f64>(0)
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        if values.is_empty() {
+            return Ok(Vec::new());
+        }
+        let maximum = values.iter().copied().fold(0.0, f64::max).ceil() as u32;
+        let step = if maximum <= 80 { 10 } else { 20 };
+        let bucket_count = (maximum / step + 1).clamp(1, 10) as usize;
+        let mut buckets = (0..bucket_count)
+            .map(|index| WpmBucket {
+                start: index as u32 * step,
+                end: (index as u32 + 1) * step,
+                count: 0,
+            })
+            .collect::<Vec<_>>();
+        for value in values {
+            let index = ((value.max(0.0) as u32) / step) as usize;
+            let last = buckets.len() - 1;
+            buckets[index.min(last)].count += 1;
+        }
+        Ok(buckets)
+    }
+
+    fn daily_activity(&self, days: usize) -> Result<Vec<ActivityDay>> {
+        let today = Local::now().date_naive();
+        let first = today - Duration::days(days.saturating_sub(1) as i64);
+        let mut statement = self.connection.prepare(
+            "SELECT date(created_at, 'localtime'), COUNT(*), SUM(elapsed_ms), AVG(wpm)
+             FROM sessions
+             WHERE terminal_state = 'completed'
+               AND date(created_at, 'localtime') >= ?1
+             GROUP BY date(created_at, 'localtime')",
+        )?;
+        let mut observed = statement
+            .query_map([first.to_string()], |row| {
+                let date = NaiveDate::parse_from_str(&row.get::<_, String>(0)?, "%Y-%m-%d")
+                    .map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            0,
+                            rusqlite::types::Type::Text,
+                            Box::new(error),
+                        )
+                    })?;
+                Ok((
+                    date,
+                    ActivityDay {
+                        date,
+                        tests: row.get(1)?,
+                        active_ms: row.get::<_, i64>(2)? as u64,
+                        average_wpm: row.get(3)?,
+                    },
+                ))
+            })?
+            .collect::<rusqlite::Result<BTreeMap<_, _>>>()?;
+        Ok((0..days)
+            .map(|offset| {
+                let date = first + Duration::days(offset as i64);
+                observed.remove(&date).unwrap_or(ActivityDay {
+                    date,
+                    tests: 0,
+                    active_ms: 0,
+                    average_wpm: 0.0,
+                })
+            })
+            .collect())
     }
 
     fn priority_words(&self) -> Result<Vec<PriorityWord>> {
@@ -1362,6 +1666,39 @@ impl Repository {
             })
             .collect())
     }
+}
+
+fn session_history_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionHistoryItem> {
+    let state = row.get::<_, String>(2)?;
+    let outcome = match state.as_str() {
+        "completed" => SessionOutcome::Completed,
+        "failed" => SessionOutcome::Failed,
+        _ => {
+            return Err(rusqlite::Error::FromSqlConversionFailure(
+                2,
+                rusqlite::types::Type::Text,
+                format!("estado terminal inesperado: {state}").into(),
+            ));
+        }
+    };
+    let config = toml::from_str(&row.get::<_, String>(11)?).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(11, rusqlite::types::Type::Text, Box::new(error))
+    })?;
+    Ok(SessionHistoryItem {
+        id: row.get::<_, i64>(0)? as u64,
+        created_at_unix_s: row.get(1)?,
+        outcome,
+        elapsed_ms: row.get::<_, i64>(3)? as u64,
+        wpm: row.get(4)?,
+        accuracy: row.get(5)?,
+        raw_wpm: row.get(6)?,
+        correct_chars: row.get::<_, i64>(7)? as u32,
+        incorrect_chars: row.get::<_, i64>(8)? as u32,
+        extra_chars: row.get::<_, i64>(9)? as u32,
+        missed_chars: row.get::<_, i64>(10)? as u32,
+        config,
+        kind: session_kind_from_db(&row.get::<_, String>(12)?),
+    })
 }
 
 fn pattern_diagnostic(
@@ -1628,6 +1965,54 @@ fn migrate(connection: &Connection) -> Result<()> {
     Ok(())
 }
 
+fn is_database_corruption(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        if cause.is::<CorruptDatabase>() {
+            return true;
+        }
+        let Some(error) = cause.downcast_ref::<rusqlite::Error>() else {
+            return false;
+        };
+        matches!(
+            error,
+            rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error {
+                    code: rusqlite::ffi::ErrorCode::DatabaseCorrupt
+                        | rusqlite::ffi::ErrorCode::NotADatabase,
+                    ..
+                },
+                _
+            )
+        )
+    })
+}
+
+fn quarantine_database(path: &Path) -> Result<PathBuf> {
+    let parent = path
+        .parent()
+        .context("o caminho do banco deve ter um diretório pai")?;
+    let stem = path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("tuipe");
+    let quarantine = parent.join(format!(
+        "{stem}-corrompido-{}.db",
+        chrono::Utc::now().timestamp_millis()
+    ));
+    fs::rename(path, &quarantine)?;
+    restrict_file(&quarantine)?;
+    for suffix in ["-wal", "-shm"] {
+        let source = PathBuf::from(format!("{}{suffix}", path.display()));
+        if source.exists() {
+            let destination = PathBuf::from(format!("{}{suffix}", quarantine.display()));
+            fs::rename(source, destination)?;
+        }
+    }
+    #[cfg(unix)]
+    fs::File::open(parent)?.sync_all()?;
+    Ok(quarantine)
+}
+
 fn create_private_file(path: &Path) -> Result<()> {
     let mut options = OpenOptions::new();
     options.create(true).append(true);
@@ -1758,6 +2143,55 @@ mod tests {
                 )
                 .unwrap(),
             1
+        );
+    }
+
+    #[test]
+    fn banco_corrompido_e_preservado_e_substituido_sem_perder_o_arquivo() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("history.db");
+        fs::write(&path, b"nao e um banco sqlite").unwrap();
+
+        let opened = Repository::open_recovering(&path).unwrap();
+        let quarantine = opened.quarantined.unwrap();
+
+        assert!(quarantine.exists());
+        assert_eq!(fs::read(quarantine).unwrap(), b"nao e um banco sqlite");
+        assert!(path.exists());
+        assert_eq!(
+            opened
+                .repository
+                .statistics_overview()
+                .unwrap()
+                .completed_tests,
+            0
+        );
+    }
+
+    #[test]
+    fn versao_futura_nao_e_confundida_com_corrupcao() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("history.db");
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE schema_version (version INTEGER NOT NULL);
+                 INSERT INTO schema_version VALUES (999);",
+            )
+            .unwrap();
+        drop(connection);
+
+        let error = Repository::open_recovering(&path).err().unwrap();
+
+        assert!(error.to_string().contains("versão mais nova"));
+        assert!(path.exists());
+        assert_eq!(
+            fs::read_dir(temporary.path())
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_name().to_string_lossy().contains("corrompido"))
+                .count(),
+            0
         );
     }
 
@@ -1896,34 +2330,132 @@ mod tests {
             )
             .unwrap();
 
+        let overview = repository.statistics_overview().unwrap();
+        assert_eq!(overview.completed_tests, 1);
+        assert_eq!(overview.comparable_tests, 1);
+        assert_eq!(overview.active_ms, 12_000);
+        assert_eq!(overview.average_wpm, 80.0);
+        assert_eq!(overview.average_accuracy, 95.0);
+        assert_eq!(overview.best_wpm, 80.0);
         assert_eq!(
-            repository.statistics_overview().unwrap(),
-            StatisticsOverview {
-                completed_tests: 1,
-                comparable_tests: 1,
-                active_ms: 12_000,
-                average_wpm: 80.0,
-                average_accuracy: 95.0,
-                best_wpm: 80.0,
-                recent_tests: vec![SessionSummary {
-                    id: 1,
-                    elapsed_ms: 12_000,
-                    wpm: 80.0,
-                    accuracy: 95.0,
-                    raw_wpm: 0.0,
-                    correct_chars: 0,
-                    incorrect_chars: 0,
-                    extra_chars: 0,
-                    config: TestConfig::default(),
-                    kind: SessionKind::Practice,
-                }],
-                priority_words: Vec::new(),
-                priority_patterns: Vec::new(),
-                total_xp: 27,
-                level: 1,
-                streak: 1,
-            }
+            overview.recent_tests,
+            vec![SessionSummary {
+                id: 1,
+                elapsed_ms: 12_000,
+                wpm: 80.0,
+                accuracy: 95.0,
+                raw_wpm: 0.0,
+                correct_chars: 0,
+                incorrect_chars: 0,
+                extra_chars: 0,
+                config: TestConfig::default(),
+                kind: SessionKind::Practice,
+            }]
         );
+        assert_eq!(overview.history.len(), 2);
+        assert_eq!(overview.history[0].outcome, SessionOutcome::Failed);
+        assert_eq!(overview.history[1].outcome, SessionOutcome::Completed);
+        assert_eq!(overview.distribution.len(), 9);
+        assert_eq!(overview.distribution[8].count, 1);
+        assert_eq!(overview.daily_activity.len(), 14);
+        assert_eq!(overview.priority_words, Vec::new());
+        assert_eq!(overview.priority_patterns, Vec::new());
+        assert_eq!(overview.total_xp, 27);
+        assert_eq!(overview.level, 1);
+        assert_eq!(overview.streak, 1);
+    }
+
+    #[test]
+    fn progresso_compara_apenas_configuracoes_identicas() {
+        let temporary = tempfile::tempdir().unwrap();
+        let repository = Repository::open(&temporary.path().join("history.db")).unwrap();
+        let reference = TestConfig::default();
+        let mut other = reference.clone();
+        other.mode = crate::typing::TestMode::Words { count: 50 };
+        repository
+            .save_session(
+                &reference,
+                &TestStatus::Completed { ended_at_ms: 1 },
+                Metrics {
+                    wpm: 70.0,
+                    accuracy: 95.0,
+                    ..Metrics::default()
+                },
+            )
+            .unwrap();
+        repository
+            .save_session(
+                &other,
+                &TestStatus::Completed { ended_at_ms: 1 },
+                Metrics {
+                    wpm: 140.0,
+                    accuracy: 80.0,
+                    ..Metrics::default()
+                },
+            )
+            .unwrap();
+
+        let overview = repository.statistics_overview_for(&reference).unwrap();
+        assert_eq!(overview.completed_tests, 2);
+        assert_eq!(overview.comparable_tests, 1);
+        assert_eq!(overview.average_wpm, 70.0);
+        assert_eq!(overview.average_accuracy, 95.0);
+        assert_eq!(overview.recent_tests.len(), 1);
+        assert_eq!(overview.recent_tests[0].wpm, 70.0);
+    }
+
+    #[test]
+    fn detalhe_da_sessao_resume_sinais_sem_reprocessar_eventos() {
+        let temporary = tempfile::tempdir().unwrap();
+        let repository = Repository::open(&temporary.path().join("history.db")).unwrap();
+        let observation = WordObservationRecord {
+            language: "portuguese".into(),
+            word: "através".into(),
+            confirmed_error: false,
+            corrections: 1,
+            active_ms: 900,
+            afk_ms: 0,
+            planning_ms: 100,
+            fluent_ms: 500,
+            correction_ms: 300,
+            input_events: 8,
+            corrective_events: 1,
+            censored: false,
+            grapheme_count: 7,
+            fast_success: false,
+            slow: true,
+            latency_ratio: Some(1.6),
+            evidence_weight: 1.0,
+            selection_source: None,
+            selection_propensity: None,
+            mechanics: Vec::new(),
+        };
+        let id = repository
+            .save_session_with_provenance(
+                &TestConfig::default(),
+                &TestStatus::Completed { ended_at_ms: 900 },
+                Metrics {
+                    duration_ms: 900,
+                    wpm: 80.0,
+                    accuracy: 96.0,
+                    ..Metrics::default()
+                },
+                &[observation],
+                &[],
+                &SessionProvenance {
+                    stimuli: vec!["através".into()],
+                    ..SessionProvenance::default()
+                },
+            )
+            .unwrap();
+
+        let detail = repository.session_detail(id as u64).unwrap().unwrap();
+        assert_eq!(detail.stimuli, vec!["através"]);
+        assert_eq!(detail.observed_words, 1);
+        assert_eq!(detail.corrected_words, 1);
+        assert_eq!(detail.slow_words, 1);
+        assert_eq!(detail.challenges[0].word, "através");
+        assert_eq!(detail.challenges[0].latency_ratio, Some(1.6));
     }
 
     #[test]
