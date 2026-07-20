@@ -16,13 +16,15 @@ os dados existentes.
 - banco SQLite privado, eventos compactados, backup, diagnóstico e reconstrução;
 - rollback reversível da política adaptativa para um modo uniforme seguro;
 - shadow mode que registra decisões candidatas sem alterar o teste apresentado;
+- leitura retrocompatível dos estados adaptativos gravados antes da separação
+  explícita de lentidão;
 - atalhos configuráveis, mouse, terminais compactos e recuperação segura do
   terminal em saída, erro e sinais do sistema.
 
 ### Validado
 
 - paridade visual dos fluxos de 30 segundos, 50 palavras e citação;
-- 140 testes automatizados em unidade, integração e pseudo-terminal;
+- 142 testes automatizados em unidade, integração e pseudo-terminal;
 - pacote Cargo reproduzível e binário Linux otimizado para glibc 2.29 ou mais
   recente, distribuído com licença e proveniência dos conteúdos;
 - latência p99 abaixo de 1 ms para tecla e resize na máquina de validação.

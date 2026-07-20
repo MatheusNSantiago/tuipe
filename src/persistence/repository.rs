@@ -376,6 +376,19 @@ impl Repository {
                 usize::try_from(size).context("tamanho negativo nos eventos brutos persistidos")?;
             RawEventCodec::decode(version, size, &blob)?;
         }
+        let mut statement = connection.prepare("SELECT language, word, state FROM word_skill")?;
+        let mut rows = statement.query([])?;
+        while let Some(row) = rows.next()? {
+            let language = row.get::<_, String>(0)?;
+            let word = row.get::<_, String>(1)?;
+            let state = row.get::<_, Vec<u8>>(2)?;
+            WordSkill::decode(&state)
+                .with_context(|| format!("decodificar habilidade de {language}/{word}"))?;
+        }
+        drop(rows);
+        drop(statement);
+        let _: XpState = load_state_from(&connection, "xp_state")?;
+        let _: StreakState = load_state_from(&connection, "streak_state")?;
         if table_has_column(&connection, "sessions", "stimuli_json")?
             && table_has_column(&connection, "sessions", "selections_json")?
         {
@@ -1323,7 +1336,7 @@ impl Repository {
                 let encoded = row.get::<_, Vec<u8>>(2)?;
                 let skill = WordSkill::decode(&encoded).map_err(|error| {
                     rusqlite::Error::FromSqlConversionFailure(
-                        encoded.len(),
+                        2,
                         rusqlite::types::Type::Blob,
                         Box::new(error),
                     )
@@ -1342,7 +1355,7 @@ impl Repository {
                 let encoded = row.get::<_, Vec<u8>>(2)?;
                 let skill = WordSkill::decode(&encoded).map_err(|error| {
                     rusqlite::Error::FromSqlConversionFailure(
-                        encoded.len(),
+                        2,
                         rusqlite::types::Type::Blob,
                         Box::new(error),
                     )
@@ -3173,6 +3186,28 @@ mod tests {
                 .to_string()
                 .contains("não corresponde ao texto")
         );
+    }
+
+    #[test]
+    fn banco_real_legado_com_habilidade_de_25_bytes_abre_e_passa_no_doctor() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("habilidade-legada.db");
+        let repository = Repository::open(&path).unwrap();
+        let state = postcard::to_allocvec(&(0.0_f64, 0.0_f64, 1.0_f64, 1_u32)).unwrap();
+        assert_eq!(state.len(), 25);
+        repository
+            .connection
+            .execute(
+                "INSERT INTO word_skill (language, word, state) VALUES ('portuguese', 'a', ?1)",
+                [state],
+            )
+            .unwrap();
+
+        let skills = repository.load_all_word_skills().unwrap();
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].2.fast_successes, 1.0);
+        drop(repository);
+        Repository::doctor(&path).unwrap();
     }
 
     #[test]
