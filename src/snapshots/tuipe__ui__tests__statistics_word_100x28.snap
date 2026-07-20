@@ -1,0 +1,32 @@
+---
+source: src/ui.rs
+expression: rendered
+---
+     detalhes da palavra  ·  através  ·  português
+     18.0% de chance estimada no próximo treino adaptativo
+     falhas                 correções              exposições             amostras
+     30%                    20%                    10                     12
+
+
+     diagnóstico                                  tentativas recentes
+     ritmo 120 ms/caractere  ·  +33% vs base      #42    falhou    140 ms/caractere
+     tendência ainda incerta                      #41    corrigiu  110 ms/caractere
+     última prática há 2 h
+
+     sequências relacionadas
+     av  ·  tra
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+     r zerar palavra   enter ou esc voltar

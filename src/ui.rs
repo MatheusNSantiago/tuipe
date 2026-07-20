@@ -18,7 +18,9 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::{
     content::Theme,
-    persistence::{PriorityPattern, PriorityWord, SessionKind, SessionSummary, StatisticsOverview},
+    persistence::{
+        PriorityPattern, PriorityWord, SessionKind, SessionSummary, StatisticsOverview, WordDetail,
+    },
     typing::{Difficulty, Metrics, QuoteLength, TestEngine, TestMode, TestStatus},
 };
 
@@ -146,6 +148,18 @@ pub struct RenderState<'a> {
     pub focus_warning: bool,
 }
 
+#[derive(Clone, Copy)]
+pub struct StatisticsRenderState<'a> {
+    pub selected_word: usize,
+    pub word_detail: Option<&'a WordDetail>,
+}
+
+#[derive(Clone, Copy)]
+pub enum ResetConfirmation<'a> {
+    Word(&'a str),
+    Model,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SettingsAction {
     TogglePunctuation,
@@ -183,7 +197,12 @@ pub fn render(frame: &mut Frame, engine: &TestEngine, theme: &Theme, state: Rend
     );
 }
 
-pub fn render_statistics(frame: &mut Frame, statistics: &StatisticsOverview, theme: &Theme) {
+pub fn render_statistics(
+    frame: &mut Frame,
+    statistics: &StatisticsOverview,
+    state: StatisticsRenderState<'_>,
+    theme: &Theme,
+) {
     let viewport = frame.area();
     frame.render_widget(Clear, viewport);
     frame.render_widget(
@@ -195,6 +214,10 @@ pub fn render_statistics(frame: &mut Frame, statistics: &StatisticsOverview, the
         return;
     }
     let content = page_content(viewport);
+    if let Some(detail) = state.word_detail {
+        render_word_detail(frame, content, detail, theme);
+        return;
+    }
     if statistics.completed_tests == 0 {
         frame.render_widget(
             Paragraph::new(vec![
@@ -227,7 +250,7 @@ pub fn render_statistics(frame: &mut Frame, statistics: &StatisticsOverview, the
         return;
     }
     if viewport.width < 80 || viewport.height < 24 {
-        render_statistics_compact(frame, content, statistics, theme);
+        render_statistics_compact(frame, content, statistics, state.selected_word, theme);
         return;
     }
 
@@ -260,19 +283,417 @@ pub fn render_statistics(frame: &mut Frame, statistics: &StatisticsOverview, the
     let details = Layout::horizontal([Constraint::Percentage(58), Constraint::Percentage(42)])
         .spacing(1)
         .split(sections[3]);
-    render_priority_words(frame, details[0], &statistics.priority_words, theme);
+    render_priority_words(
+        frame,
+        details[0],
+        &statistics.priority_words,
+        state.selected_word,
+        theme,
+    );
     render_priority_patterns(frame, details[1], &statistics.priority_patterns, theme);
     frame.render_widget(
-        Paragraph::new("esc voltar")
+        Paragraph::new("↑↓ selecionar   enter detalhes   R zerar modelo   esc voltar")
             .style(Style::default().fg(theme_color(theme, &theme.sub, 2.0))),
         sections[4],
     );
+}
+
+pub fn render_reset_confirmation(
+    frame: &mut Frame,
+    confirmation: ResetConfirmation<'_>,
+    theme: &Theme,
+) {
+    let viewport = frame.area();
+    for y in viewport.y..viewport.bottom() {
+        for x in viewport.x..viewport.right() {
+            let style = frame.buffer_mut()[(x, y)].style();
+            frame.buffer_mut()[(x, y)].set_style(style.add_modifier(Modifier::DIM));
+        }
+    }
+    let area = centered_width(centered_height(viewport, 7), 58);
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(theme_color(theme, &theme.error, 3.0)))
+            .style(Style::default().bg(color(&theme.bg))),
+        area,
+    );
+    let (title, target) = match confirmation {
+        ResetConfirmation::Word(word) => ("zerar aprendizado da palavra?", word),
+        ResetConfirmation::Model => ("zerar todo o aprendizado adaptativo?", "modelo inteiro"),
+    };
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::styled(
+                title,
+                Style::default()
+                    .fg(theme_color(theme, &theme.text, 4.5))
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Line::styled(
+                target.to_owned(),
+                Style::default().fg(theme_color(theme, &theme.error, 3.0)),
+            ),
+            Line::styled(
+                "sessões, métricas, XP e streak serão preservados",
+                Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
+            ),
+            Line::from(""),
+            key_hints(&[("s", "confirmar"), ("n", "cancelar")], theme),
+        ])
+        .alignment(Alignment::Center),
+        Rect::new(
+            area.x.saturating_add(1),
+            area.y.saturating_add(1),
+            area.width.saturating_sub(2),
+            area.height.saturating_sub(2),
+        ),
+    );
+}
+
+pub fn statistics_word_at(
+    viewport: Rect,
+    statistics: &StatisticsOverview,
+    position: Position,
+) -> Option<usize> {
+    if viewport.width < 50 || viewport.height < 14 || statistics.priority_words.is_empty() {
+        return None;
+    }
+    let content = page_content(viewport);
+    if viewport.width < 80 || viewport.height < 24 {
+        let first_row = content.y.saturating_add(6);
+        let index = usize::from(position.y.saturating_sub(first_row));
+        return (position.y >= first_row
+            && position.x >= content.x
+            && position.x < content.right()
+            && index < statistics.priority_words.len().min(compact_diagnostic_limit(content.height)))
+        .then_some(index);
+    }
+    let sections = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(11.min(content.height.saturating_sub(9))),
+        Constraint::Length(3),
+        Constraint::Min(7),
+        Constraint::Length(1),
+    ])
+    .split(content);
+    let details = Layout::horizontal([Constraint::Percentage(58), Constraint::Percentage(42)])
+        .spacing(1)
+        .split(sections[3]);
+    let first_row = details[0].y.saturating_add(2);
+    let index = usize::from(position.y.saturating_sub(first_row));
+    (position.y >= first_row
+        && position.x >= details[0].x
+        && position.x < details[0].right()
+        && index < statistics.priority_words.len())
+    .then_some(index)
+}
+
+fn render_word_detail(frame: &mut Frame, area: Rect, detail: &WordDetail, theme: &Theme) {
+    let priority = &detail.priority;
+    let compact = area.width < 80 || area.height < 22;
+    if compact {
+        let mut lines = vec![
+            Line::from(vec![
+                Span::styled(
+                    "palavra  ",
+                    Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
+                ),
+                Span::styled(
+                    priority.word.clone(),
+                    Style::default()
+                        .fg(theme_color(theme, &theme.text, 4.5))
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]),
+            Line::styled(
+                format!(
+                    "{:.1}% de chance no próximo treino adaptativo",
+                    priority.estimated_session_chance * 100.0
+                ),
+                Style::default().fg(theme_color(theme, &theme.main, 3.0)),
+            ),
+            Line::styled(
+                format!(
+                    "falhas {:.0}%  ·  correções {:.0}%  ·  {:.0} exposições",
+                    priority.uncorrected_error_rate * 100.0,
+                    priority.corrected_error_rate * 100.0,
+                    priority.effective_exposures
+                ),
+                Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
+            ),
+            word_speed_line(detail, theme),
+            word_trend_line(detail, theme),
+            Line::styled(
+                format!(
+                    "última prática {}",
+                    format_last_seen(detail.last_seen_unix_s)
+                ),
+                Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
+            ),
+            Line::from(""),
+            Line::styled(
+                "tentativas recentes",
+                Style::default().fg(theme_color(theme, &theme.text, 4.5)),
+            ),
+        ];
+        lines.extend(
+            detail
+                .recent_attempts
+                .iter()
+                .take(area.height.saturating_sub(10) as usize)
+                .map(|attempt| word_attempt_line(attempt, theme)),
+        );
+        while lines.len() < area.height.saturating_sub(1) as usize {
+            lines.push(Line::from(""));
+        }
+        lines.truncate(area.height.saturating_sub(1) as usize);
+        lines.push(Line::styled(
+            "r zerar palavra   enter ou esc voltar",
+            Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
+        ));
+        frame.render_widget(Paragraph::new(lines), area);
+        return;
+    }
+
+    let sections = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(3),
+        Constraint::Length(1),
+        Constraint::Min(8),
+        Constraint::Length(1),
+    ])
+    .split(area);
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                "detalhes da palavra  ·  ",
+                Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
+            ),
+            Span::styled(
+                priority.word.clone(),
+                Style::default()
+                    .fg(theme_color(theme, &theme.text, 4.5))
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("  ·  {}", language_name(&priority.language)),
+                Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
+            ),
+        ])),
+        sections[0],
+    );
+    frame.render_widget(
+        Paragraph::new(format!(
+            "{:.1}% de chance estimada no próximo treino adaptativo",
+            priority.estimated_session_chance * 100.0
+        ))
+        .style(Style::default().fg(theme_color(theme, &theme.main, 3.0))),
+        sections[1],
+    );
+    let metrics = [
+        (
+            "falhas",
+            format!("{:.0}%", priority.uncorrected_error_rate * 100.0),
+        ),
+        (
+            "correções",
+            format!("{:.0}%", priority.corrected_error_rate * 100.0),
+        ),
+        ("exposições", format!("{:.0}", priority.effective_exposures)),
+        ("amostras", priority.observations.to_string()),
+    ];
+    for (metric_area, (label, value)) in Layout::horizontal([
+        Constraint::Ratio(1, 4),
+        Constraint::Ratio(1, 4),
+        Constraint::Ratio(1, 4),
+        Constraint::Ratio(1, 4),
+    ])
+    .spacing(2)
+    .split(sections[2])
+    .iter()
+    .zip(metrics)
+    {
+        frame.render_widget(
+            Paragraph::new(vec![
+                Line::styled(
+                    label,
+                    Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
+                ),
+                Line::styled(
+                    value,
+                    Style::default().fg(theme_color(theme, &theme.main, 3.0)),
+                ),
+            ]),
+            *metric_area,
+        );
+    }
+    let body = Layout::horizontal([Constraint::Percentage(46), Constraint::Percentage(54)])
+        .spacing(4)
+        .split(sections[4]);
+    let mut diagnosis = vec![
+        Line::styled(
+            "diagnóstico",
+            Style::default().fg(theme_color(theme, &theme.text, 4.5)),
+        ),
+        word_speed_line(detail, theme),
+        word_trend_line(detail, theme),
+        Line::styled(
+            format!(
+                "última prática {}",
+                format_last_seen(detail.last_seen_unix_s)
+            ),
+            Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
+        ),
+        Line::from(""),
+        Line::styled(
+            "sequências relacionadas",
+            Style::default().fg(theme_color(theme, &theme.text, 4.5)),
+        ),
+    ];
+    diagnosis.push(Line::styled(
+        if detail.relevant_sequences.is_empty() {
+            "nenhuma com evidência independente".into()
+        } else {
+            detail.relevant_sequences.join("  ·  ")
+        },
+        Style::default().fg(theme_color(theme, &theme.main, 3.0)),
+    ));
+    frame.render_widget(Paragraph::new(diagnosis), body[0]);
+
+    let mut recent = vec![Line::styled(
+        "tentativas recentes",
+        Style::default().fg(theme_color(theme, &theme.text, 4.5)),
+    )];
+    recent.extend(
+        detail
+            .recent_attempts
+            .iter()
+            .take(body[1].height.saturating_sub(1) as usize)
+            .map(|attempt| word_attempt_line(attempt, theme)),
+    );
+    frame.render_widget(Paragraph::new(recent), body[1]);
+    frame.render_widget(
+        Paragraph::new("r zerar palavra   enter ou esc voltar")
+            .style(Style::default().fg(theme_color(theme, &theme.sub, 2.0))),
+        sections[5],
+    );
+}
+
+fn word_speed_line(detail: &WordDetail, theme: &Theme) -> Line<'static> {
+    let text = match (
+        detail.median_ms_per_grapheme,
+        detail.personal_baseline_ms_per_grapheme,
+    ) {
+        (Some(word), Some(baseline)) if baseline > 0.0 => {
+            let difference = (word / baseline - 1.0) * 100.0;
+            let comparison = if difference.abs() < 5.0 {
+                "dentro da base".into()
+            } else {
+                format!("{difference:+.0}% vs base")
+            };
+            format!("ritmo {word:.0} ms/caractere  ·  {comparison}")
+        }
+        (Some(word), None) => format!("ritmo {word:.0} ms/caractere  ·  base em formação"),
+        _ => "ritmo ainda sem amostras suficientes".into(),
+    };
+    Line::styled(
+        text,
+        Style::default().fg(theme_color(theme, &theme.main, 3.0)),
+    )
+}
+
+fn word_trend_line(detail: &WordDetail, theme: &Theme) -> Line<'static> {
+    let trend = word_trend(detail);
+    Line::styled(
+        format!("tendência {trend}"),
+        Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
+    )
+}
+
+fn word_trend(detail: &WordDetail) -> &'static str {
+    if detail.recent_attempts.len() < 4 {
+        return "ainda incerta";
+    }
+    let middle = detail.recent_attempts.len() / 2;
+    let error_score = |attempts: &[crate::persistence::WordAttemptSummary]| {
+        attempts
+            .iter()
+            .map(|attempt| {
+                if attempt.confirmed_error {
+                    1.0
+                } else if attempt.corrected {
+                    0.45
+                } else {
+                    0.0
+                }
+            })
+            .sum::<f64>()
+            / attempts.len() as f64
+    };
+    let recent = error_score(&detail.recent_attempts[..middle]);
+    let older = error_score(&detail.recent_attempts[middle..]);
+    if recent + 0.15 < older {
+        "melhorando"
+    } else if recent > older + 0.15 {
+        "piorando"
+    } else {
+        "estável"
+    }
+}
+
+fn word_attempt_line(
+    attempt: &crate::persistence::WordAttemptSummary,
+    theme: &Theme,
+) -> Line<'static> {
+    let (status, value) = if attempt.confirmed_error {
+        ("falhou", &theme.error)
+    } else if attempt.corrected {
+        ("corrigiu", &theme.sub)
+    } else {
+        ("limpa", &theme.main)
+    };
+    let speed = attempt.milliseconds_per_grapheme.map_or_else(
+        || "sem ritmo".into(),
+        |milliseconds| format!("{milliseconds:.0} ms/caractere"),
+    );
+    Line::from(vec![
+        Span::styled(
+            format!("#{:<6}", attempt.session_id),
+            Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
+        ),
+        Span::styled(
+            format!("{status:<10}"),
+            Style::default().fg(theme_color(theme, value, 3.0)),
+        ),
+        Span::styled(
+            speed,
+            Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
+        ),
+    ])
+}
+
+fn format_last_seen(timestamp: Option<i64>) -> String {
+    let Some(timestamp) = timestamp else {
+        return "sem data disponível".into();
+    };
+    let seconds = chrono::Utc::now().timestamp().saturating_sub(timestamp);
+    match seconds {
+        ..=59 => "agora".into(),
+        60..=3_599 => format!("há {} min", seconds / 60),
+        3_600..=86_399 => format!("há {} h", seconds / 3_600),
+        _ => format!("há {} dias", seconds / 86_400),
+    }
 }
 
 fn render_statistics_compact(
     frame: &mut Frame,
     area: Rect,
     statistics: &StatisticsOverview,
+    selected_word: usize,
     theme: &Theme,
 ) {
     let mut lines = vec![
@@ -335,7 +756,8 @@ fn render_statistics_compact(
                 .priority_words
                 .iter()
                 .take(compact_diagnostic_limit(area.height))
-                .map(|word| {
+                .enumerate()
+                .map(|(index, word)| {
                     let chance = if area.width < 60 {
                         format!("  chance {:.1}%  ", word.estimated_session_chance * 100.0)
                     } else {
@@ -345,6 +767,10 @@ fn render_statistics_compact(
                         )
                     };
                     Line::from(vec![
+                        Span::styled(
+                            if index == selected_word { "› " } else { "  " },
+                            Style::default().fg(theme_color(theme, &theme.main, 3.0)),
+                        ),
                         Span::styled(
                             word.word.clone(),
                             Style::default().fg(theme_color(theme, &theme.main, 3.0)),
@@ -417,7 +843,11 @@ fn render_statistics_compact(
     }
     lines.truncate(area.height.saturating_sub(1) as usize);
     lines.push(Line::styled(
-        "esc voltar",
+        if area.width < 64 {
+            "↑↓ mover  enter detalhes  R zerar  esc voltar"
+        } else {
+            "↑↓ selecionar   enter detalhes   R zerar modelo   esc voltar"
+        },
         Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
     ));
     frame.render_widget(Paragraph::new(lines), area);
@@ -622,7 +1052,13 @@ fn format_active_time(milliseconds: u64) -> String {
     }
 }
 
-fn render_priority_words(frame: &mut Frame, area: Rect, words: &[PriorityWord], theme: &Theme) {
+fn render_priority_words(
+    frame: &mut Frame,
+    area: Rect,
+    words: &[PriorityWord],
+    selected_word: usize,
+    theme: &Theme,
+) {
     let mut lines = vec![Line::styled(
         "palavras prioritárias",
         Style::default().fg(theme_color(theme, &theme.text, 4.5)),
@@ -641,10 +1077,15 @@ fn render_priority_words(frame: &mut Frame, area: Rect, words: &[PriorityWord], 
             words
                 .iter()
                 .take(area.height.saturating_sub(2) as usize)
-                .map(|word| {
+                .enumerate()
+                .map(|(index, word)| {
                     Line::from(vec![
                         Span::styled(
-                            format!("{:<14}", word.word),
+                            if index == selected_word { "›" } else { " " },
+                            Style::default().fg(theme_color(theme, &theme.main, 3.0)),
+                        ),
+                        Span::styled(
+                            format!("{:<13}", word.word),
                             Style::default().fg(theme_color(theme, &theme.main, 3.0)),
                         ),
                         Span::styled(
@@ -2655,6 +3096,7 @@ mod tests {
                 })
                 .collect(),
             priority_words: vec![PriorityWord {
+                language: "portuguese".into(),
                 word: "através".into(),
                 difficulty: 0.4,
                 confirmed_errors: 3.0,
@@ -2666,6 +3108,7 @@ mod tests {
                 estimated_session_chance: 0.18,
             }],
             priority_patterns: vec![PriorityPattern {
+                language: "portuguese".into(),
                 pattern: "acento agudo".into(),
                 kind: "mecânica",
                 difficulty: 0.3,
@@ -2688,7 +3131,72 @@ mod tests {
         terminal
             .draw(|frame| {
                 frame.render_widget(Paragraph::new("resíduo da tela anterior"), frame.area());
-                render_statistics(frame, &statistics_fixture(), theme);
+                render_statistics(
+                    frame,
+                    &statistics_fixture(),
+                    StatisticsRenderState {
+                        selected_word: 0,
+                        word_detail: None,
+                    },
+                    theme,
+                );
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        (0..height)
+            .map(|y| {
+                (0..width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_owned()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn render_word_detail_at(width: u16, height: u16) -> String {
+        let catalog = ContentCatalog::bundled().unwrap();
+        let theme = catalog.theme("arch").unwrap();
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let statistics = statistics_fixture();
+        let detail = WordDetail {
+            priority: statistics.priority_words[0].clone(),
+            personal_baseline_ms_per_grapheme: Some(90.0),
+            median_ms_per_grapheme: Some(120.0),
+            last_seen_unix_s: Some(chrono::Utc::now().timestamp() - 7_200),
+            relevant_sequences: vec!["av".into(), "tra".into()],
+            recent_attempts: vec![
+                crate::persistence::WordAttemptSummary {
+                    session_id: 42,
+                    observed_at_unix_s: chrono::Utc::now().timestamp() - 7_200,
+                    confirmed_error: true,
+                    corrected: false,
+                    milliseconds_per_grapheme: Some(140.0),
+                    latency_ratio: Some(1.4),
+                },
+                crate::persistence::WordAttemptSummary {
+                    session_id: 41,
+                    observed_at_unix_s: chrono::Utc::now().timestamp() - 86_400,
+                    confirmed_error: false,
+                    corrected: true,
+                    milliseconds_per_grapheme: Some(110.0),
+                    latency_ratio: Some(1.1),
+                },
+            ],
+        };
+        terminal
+            .draw(|frame| {
+                render_statistics(
+                    frame,
+                    &statistics,
+                    StatisticsRenderState {
+                        selected_word: 0,
+                        word_detail: Some(&detail),
+                    },
+                    theme,
+                );
             })
             .unwrap();
         let buffer = terminal.backend().buffer();
@@ -2750,20 +3258,33 @@ mod tests {
         let config = TestConfig::default();
 
         assert_eq!(
-            settings_action_at(
-                viewport,
-                &config,
-                Position::new(inner.x + 12, inner.y + 3),
-            ),
+            settings_action_at(viewport, &config, Position::new(inner.x + 12, inner.y + 3),),
             Some(SettingsAction::ModeWords)
         );
         assert_eq!(
-            settings_action_at(
-                viewport,
-                &config,
-                Position::new(inner.x + 1, inner.y + 6),
-            ),
+            settings_action_at(viewport, &config, Position::new(inner.x + 1, inner.y + 6),),
             Some(SettingsAction::Difficulty(Difficulty::Normal))
+        );
+    }
+
+    #[test]
+    fn clique_na_palavra_prioritaria_abre_seu_detalhe() {
+        let statistics = statistics_fixture();
+        assert_eq!(
+            statistics_word_at(
+                Rect::new(0, 0, 100, 28),
+                &statistics,
+                Position::new(6, 17),
+            ),
+            Some(0)
+        );
+        assert_eq!(
+            statistics_word_at(
+                Rect::new(0, 0, 50, 14),
+                &statistics,
+                Position::new(2, 6),
+            ),
+            Some(0)
         );
     }
 
@@ -2922,6 +3443,20 @@ mod tests {
     fn statistics_overview_remains_readable() {
         insta::assert_snapshot!("statistics_100x28", render_statistics_at(100, 28));
         insta::assert_snapshot!("statistics_50x14", render_statistics_at(50, 14));
+    }
+
+    #[test]
+    fn detalhe_da_palavra_explica_dificuldade_sem_expor_pesos_internos() {
+        for (width, height) in [(50, 14), (100, 28)] {
+            let rendered = render_word_detail_at(width, height);
+            assert!(rendered.contains("através"));
+            assert!(rendered.contains("chance"));
+            assert!(rendered.contains("ritmo"));
+            assert!(rendered.contains("tentativas recentes"));
+            assert!(!rendered.contains("difficulty"));
+            assert!(!rendered.contains("peso"));
+            insta::assert_snapshot!(format!("statistics_word_{width}x{height}"), rendered);
+        }
     }
 
     #[test]

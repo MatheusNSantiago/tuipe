@@ -93,6 +93,7 @@ pub struct SessionSummary {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct PriorityWord {
+    pub language: String,
     pub word: String,
     pub difficulty: f64,
     pub confirmed_errors: f64,
@@ -105,7 +106,28 @@ pub struct PriorityWord {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct WordAttemptSummary {
+    pub session_id: u64,
+    pub observed_at_unix_s: i64,
+    pub confirmed_error: bool,
+    pub corrected: bool,
+    pub milliseconds_per_grapheme: Option<f64>,
+    pub latency_ratio: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct WordDetail {
+    pub priority: PriorityWord,
+    pub personal_baseline_ms_per_grapheme: Option<f64>,
+    pub median_ms_per_grapheme: Option<f64>,
+    pub last_seen_unix_s: Option<i64>,
+    pub relevant_sequences: Vec<String>,
+    pub recent_attempts: Vec<WordAttemptSummary>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct PriorityPattern {
+    pub language: String,
     pub pattern: String,
     pub kind: &'static str,
     pub difficulty: f64,
@@ -113,6 +135,13 @@ pub struct PriorityPattern {
     pub uncorrected_error_rate: f64,
     pub corrected_error_rate: f64,
     pub distinct_words: usize,
+}
+
+struct PatternEvidence {
+    exposures: f64,
+    uncorrected: f64,
+    corrected: f64,
+    distinct_words: usize,
 }
 
 /// Evidência consultável de uma palavra observada durante uma sessão terminal.
@@ -631,6 +660,31 @@ impl Repository {
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
 
+        let global_reset = self
+            .connection
+            .query_row(
+                "SELECT session_id FROM adaptive_resets WHERE scope = '*'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?
+            .unwrap_or(0);
+        let word_resets = self
+            .connection
+            .prepare("SELECT scope, session_id FROM adaptive_resets WHERE scope != '*'")?
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })?
+            .collect::<rusqlite::Result<HashMap<_, _>>>()?;
+        let observations = observations
+            .into_iter()
+            .filter(|record| {
+                let scope = word_reset_scope(&record.language, &record.word);
+                record.session_id > global_reset
+                    && record.session_id > word_resets.get(&scope).copied().unwrap_or(0)
+            })
+            .collect::<Vec<_>>();
+
         let mut words = HashMap::<(String, String), WordSkill>::new();
         let mut ngrams = HashMap::<(String, String), NgramSkill>::new();
         let mut mechanics = HashMap::<(String, String), MechanicSkill>::new();
@@ -735,6 +789,59 @@ impl Repository {
         }
         transaction.commit()?;
         Ok(report)
+    }
+
+    /// Faz o modelo esquecer uma palavra sem apagar sessões nem eventos brutos.
+    /// Projeções compartilhadas são reconstruídas para remover só a contribuição
+    /// anterior dessa palavra.
+    pub fn reset_word_model(&self, language: &str, word: &str) -> Result<()> {
+        let cutoff =
+            self.connection
+                .query_row("SELECT COALESCE(MAX(id), 0) FROM sessions", [], |row| {
+                    row.get::<_, i64>(0)
+                })?;
+        let transaction = self.connection.unchecked_transaction()?;
+        transaction.execute(
+            "INSERT INTO adaptive_resets (scope, session_id) VALUES (?1, ?2)
+             ON CONFLICT(scope) DO UPDATE SET session_id = excluded.session_id",
+            params![word_reset_scope(language, word), cutoff],
+        )?;
+        transaction.execute(
+            "DELETE FROM word_skill WHERE language = ?1 AND word = ?2",
+            params![language, word],
+        )?;
+        transaction.execute(
+            "DELETE FROM skill_review WHERE language = ?1 AND word = ?2",
+            params![language, word],
+        )?;
+        transaction.execute_batch("DELETE FROM ngram_skill; DELETE FROM mechanic_skill;")?;
+        transaction.commit()?;
+        self.rebuild_adaptive_projections()?;
+        Ok(())
+    }
+
+    /// Reinicia apenas o currículo adaptativo. Histórico, métricas, XP e streak
+    /// permanecem intactos e continuam disponíveis para auditoria.
+    pub fn reset_adaptive_model(&self) -> Result<()> {
+        let cutoff =
+            self.connection
+                .query_row("SELECT COALESCE(MAX(id), 0) FROM sessions", [], |row| {
+                    row.get::<_, i64>(0)
+                })?;
+        let transaction = self.connection.unchecked_transaction()?;
+        transaction.execute("DELETE FROM adaptive_resets", [])?;
+        transaction.execute(
+            "INSERT INTO adaptive_resets (scope, session_id) VALUES ('*', ?1)",
+            [cutoff],
+        )?;
+        transaction.execute_batch(
+            "DELETE FROM word_skill;
+             DELETE FROM ngram_skill;
+             DELETE FROM mechanic_skill;
+             DELETE FROM skill_review;",
+        )?;
+        transaction.commit()?;
+        Ok(())
     }
 
     /// Baseline robusto (mediana aproximada) por idioma e tamanho. Só entra em
@@ -1014,15 +1121,21 @@ impl Repository {
             .map(|(language, word, skill)| {
                 let baseline = baselines[&language];
                 let difficulty = policy.difficulty_with_baseline(&skill, baseline);
-                (word, skill, difficulty)
+                (language, word, skill, difficulty)
             })
             .collect::<Vec<_>>();
-        scored.sort_by(|left, right| right.2.total_cmp(&left.2));
+        scored.sort_by(|left, right| right.3.total_cmp(&left.3));
+        let mut counts = HashMap::<String, usize>::new();
         Ok(scored
             .into_iter()
-            .filter_map(|(word, skill, difficulty)| {
+            .filter_map(|(language, word, skill, difficulty)| {
                 let exposures = skill.effective_exposures;
-                (difficulty > 0.0).then_some(PriorityWord {
+                if difficulty <= 0.0 || counts.get(&language).copied().unwrap_or(0) >= 8 {
+                    return None;
+                }
+                *counts.entry(language.clone()).or_default() += 1;
+                Some(PriorityWord {
+                    language,
                     word,
                     difficulty,
                     confirmed_errors: skill.confirmed_errors,
@@ -1042,8 +1155,112 @@ impl Repository {
                     estimated_session_chance: 0.0,
                 })
             })
-            .take(8)
             .collect())
+    }
+
+    pub fn word_detail(&self, language: &str, word: &str) -> Result<Option<WordDetail>> {
+        let Some(skill) = self
+            .connection
+            .query_row(
+                "SELECT state FROM word_skill WHERE language = ?1 AND word = ?2",
+                params![language, word],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .optional()?
+            .map(|bytes| WordSkill::decode(&bytes))
+            .transpose()?
+        else {
+            return Ok(None);
+        };
+        let baseline = self.baseline_profile(language)?;
+        let policy = crate::adaptive::AdaptivePolicy::default();
+        let difficulty = policy.difficulty_with_baseline(&skill, baseline.rates);
+        let exposures = skill.effective_exposures;
+        let priority = PriorityWord {
+            language: language.to_owned(),
+            word: word.to_owned(),
+            difficulty,
+            confirmed_errors: skill.confirmed_errors,
+            corrections: skill.corrections,
+            observations: skill.observations,
+            effective_exposures: exposures,
+            uncorrected_error_rate: rate(skill.uncorrected_error_mass, exposures),
+            corrected_error_rate: rate(skill.corrected_error_mass, exposures),
+            estimated_session_chance: 0.0,
+        };
+
+        let mut statement = self.connection.prepare(
+            "SELECT wo.session_id, unixepoch(s.created_at), wo.confirmed_error,
+                    wo.corrections > 0,
+                    CASE WHEN wo.active_ms > 0 AND wo.grapheme_count > 0
+                         THEN wo.active_ms * 1.0 / wo.grapheme_count END,
+                    wo.latency_ratio, wo.grapheme_count
+             FROM word_observations wo
+             JOIN sessions s ON s.id = wo.session_id
+             WHERE wo.language = ?1 AND wo.word = ?2 AND wo.censored = 0
+             ORDER BY wo.session_id DESC, wo.id DESC
+             LIMIT 12",
+        )?;
+        let rows = statement
+            .query_map(params![language, word], |row| {
+                Ok((
+                    WordAttemptSummary {
+                        session_id: row.get::<_, i64>(0)? as u64,
+                        observed_at_unix_s: row.get(1)?,
+                        confirmed_error: row.get(2)?,
+                        corrected: row.get(3)?,
+                        milliseconds_per_grapheme: row.get(4)?,
+                        latency_ratio: row.get(5)?,
+                    },
+                    row.get::<_, u16>(6)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let grapheme_count = rows.first().map_or(0, |(_, count)| *count);
+        let recent_attempts = rows
+            .into_iter()
+            .map(|(attempt, _)| attempt)
+            .collect::<Vec<_>>();
+        let mut latencies = recent_attempts
+            .iter()
+            .filter_map(|attempt| attempt.milliseconds_per_grapheme)
+            .collect::<Vec<_>>();
+        let median_ms_per_grapheme = median_f64(&mut latencies);
+        let last_seen_unix_s = self
+            .connection
+            .query_row(
+                "SELECT last_seen_unix_s FROM skill_review WHERE language = ?1 AND word = ?2",
+                params![language, word],
+                |row| row.get(0),
+            )
+            .optional()?;
+
+        let word_ngrams = lexical_ngrams(word);
+        let mut relevant_sequences = self
+            .load_all_ngram_skills()?
+            .into_iter()
+            .filter(|(candidate_language, ngram, _)| {
+                candidate_language == language && word_ngrams.contains(ngram)
+            })
+            .filter_map(|(_, ngram, skill)| {
+                let difficulty = policy.ngram_difficulty(&skill, baseline.rates);
+                (difficulty > 0.0).then_some((ngram, difficulty))
+            })
+            .collect::<Vec<_>>();
+        relevant_sequences.sort_by(|left, right| right.1.total_cmp(&left.1));
+
+        Ok(Some(WordDetail {
+            priority,
+            personal_baseline_ms_per_grapheme: baseline.latency_ms_per_grapheme(grapheme_count),
+            median_ms_per_grapheme,
+            last_seen_unix_s,
+            relevant_sequences: relevant_sequences
+                .into_iter()
+                .take(4)
+                .map(|(ngram, _)| ngram)
+                .collect(),
+            recent_attempts,
+        }))
     }
 
     fn priority_patterns(&self) -> Result<Vec<PriorityPattern>> {
@@ -1066,13 +1283,16 @@ impl Repository {
             let difficulty = policy.ngram_difficulty(&skill, baseline);
             if difficulty > 0.0 {
                 patterns.push(pattern_diagnostic(
+                    language,
                     pattern,
                     "sequência",
                     difficulty,
-                    skill.effective_exposures,
-                    skill.uncorrected_error_mass,
-                    skill.corrected_error_mass,
-                    skill.distinct_words.len(),
+                    PatternEvidence {
+                        exposures: skill.effective_exposures,
+                        uncorrected: skill.uncorrected_error_mass,
+                        corrected: skill.corrected_error_mass,
+                        distinct_words: skill.distinct_words.len(),
+                    },
                 ));
             }
         }
@@ -1081,32 +1301,51 @@ impl Repository {
             let difficulty = policy.mechanic_difficulty(&skill, baseline);
             if difficulty > 0.0 {
                 patterns.push(pattern_diagnostic(
+                    language,
                     mechanic_label(&pattern),
                     "mecânica",
                     difficulty,
-                    skill.effective_exposures,
-                    skill.uncorrected_error_mass,
-                    skill.corrected_error_mass,
-                    skill.distinct_words.len(),
+                    PatternEvidence {
+                        exposures: skill.effective_exposures,
+                        uncorrected: skill.uncorrected_error_mass,
+                        corrected: skill.corrected_error_mass,
+                        distinct_words: skill.distinct_words.len(),
+                    },
                 ));
             }
         }
         patterns.sort_by(|left, right| right.difficulty.total_cmp(&left.difficulty));
-        patterns.truncate(8);
-        Ok(patterns)
+        let mut counts = HashMap::<String, usize>::new();
+        Ok(patterns
+            .into_iter()
+            .filter(|pattern| {
+                let count = counts.entry(pattern.language.clone()).or_default();
+                if *count >= 8 {
+                    false
+                } else {
+                    *count += 1;
+                    true
+                }
+            })
+            .collect())
     }
 }
 
 fn pattern_diagnostic(
+    language: String,
     pattern: String,
     kind: &'static str,
     difficulty: f64,
-    exposures: f64,
-    uncorrected: f64,
-    corrected: f64,
-    distinct_words: usize,
+    evidence: PatternEvidence,
 ) -> PriorityPattern {
+    let PatternEvidence {
+        exposures,
+        uncorrected,
+        corrected,
+        distinct_words,
+    } = evidence;
     PriorityPattern {
+        language,
         pattern,
         kind,
         difficulty,
@@ -1123,6 +1362,27 @@ fn pattern_diagnostic(
         },
         distinct_words,
     }
+}
+
+fn rate(mass: f64, exposures: f64) -> f64 {
+    if exposures > 0.0 {
+        mass / exposures
+    } else {
+        0.0
+    }
+}
+
+fn median_f64(values: &mut [f64]) -> Option<f64> {
+    if values.is_empty() {
+        return None;
+    }
+    values.sort_by(f64::total_cmp);
+    let middle = values.len() / 2;
+    Some(if values.len().is_multiple_of(2) {
+        (values[middle - 1] + values[middle]) / 2.0
+    } else {
+        values[middle]
+    })
 }
 
 fn load_state_from<T: serde::de::DeserializeOwned + Default>(
@@ -1166,7 +1426,11 @@ fn mechanic_label(mechanic: &str) -> String {
     }
 }
 
-const CURRENT_SCHEMA_VERSION: i64 = 6;
+fn word_reset_scope(language: &str, word: &str) -> String {
+    format!("palavra\0{language}\0{word}")
+}
+
+const CURRENT_SCHEMA_VERSION: i64 = 7;
 
 fn validate_schema_version(connection: &Connection) -> Result<Option<i64>> {
     let exists = connection.query_row(
@@ -1239,6 +1503,7 @@ fn migrate(connection: &Connection) -> Result<()> {
          CREATE TABLE IF NOT EXISTS favorite_quotes (quote_id INTEGER PRIMARY KEY);
          CREATE TABLE IF NOT EXISTS xp_state (id INTEGER PRIMARY KEY CHECK(id = 1), state BLOB NOT NULL);
          CREATE TABLE IF NOT EXISTS streak_state (id INTEGER PRIMARY KEY CHECK(id = 1), state BLOB NOT NULL);
+         CREATE TABLE IF NOT EXISTS adaptive_resets (scope TEXT PRIMARY KEY, session_id INTEGER NOT NULL);
          CREATE TABLE IF NOT EXISTS raw_events (session_id INTEGER PRIMARY KEY REFERENCES sessions(id), codec_version INTEGER NOT NULL, uncompressed_size INTEGER NOT NULL, blob BLOB NOT NULL);",
     )?;
     if !table_has_column(&transaction, "word_observations", "fast_success")? {
@@ -1375,6 +1640,31 @@ fn table_has_column(connection: &Connection, table: &str, column: &str) -> Resul
 mod tests {
     use super::*;
     use crate::typing::TestStatus;
+
+    fn word_observation(word: &str, confirmed_error: bool) -> WordObservationRecord {
+        WordObservationRecord {
+            language: "portuguese".into(),
+            word: word.into(),
+            confirmed_error,
+            corrections: 0,
+            active_ms: 300,
+            afk_ms: 0,
+            planning_ms: 0,
+            fluent_ms: 300,
+            correction_ms: 0,
+            input_events: 5,
+            corrective_events: 0,
+            censored: false,
+            grapheme_count: 5,
+            fast_success: !confirmed_error,
+            slow: false,
+            latency_ratio: Some(1.0),
+            evidence_weight: 1.0,
+            selection_source: None,
+            selection_propensity: None,
+            mechanics: Vec::new(),
+        }
+    }
 
     #[test]
     fn migrations_create_a_session_repository() {
@@ -1651,7 +1941,16 @@ mod tests {
         let priority = repository.statistics_overview().unwrap().priority_words;
         assert_eq!(priority.len(), 1);
         assert_eq!(priority[0].word, "difícil");
+        assert_eq!(priority[0].language, "portuguese");
         assert_eq!(priority[0].confirmed_errors, 1.0);
+        let detail = repository
+            .word_detail("portuguese", "difícil")
+            .unwrap()
+            .unwrap();
+        assert_eq!(detail.recent_attempts.len(), 1);
+        assert!(detail.recent_attempts[0].confirmed_error);
+        assert_eq!(detail.median_ms_per_grapheme, Some(320.0 / 7.0));
+        assert!(detail.last_seen_unix_s.is_some());
 
         let expected = repository.load_word_skills("portuguese").unwrap();
         repository
@@ -1667,6 +1966,68 @@ mod tests {
         assert_eq!(report.observations, 1);
         assert_eq!(report.words, 1);
         assert_eq!(repository.load_word_skills("portuguese").unwrap(), expected);
+    }
+
+    #[test]
+    fn reset_adaptativo_preserva_historico_e_nao_ressuscita_no_rebuild() {
+        let temporary = tempfile::tempdir().unwrap();
+        let repository = Repository::open(&temporary.path().join("history.db")).unwrap();
+        for word in ["casa", "tempo"] {
+            repository
+                .save_session_with_observations(
+                    &TestConfig::default(),
+                    &TestStatus::Failed {
+                        ended_at_ms: 1_000,
+                        word_index: 0,
+                    },
+                    Metrics::default(),
+                    &[word_observation(word, true)],
+                )
+                .unwrap();
+        }
+
+        repository.reset_word_model("portuguese", "casa").unwrap();
+        assert!(
+            repository
+                .word_detail("portuguese", "casa")
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            repository
+                .word_detail("portuguese", "tempo")
+                .unwrap()
+                .is_some()
+        );
+        repository.rebuild_adaptive_projections().unwrap();
+        assert!(
+            repository
+                .word_detail("portuguese", "casa")
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(repository.statistics_overview().unwrap().completed_tests, 0);
+        assert_eq!(
+            repository
+                .connection
+                .query_row("SELECT COUNT(*) FROM sessions", [], |row| row
+                    .get::<_, u64>(0))
+                .unwrap(),
+            2
+        );
+
+        repository.reset_adaptive_model().unwrap();
+        assert!(repository.load_all_word_skills().unwrap().is_empty());
+        repository.rebuild_adaptive_projections().unwrap();
+        assert!(repository.load_all_word_skills().unwrap().is_empty());
+        assert_eq!(
+            repository
+                .connection
+                .query_row("SELECT COUNT(*) FROM sessions", [], |row| row
+                    .get::<_, u64>(0))
+                .unwrap(),
+            2
+        );
     }
 
     #[test]

@@ -66,6 +66,18 @@ eles não são escolhas adicionais.
 Os atalhos `r`, `s` e `q` ficam bloqueados por 300 ms após o resultado para
 evitar uma ação acidental causada pela última tecla do teste.
 
+### Estatísticas e diagnóstico
+
+Na tela de estatísticas, `↑`/`↓` ou `j`/`k` percorrem as palavras prioritárias e
+`enter` abre o diagnóstico da palavra. O detalhe mostra a chance estimada no
+próximo treino adaptativo, falhas, correções, ritmo contra a base pessoal,
+tendência, recência, sequências relacionadas e tentativas recentes. Também é
+possível clicar diretamente numa palavra.
+
+`r` no detalhe solicita o reset daquela palavra. `R` no panorama solicita o
+reset do modelo adaptativo inteiro. Ambos exigem confirmação e preservam
+sessões, métricas, eventos brutos, XP e streak.
+
 ### Configurações
 
 Na janela aberta por `esc`, cada tecla percorre as opções do respectivo grupo:

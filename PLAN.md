@@ -395,7 +395,7 @@ Streak:
 - [x] Implementar `AdaptivePolicy`, sigmoide e sampler misto.
 - [x] Implementar compartilhamento entre packs e aprendizagem passiva de quote.
 - [ ] Implementar decaimento, recuperacao entre sessoes e desconto de repeated test.
-- [ ] Implementar reset por palavra/modelo e versionamento/rebuild.
+- [x] Implementar reset por palavra/modelo e versionamento/rebuild.
 - [x] Criar simulador deterministico de milhares de sessoes para calibracao.
 
 **Pronto quando:** cold start continua uniforme; o boost e incremental; ha ~90% de chance de alguma revisao com evidencia suficiente; nenhuma palavra e levada acima do teto adaptativo; AFK nao altera dificuldade.
@@ -405,7 +405,7 @@ Streak:
 - [x] Implementar overview e diagnostico acionavel de palavras e padroes.
 - [ ] Implementar historico filtravel e detalhe de sessao.
 - [ ] Implementar graficos de evolucao, distribuicao e atividade diaria.
-- [ ] Implementar lista minimalista de palavras e drill-down.
+- [x] Implementar lista minimalista de palavras e drill-down.
 - [x] Portar XP, levels, daily bonus e streak.
 - [x] Excluir falhas de averages/PBs sem perder sua evidencia adaptativa.
 

@@ -36,7 +36,8 @@ use tuipe::{
     content::{ContentCatalog, WordGenerator},
     persistence::{
         MechanicObservationRecord, Preferences, RawEvent, RawEventCodec, RawSessionEnd, Repository,
-        SessionKind, SessionProvenance, StatisticsOverview, WordObservationRecord, paths,
+        SessionKind, SessionProvenance, StatisticsOverview, WordDetail, WordObservationRecord,
+        paths,
     },
     typing::{
         ExternalEvent, InputEvent, KeyAction, QuoteLength, RecordedInputKind, TestEngine, TestMode,
@@ -163,6 +164,9 @@ struct App {
     config_path: PathBuf,
     settings_open: bool,
     statistics_open: bool,
+    statistics_selected_word: usize,
+    statistics_detail: Option<WordDetail>,
+    statistics_reset: Option<StatisticsReset>,
     statistics: StatisticsOverview,
     generator: Option<WordGenerator<SmallRng>>,
     selections: Vec<Option<tuipe::adaptive::WordSelection>>,
@@ -173,6 +177,11 @@ struct App {
     session_baseline: tuipe::persistence::PersonalBaselineProfile,
     startup_notice: Option<String>,
     focus_lost_at: Option<Instant>,
+}
+
+enum StatisticsReset {
+    Word { language: String, word: String },
+    Model,
 }
 
 struct PersistJob {
@@ -314,6 +323,9 @@ impl App {
             config_path,
             settings_open: false,
             statistics_open: false,
+            statistics_selected_word: 0,
+            statistics_detail: None,
+            statistics_reset: None,
             statistics: StatisticsOverview::default(),
             generator,
             selections,
@@ -773,6 +785,12 @@ impl App {
     fn load_statistics(&mut self, repository: &Repository) -> Result<()> {
         let mut statistics = repository.statistics_overview()?;
         let config = self.engine.config();
+        statistics
+            .priority_words
+            .retain(|word| word.language == config.language);
+        statistics
+            .priority_patterns
+            .retain(|pattern| pattern.language == config.language);
         if let Some(candidates) = self.catalog.word_pack(&config.language, &config.word_pack) {
             let draws = match config.mode {
                 TestMode::Words { count } => usize::from(count),
@@ -798,6 +816,43 @@ impl App {
             }
         }
         self.statistics = statistics;
+        self.statistics_selected_word = self
+            .statistics_selected_word
+            .min(self.statistics.priority_words.len().saturating_sub(1));
+        self.statistics_detail = None;
+        self.statistics_reset = None;
+        Ok(())
+    }
+
+    fn reload_adaptive(&mut self, repository: &Repository) -> Result<()> {
+        let mut adaptive = AdaptiveSampler::from_skills(
+            AdaptivePolicy::default(),
+            repository.load_all_word_skills()?,
+        );
+        adaptive.set_ngram_skills(repository.load_all_ngram_skills()?);
+        adaptive.set_mechanic_skills(repository.load_all_mechanic_skills()?);
+        adaptive.set_review_states(
+            repository.load_all_review_states()?,
+            chrono::Utc::now().timestamp(),
+        );
+        for language in ["portuguese", "english"] {
+            adaptive.set_baseline(language, repository.baseline_profile(language)?.rates);
+        }
+        self.adaptive = adaptive;
+        Ok(())
+    }
+
+    fn open_statistics_word(&mut self, repository: &Repository, index: usize) -> Result<()> {
+        let Some(priority) = self.statistics.priority_words.get(index) else {
+            return Ok(());
+        };
+        self.statistics_selected_word = index;
+        self.statistics_detail = repository
+            .word_detail(&priority.language, &priority.word)?
+            .map(|mut detail| {
+                detail.priority.estimated_session_chance = priority.estimated_session_chance;
+                detail
+            });
         Ok(())
     }
 }
@@ -889,7 +944,22 @@ fn run(
                     },
                 );
                 if app.statistics_open {
-                    ui::render_statistics(frame, &app.statistics, theme);
+                    ui::render_statistics(
+                        frame,
+                        &app.statistics,
+                        ui::StatisticsRenderState {
+                            selected_word: app.statistics_selected_word,
+                            word_detail: app.statistics_detail.as_ref(),
+                        },
+                        theme,
+                    );
+                    if let Some(reset) = &app.statistics_reset {
+                        let confirmation = match reset {
+                            StatisticsReset::Word { word, .. } => ui::ResetConfirmation::Word(word),
+                            StatisticsReset::Model => ui::ResetConfirmation::Model,
+                        };
+                        ui::render_reset_confirmation(frame, confirmation, theme);
+                    }
                 }
             })?;
             last_drawn_second = app.engine.elapsed_ms() / 1_000;
@@ -997,8 +1067,22 @@ fn handle_mouse(
 
     let viewport = ratatui::layout::Rect::new(0, 0, terminal.width, terminal.height);
     if app.statistics_open {
+        if app.statistics_reset.is_some() {
+            return Ok(false);
+        }
+        let position = ratatui::layout::Position::new(mouse.column, mouse.row);
+        if app.statistics_detail.is_none()
+            && let Some(index) = ui::statistics_word_at(viewport, &app.statistics, position)
+        {
+            app.open_statistics_word(repository, index)?;
+            return Ok(true);
+        }
         if mouse.row >= terminal.height.saturating_sub(2) {
-            app.statistics_open = false;
+            if app.statistics_detail.is_some() {
+                app.statistics_detail = None;
+            } else {
+                app.statistics_open = false;
+            }
             return Ok(true);
         }
         return Ok(false);
@@ -1187,8 +1271,54 @@ fn handle_key(
     modifiers: KeyModifiers,
 ) -> Result<bool> {
     if app.statistics_open {
-        if matches!(code, KeyCode::Esc | KeyCode::Enter | KeyCode::Char('s')) {
+        if let Some(reset) = app.statistics_reset.take() {
+            match code {
+                KeyCode::Char('y') | KeyCode::Char('s') => {
+                    match reset {
+                        StatisticsReset::Word { language, word } => {
+                            repository.reset_word_model(&language, &word)?;
+                        }
+                        StatisticsReset::Model => repository.reset_adaptive_model()?,
+                    }
+                    app.reload_adaptive(repository)?;
+                    app.load_statistics(repository)?;
+                }
+                KeyCode::Esc | KeyCode::Char('n') => {}
+                _ => app.statistics_reset = Some(reset),
+            }
+        } else if matches!(code, KeyCode::Char('s')) {
             app.statistics_open = false;
+            app.statistics_detail = None;
+        } else if app.statistics_detail.is_some() {
+            match code {
+                KeyCode::Esc | KeyCode::Enter | KeyCode::Backspace => {
+                    app.statistics_detail = None;
+                }
+                KeyCode::Char('r') => {
+                    let detail = app.statistics_detail.as_ref().expect("detalhe disponível");
+                    app.statistics_reset = Some(StatisticsReset::Word {
+                        language: detail.priority.language.clone(),
+                        word: detail.priority.word.clone(),
+                    });
+                }
+                _ => {}
+            }
+        } else {
+            match code {
+                KeyCode::Esc | KeyCode::Backspace => app.statistics_open = false,
+                KeyCode::Char('R') => app.statistics_reset = Some(StatisticsReset::Model),
+                KeyCode::Up | KeyCode::Char('k') => {
+                    app.statistics_selected_word = app.statistics_selected_word.saturating_sub(1);
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    app.statistics_selected_word = (app.statistics_selected_word + 1)
+                        .min(app.statistics.priority_words.len().saturating_sub(1));
+                }
+                KeyCode::Enter if !app.statistics.priority_words.is_empty() => {
+                    app.open_statistics_word(repository, app.statistics_selected_word)?;
+                }
+                _ => {}
+            }
         }
         return Ok(false);
     }

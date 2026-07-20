@@ -1,0 +1,18 @@
+---
+source: src/ui.rs
+expression: rendered
+---
+  palavra  através
+  18.0% de chance no próximo treino adaptativo
+  falhas 30%  ·  correções 20%  ·  10 exposições
+  ritmo 120 ms/caractere  ·  +33% vs base
+  tendência ainda incerta
+  última prática há 2 h
+
+  tentativas recentes
+  #42    falhou    140 ms/caractere
+  #41    corrigiu  110 ms/caractere
+
+
+
+  r zerar palavra   enter ou esc voltar

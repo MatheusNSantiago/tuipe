@@ -9,5 +9,5 @@ pub use raw_events::{RawEvent, RawEventCodec, RawSessionEnd};
 pub use repository::{
     MechanicObservationRecord, PersonalBaselineProfile, PriorityPattern, PriorityWord,
     RebuildReport, Repository, SessionKind, SessionProvenance, SessionSummary, StatisticsOverview,
-    WordObservationRecord,
+    WordAttemptSummary, WordDetail, WordObservationRecord,
 };
