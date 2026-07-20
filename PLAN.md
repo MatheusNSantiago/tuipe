@@ -414,8 +414,8 @@ Streak:
 ### Fase 7 — validacao final e entrega
 
 - [x] Fazer comparacao lado a lado com Monkeytype em `time 30`, `words 50` e quotes.
-- [ ] Medir p50/p95/p99 de input -> state -> render em release.
-- [ ] Corrigir qualquer hitch de SQLite, recomputacao ou resize.
+- [x] Medir p50/p95/p99 de input -> state -> render em release.
+- [x] Corrigir qualquer hitch de SQLite, recomputacao ou resize.
 - [ ] Testar terminais com true color e fallback 256 cores.
 - [ ] Testar UTF-8/acentos, terminais pequenos, mouse e keybindings conflitantes.
 - [x] Criar README com instalacao via Cargo, paths XDG, temas e controles.

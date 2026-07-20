@@ -192,4 +192,5 @@ cargo fmt --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test
 cargo build --release
+cargo bench --bench latencia_input_render
 ```
