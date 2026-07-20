@@ -1,3 +1,5 @@
+use std::collections::VecDeque;
+
 use rand::{Rng, seq::IndexedRandom};
 use unicode_normalization::UnicodeNormalization;
 use unicode_segmentation::UnicodeSegmentation;
@@ -157,6 +159,13 @@ impl<R: Rng> UniformWordGenerator<R> {
     pub fn rng_mut(&mut self) -> &mut R {
         &mut self.rng
     }
+
+    fn force(&mut self, mut selection: WordSelection) -> WordSelection {
+        selection.word = selection.word.nfc().collect();
+        self.previous.rotate_right(1);
+        self.previous[0] = Some(selection.word.clone());
+        selection
+    }
 }
 
 /// Aplica os modificadores do Monkeytype suportados pelo tuipe a um fluxo léxico
@@ -169,6 +178,7 @@ pub struct WordGenerator<R> {
     sentence_start: bool,
     adaptive: Option<(String, AdaptiveSampler)>,
     assessment: bool,
+    forced: VecDeque<WordSelection>,
 }
 
 impl<R: Rng> WordGenerator<R> {
@@ -180,6 +190,7 @@ impl<R: Rng> WordGenerator<R> {
             sentence_start: true,
             adaptive: None,
             assessment: false,
+            forced: VecDeque::new(),
         }
     }
 
@@ -193,24 +204,40 @@ impl<R: Rng> WordGenerator<R> {
         self
     }
 
+    pub fn with_forced_words(mut self, words: Vec<String>) -> Self {
+        self.forced = words
+            .into_iter()
+            .map(|word| WordSelection {
+                word,
+                source: SelectionSource::Targeted,
+                propensity: 1.0,
+            })
+            .collect();
+        self
+    }
+
     pub fn next_word(&mut self) -> String {
         self.next_generated().text
     }
 
     pub fn next_generated(&mut self) -> GeneratedWord {
-        if self.numbers && self.uniform.rng_mut().random_bool(0.1) {
+        if self.forced.is_empty() && self.numbers && self.uniform.rng_mut().random_bool(0.1) {
             return GeneratedWord {
                 text: self.random_number(),
                 selection: None,
             };
         }
 
-        let selection = match (&self.adaptive, self.assessment) {
-            (_, true) => self.uniform.next_anchor(),
-            (Some((language, sampler)), false) => {
-                self.uniform.next_lexical_adaptive(sampler, language)
+        let selection = if let Some(selection) = self.forced.pop_front() {
+            self.uniform.force(selection)
+        } else {
+            match (&self.adaptive, self.assessment) {
+                (_, true) => self.uniform.next_anchor(),
+                (Some((language, sampler)), false) => {
+                    self.uniform.next_lexical_adaptive(sampler, language)
+                }
+                (None, false) => self.uniform.next_lexical_with_provenance(),
             }
-            (None, false) => self.uniform.next_lexical_with_provenance(),
         };
         let mut word = selection.word.clone();
         if !self.punctuation {
@@ -318,6 +345,22 @@ mod tests {
                 assert!((1..=4).contains(&word.len()));
                 assert_ne!(word.chars().next(), Some('0'));
             }
+        }
+    }
+
+    #[test]
+    fn palavras_de_revisao_aparecem_antes_do_fluxo_uniforme() {
+        let words = vec!["casa".into(), "tempo".into(), "mundo".into()];
+        let mut generator = WordGenerator::new(&words, SmallRng::seed_from_u64(3), false, true)
+            .with_forced_words(vec!["tempo".into(), "casa".into()]);
+
+        for expected in ["tempo", "casa"] {
+            let generated = generator.next_generated();
+            assert_eq!(generated.text, expected);
+            assert_eq!(
+                generated.selection.unwrap().source,
+                SelectionSource::Targeted
+            );
         }
     }
 

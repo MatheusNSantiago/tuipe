@@ -510,7 +510,10 @@ impl TestEngine {
             })
     }
 
-    pub(crate) fn metric_histories(&self, duration_ms: u64) -> (Vec<f64>, Vec<f64>, Vec<u32>) {
+    pub(crate) fn metric_histories(
+        &self,
+        duration_ms: u64,
+    ) -> (Vec<f64>, Vec<f64>, Vec<f64>, Vec<u32>) {
         let started_at = self
             .attempts
             .iter()
@@ -533,10 +536,11 @@ impl TestEngine {
             .into_iter()
             .map(|count| f64::from(count) / 5.0 * 60.0)
             .collect();
-        (self.wpm_history(started_at, duration_ms), wpm, errors)
+        let (wpm_history, raw_wpm_history) = self.wpm_history(started_at, duration_ms);
+        (wpm_history, raw_wpm_history, wpm, errors)
     }
 
-    fn wpm_history(&self, started_at: u64, duration_ms: u64) -> Vec<f64> {
+    fn wpm_history(&self, started_at: u64, duration_ms: u64) -> (Vec<f64>, Vec<f64>) {
         let bucket_count = duration_ms.div_ceil(1_000).max(1) as usize;
         let mut inputs = vec![String::new(); self.targets.len()];
         let mut event_index = 0;
@@ -568,10 +572,17 @@ impl TestEngine {
                     .map_or(0, |active_word| {
                         correct_word_characters(&self.targets, &inputs, active_word)
                     });
+                let raw_characters = inputs
+                    .iter()
+                    .map(|input| input.graphemes(true).count() as u32)
+                    .sum::<u32>();
                 let seconds = boundary_ms as f64 / 1_000.0;
-                f64::from(correct_characters) / 5.0 / (seconds / 60.0)
+                (
+                    f64::from(correct_characters) / 5.0 / (seconds / 60.0),
+                    f64::from(raw_characters) / 5.0 / (seconds / 60.0),
+                )
             })
-            .collect()
+            .unzip()
     }
 }
 
@@ -767,6 +778,7 @@ mod tests {
 
         let metrics = engine.metrics();
         assert_eq!(metrics.wpm_history, vec![60.0, 54.0]);
+        assert_eq!(metrics.raw_wpm_history, vec![60.0, 54.0]);
         assert_eq!(metrics.burst_history, vec![60.0, 48.0]);
     }
 

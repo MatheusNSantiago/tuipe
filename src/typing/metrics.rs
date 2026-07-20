@@ -44,6 +44,7 @@ pub struct Metrics {
     pub consistency: f64,
     pub characters: CharacterStats,
     pub wpm_history: Vec<f64>,
+    pub raw_wpm_history: Vec<f64>,
     pub burst_history: Vec<f64>,
     pub error_history: Vec<u32>,
 }
@@ -58,7 +59,8 @@ impl Metrics {
         } else {
             correct_keypresses as f64 / (correct_keypresses + incorrect_keypresses) as f64 * 100.0
         };
-        let (wpm_history, burst_history, error_history) = engine.metric_histories(duration_ms);
+        let (wpm_history, raw_wpm_history, burst_history, error_history) =
+            engine.metric_histories(duration_ms);
         let consistency = consistency(&burst_history);
         Self {
             duration_ms,
@@ -71,6 +73,7 @@ impl Metrics {
             consistency: round2(consistency),
             characters,
             wpm_history,
+            raw_wpm_history,
             burst_history,
             error_history,
         }

@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     error::Error,
     fmt,
     fs::{self, OpenOptions},
@@ -30,6 +30,8 @@ use crate::typing::{
 pub struct Repository {
     connection: Connection,
 }
+
+const BASELINE_LATENCY_WINDOW: usize = 2_048;
 
 pub struct OpenedRepository {
     pub repository: Repository,
@@ -295,19 +297,37 @@ impl PersonalBaselineProfile {
 
     fn observe_records(&mut self, records: &[WordObservationRecord]) {
         for record in records {
-            if record.active_ms > 0 && record.grapheme_count > 0 {
-                self.latency_samples.push((
-                    record.grapheme_count,
-                    record.active_ms as f64 / f64::from(record.grapheme_count),
-                ));
-                self.uncorrected_samples = self
-                    .uncorrected_samples
-                    .saturating_add(u64::from(record.confirmed_error));
-                self.corrected_samples = self
-                    .corrected_samples
-                    .saturating_add(u64::from(!record.confirmed_error && record.corrections > 0));
-            }
+            self.observe_sample(
+                record.active_ms,
+                record.grapheme_count,
+                record.confirmed_error,
+                record.corrections,
+            );
         }
+        self.refresh_rates();
+    }
+
+    fn observe_sample(
+        &mut self,
+        active_ms: u64,
+        grapheme_count: u16,
+        confirmed_error: bool,
+        corrections: u32,
+    ) {
+        if active_ms == 0 || grapheme_count == 0 {
+            return;
+        }
+        self.latency_samples
+            .push((grapheme_count, active_ms as f64 / f64::from(grapheme_count)));
+        self.uncorrected_samples = self
+            .uncorrected_samples
+            .saturating_add(u64::from(confirmed_error));
+        self.corrected_samples = self
+            .corrected_samples
+            .saturating_add(u64::from(!confirmed_error && corrections > 0));
+    }
+
+    fn refresh_rates(&mut self) {
         let prior = PersonalBaseline::default();
         let prior_strength = 24.0;
         let exposures = self.latency_samples.len() as f64;
@@ -738,20 +758,32 @@ impl Repository {
     pub fn rebuild_adaptive_projections(&self) -> Result<RebuildReport> {
         let transaction =
             rusqlite::Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
-        let mut raw_statement = transaction.prepare(
-            "SELECT codec_version, uncompressed_size, blob FROM raw_events ORDER BY session_id",
-        )?;
-        let mut raw_rows = raw_statement.query([])?;
-        while let Some(row) = raw_rows.next()? {
-            let version = row.get::<_, u16>(0)?;
-            let size = row.get::<_, i64>(1)?;
-            let blob = row.get::<_, Vec<u8>>(2)?;
-            let size =
-                usize::try_from(size).context("tamanho negativo nos eventos brutos persistidos")?;
-            RawEventCodec::decode(version, size, &blob)?;
+        let report = self.rebuild_adaptive_projections_in(&transaction, true)?;
+        transaction.commit()?;
+        Ok(report)
+    }
+
+    fn rebuild_adaptive_projections_in(
+        &self,
+        transaction: &Connection,
+        validate_raw_events: bool,
+    ) -> Result<RebuildReport> {
+        if validate_raw_events {
+            let mut raw_statement = transaction.prepare(
+                "SELECT codec_version, uncompressed_size, blob FROM raw_events ORDER BY session_id",
+            )?;
+            let mut raw_rows = raw_statement.query([])?;
+            while let Some(row) = raw_rows.next()? {
+                let version = row.get::<_, u16>(0)?;
+                let size = row.get::<_, i64>(1)?;
+                let blob = row.get::<_, Vec<u8>>(2)?;
+                let size = usize::try_from(size)
+                    .context("tamanho negativo nos eventos brutos persistidos")?;
+                RawEventCodec::decode(version, size, &blob)?;
+            }
+            drop(raw_rows);
+            drop(raw_statement);
         }
-        drop(raw_rows);
-        drop(raw_statement);
 
         let global_reset = transaction
             .query_row(
@@ -904,7 +936,6 @@ impl Repository {
                 ],
             )?;
         }
-        transaction.commit()?;
         Ok(report)
     }
 
@@ -918,7 +949,7 @@ impl Repository {
                     s.selections_json, s.session_kind,
                     r.codec_version, r.uncompressed_size, r.blob
              FROM sessions s
-             JOIN raw_events r ON r.session_id = s.id
+             LEFT JOIN raw_events r ON r.session_id = s.id
              ORDER BY s.id",
         )?;
         let mut baselines = HashMap::<String, PersonalBaselineProfile>::new();
@@ -931,17 +962,26 @@ impl Repository {
             let stimuli = row.get::<_, String>(3)?;
             let selections = row.get::<_, String>(4)?;
             let session_kind = row.get::<_, String>(5)?;
-            let version = row.get::<_, u16>(6)?;
-            let size = row.get::<_, i64>(7)?;
-            let blob = row.get::<_, Vec<u8>>(8)?;
-            let size =
-                usize::try_from(size).context("tamanho negativo nos eventos brutos persistidos")?;
-            let events = RawEventCodec::decode(version, size, &blob)?;
-            let config = toml::from_str::<TestConfig>(&config)?;
             let stimuli = serde_json::from_str::<Vec<String>>(&stimuli)?;
-            if stimuli.is_empty() {
+            let raw = match (
+                row.get::<_, Option<u16>>(6)?,
+                row.get::<_, Option<i64>>(7)?,
+                row.get::<_, Option<Vec<u8>>>(8)?,
+            ) {
+                (Some(version), Some(size), Some(blob)) => {
+                    let size = usize::try_from(size)
+                        .context("tamanho negativo nos eventos brutos persistidos")?;
+                    Some(RawEventCodec::decode(version, size, &blob)?)
+                }
+                (None, None, None) => None,
+                _ => anyhow::bail!("registro incompleto de eventos brutos na sessão #{id}"),
+            };
+            if stimuli.is_empty() || raw.is_none() {
+                observe_stored_session_baseline(&transaction, id, &mut baselines)?;
                 continue;
             }
+            let events = raw.expect("eventos brutos verificados como presentes");
+            let config = toml::from_str::<TestConfig>(&config)?;
             let selections = serde_json::from_str::<Vec<Option<WordSelection>>>(&selections)?;
             let replay = replay_session(config.clone(), stimuli, &events, &terminal_state)
                 .with_context(|| format!("reconstruir a sessão #{id}"))?;
@@ -987,9 +1027,8 @@ impl Repository {
             .iter()
             .map(|(_, _, observations)| observations.len())
             .sum();
+        let mut report = self.rebuild_adaptive_projections_in(&transaction, false)?;
         transaction.commit()?;
-
-        let mut report = self.rebuild_adaptive_projections()?;
         report.metrics = rebuilt.len();
         report.observations = observation_count;
         Ok(report)
@@ -1055,30 +1094,39 @@ impl Repository {
     }
 
     pub fn baseline_profile(&self, language: &str) -> Result<PersonalBaselineProfile> {
-        let mut statement = self.connection.prepare(
-            "SELECT grapheme_count, active_ms * 1.0 / grapheme_count,
-                    confirmed_error, corrections
+        let (exposures, uncorrected, corrected) = self.connection.query_row(
+            "SELECT COUNT(*),
+                    COALESCE(SUM(confirmed_error != 0), 0),
+                    COALESCE(SUM(confirmed_error = 0 AND corrections > 0), 0)
              FROM word_observations
              WHERE language = ?1 AND active_ms > 0 AND grapheme_count > 0",
-        )?;
-        let rows = statement
-            .query_map([language], |row| {
+            [language],
+            |row| {
                 Ok((
-                    row.get::<_, u16>(0)?,
-                    row.get::<_, f64>(1)?,
-                    row.get::<_, bool>(2)?,
-                    row.get::<_, u32>(3)?,
+                    row.get::<_, u64>(0)?,
+                    row.get::<_, u64>(1)?,
+                    row.get::<_, u64>(2)?,
                 ))
+            },
+        )?;
+        let latency_samples = self
+            .connection
+            .prepare(
+                "SELECT grapheme_count, active_ms * 1.0 / grapheme_count
+                 FROM word_observations
+                 WHERE language = ?1 AND active_ms > 0 AND grapheme_count > 0
+                 ORDER BY id DESC
+                 LIMIT ?2",
+            )?
+            .query_map(params![language, BASELINE_LATENCY_WINDOW], |row| {
+                Ok((row.get::<_, u16>(0)?, row.get::<_, f64>(1)?))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         let prior = PersonalBaseline::default();
-        let exposures = rows.len() as f64;
+        let exposures = exposures as f64;
         let prior_strength = 24.0;
-        let uncorrected = rows.iter().filter(|(_, _, error, _)| *error).count() as f64;
-        let corrected = rows
-            .iter()
-            .filter(|(_, _, error, corrections)| !*error && *corrections > 0)
-            .count() as f64;
+        let uncorrected = uncorrected as f64;
+        let corrected = corrected as f64;
         Ok(PersonalBaselineProfile {
             rates: PersonalBaseline {
                 uncorrected_error_rate: (prior.uncorrected_error_rate * prior_strength
@@ -1087,10 +1135,7 @@ impl Repository {
                 corrected_error_rate: (prior.corrected_error_rate * prior_strength + corrected)
                     / (prior_strength + exposures),
             },
-            latency_samples: rows
-                .into_iter()
-                .map(|(length, latency, _, _)| (length, latency))
-                .collect(),
+            latency_samples,
             uncorrected_samples: uncorrected as u64,
             corrected_samples: corrected as u64,
         })
@@ -1105,9 +1150,13 @@ impl Repository {
 
     /// Avaliações aparecem automaticamente e nunca dependem de uma escolha na
     /// interface. A primeira só ocorre depois de sete sessões completas.
-    pub fn next_session_kind(&self, config: &TestConfig) -> Result<SessionKind> {
+    pub fn next_session_kind(
+        &self,
+        config: &TestConfig,
+        eligible_words: &[String],
+    ) -> Result<SessionKind> {
         if matches!(config.mode, crate::typing::TestMode::Quote) {
-            return Ok(SessionKind::Transfer);
+            return Ok(SessionKind::Practice);
         }
         if !config.adaptive {
             return Ok(SessionKind::Practice);
@@ -1118,10 +1167,18 @@ impl Repository {
             |row| row.get::<_, u64>(0),
         )?;
         let next = completed + 1;
-        let has_due_review = self
-            .load_all_review_states()?
-            .into_iter()
-            .any(|(_, _, state)| state.value_at(Local::now().timestamp()) > 0.0);
+        let eligible_words = eligible_words
+            .iter()
+            .map(String::as_str)
+            .collect::<HashSet<_>>();
+        let has_due_review =
+            self.load_all_review_states()?
+                .into_iter()
+                .any(|(language, word, state)| {
+                    language == config.language
+                        && eligible_words.contains(word.as_str())
+                        && state.value_at(Local::now().timestamp()) > 0.0
+                });
         Ok(if completed > 0 && next.is_multiple_of(8) {
             SessionKind::Assessment
         } else if completed > 0 && next.is_multiple_of(12) && has_due_review {
@@ -1779,6 +1836,42 @@ fn insert_word_observation(
     Ok(())
 }
 
+fn observe_stored_session_baseline(
+    connection: &Connection,
+    session_id: i64,
+    baselines: &mut HashMap<String, PersonalBaselineProfile>,
+) -> Result<()> {
+    let mut statement = connection.prepare(
+        "SELECT language, active_ms, grapheme_count, confirmed_error, corrections
+         FROM word_observations
+         WHERE session_id = ?1
+         ORDER BY id",
+    )?;
+    let samples = statement
+        .query_map([session_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, u64>(1)?,
+                row.get::<_, u16>(2)?,
+                row.get::<_, bool>(3)?,
+                row.get::<_, u32>(4)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for (language, active_ms, grapheme_count, confirmed_error, corrections) in samples {
+        baselines.entry(language).or_default().observe_sample(
+            active_ms,
+            grapheme_count,
+            confirmed_error,
+            corrections,
+        );
+    }
+    for baseline in baselines.values_mut() {
+        baseline.refresh_rates();
+    }
+    Ok(())
+}
+
 struct ReplayedSession {
     engine: TestEngine,
     end: RawSessionEnd,
@@ -2151,6 +2244,8 @@ fn migrate(connection: &Connection) -> Result<()> {
             [],
         )?;
     }
+    let selections_json_was_missing =
+        !table_has_column(&transaction, "sessions", "selections_json")?;
     for (column, definition) in [
         ("seed_hex", "TEXT NOT NULL DEFAULT '0000000000000000'"),
         ("stimuli_json", "TEXT NOT NULL DEFAULT '[]'"),
@@ -2163,6 +2258,9 @@ fn migrate(connection: &Connection) -> Result<()> {
                 [],
             )?;
         }
+    }
+    if selections_json_was_missing {
+        backfill_session_selections(&transaction)?;
     }
     for (column, definition) in [
         ("planning_ms", "INTEGER NOT NULL DEFAULT 0"),
@@ -2191,6 +2289,60 @@ fn migrate(connection: &Connection) -> Result<()> {
     )?;
     transaction.commit()?;
     Ok(())
+}
+
+fn backfill_session_selections(connection: &Connection) -> Result<()> {
+    let sessions = connection
+        .prepare("SELECT id, stimuli_json FROM sessions ORDER BY id")?
+        .query_map([], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for (session_id, stimuli_json) in sessions {
+        let stimuli = serde_json::from_str::<Vec<String>>(&stimuli_json)?;
+        let observations = connection
+            .prepare(
+                "SELECT word, selection_source, selection_propensity
+                 FROM word_observations
+                 WHERE session_id = ?1
+                 ORDER BY id",
+            )?
+            .query_map([session_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<f64>>(2)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut selections = observations
+            .into_iter()
+            .map(|(word, source, propensity)| match (source, propensity) {
+                (Some(source), Some(propensity)) => Ok(Some(WordSelection {
+                    word,
+                    source: selection_source_from_db(&source)?,
+                    propensity,
+                })),
+                _ => Ok(None),
+            })
+            .collect::<Result<Vec<_>>>()?;
+        selections.resize(stimuli.len().max(selections.len()), None);
+        connection.execute(
+            "UPDATE sessions SET selections_json = ?2 WHERE id = ?1",
+            params![session_id, serde_json::to_string(&selections)?],
+        )?;
+    }
+    Ok(())
+}
+
+fn selection_source_from_db(value: &str) -> Result<SelectionSource> {
+    match value {
+        "representative" => Ok(SelectionSource::Representative),
+        "targeted" => Ok(SelectionSource::Targeted),
+        "exploration" => Ok(SelectionSource::Exploration),
+        "transfer" => Ok(SelectionSource::Transfer),
+        _ => anyhow::bail!("fonte de seleção desconhecida: {value}"),
+    }
 }
 
 fn is_database_corruption(error: &anyhow::Error) -> bool {
@@ -2312,6 +2464,10 @@ mod tests {
         }
     }
 
+    fn eligible_words() -> Vec<String> {
+        vec!["casa".into(), "tempo".into(), "ação".into()]
+    }
+
     #[test]
     fn migrations_create_a_session_repository() {
         let temporary = tempfile::tempdir().unwrap();
@@ -2347,11 +2503,25 @@ mod tests {
                    seed_hex TEXT NOT NULL DEFAULT '0000000000000000',
                    stimuli_json TEXT NOT NULL DEFAULT '[]', policy_version INTEGER NOT NULL DEFAULT 0
                  );
+                 CREATE TABLE word_observations (
+                   id INTEGER PRIMARY KEY, session_id INTEGER NOT NULL REFERENCES sessions(id),
+                   language TEXT NOT NULL, word TEXT NOT NULL, confirmed_error INTEGER NOT NULL,
+                   corrections INTEGER NOT NULL, active_ms INTEGER NOT NULL, afk_ms INTEGER NOT NULL,
+                   fast_success INTEGER NOT NULL DEFAULT 0, grapheme_count INTEGER NOT NULL DEFAULT 0,
+                   slow INTEGER NOT NULL DEFAULT 0, latency_ratio REAL,
+                   evidence_weight REAL NOT NULL DEFAULT 1,
+                   selection_source TEXT, selection_propensity REAL,
+                   mechanics_json TEXT NOT NULL DEFAULT '[]'
+                 );
                  INSERT INTO sessions (
                    terminal_state, config_toml, elapsed_ms, wpm, raw_wpm, accuracy,
                    correct_chars, incorrect_chars, extra_chars, missed_chars,
-                   metrics_version, adaptive_version, codec_version
-                 ) VALUES ('completed', '', 1, 1, 1, 100, 1, 0, 0, 0, 1, 1, 1);",
+                   metrics_version, adaptive_version, codec_version, stimuli_json
+                 ) VALUES ('completed', '', 1, 1, 1, 100, 1, 0, 0, 0, 1, 1, 1, '[\"casa\"]');
+                 INSERT INTO word_observations (
+                   session_id, language, word, confirmed_error, corrections,
+                   active_ms, afk_ms, grapheme_count, selection_source, selection_propensity
+                 ) VALUES (1, 'portuguese', 'casa', 0, 0, 400, 0, 4, 'targeted', 0.125);",
             )
             .unwrap();
         drop(connection);
@@ -2366,14 +2536,86 @@ mod tests {
                 .unwrap(),
             8
         );
+        let selections = repository
+            .connection
+            .query_row("SELECT selections_json FROM sessions", [], |row| {
+                row.get::<_, String>(0)
+            })
+            .unwrap();
         assert_eq!(
-            repository
-                .connection
-                .query_row("SELECT selections_json FROM sessions", [], |row| row
-                    .get::<_, String>(0))
-                .unwrap(),
-            "[]"
+            serde_json::from_str::<Vec<Option<WordSelection>>>(&selections).unwrap(),
+            vec![Some(WordSelection {
+                word: "casa".into(),
+                source: SelectionSource::Targeted,
+                propensity: 0.125,
+            })]
         );
+    }
+
+    #[test]
+    fn migracao_v7_preserva_a_selecao_ao_reconstruir() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("history.db");
+        let repository = Repository::open(&path).unwrap();
+        let config = TestConfig {
+            mode: TestMode::Words { count: 1 },
+            ..TestConfig::default()
+        };
+        let selection = WordSelection {
+            word: "casa".into(),
+            source: SelectionSource::Targeted,
+            propensity: 0.125,
+        };
+        let mut engine = TestEngine::new(config.clone(), ["casa".into()]);
+        engine.update(InputEvent::Key {
+            action: KeyAction::Text("casa".into()),
+            at_ms: 400,
+        });
+        let observations = derive_word_observations(
+            &engine,
+            &PersonalBaselineProfile::default(),
+            false,
+            false,
+            &[Some(selection)],
+        );
+        let raw =
+            RawEventCodec::materialize(engine.recorded_events(), 400, RawSessionEnd::Completed);
+        let id = repository
+            .save_session_with_provenance(
+                &config,
+                engine.status(),
+                engine.metrics(),
+                &observations,
+                &raw,
+                &SessionProvenance {
+                    stimuli: vec!["casa".into()],
+                    ..SessionProvenance::default()
+                },
+            )
+            .unwrap();
+        drop(repository);
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "DROP INDEX IF EXISTS idx_sessions_comparable;
+                 ALTER TABLE sessions DROP COLUMN selections_json;
+                 UPDATE schema_version SET version = 7;",
+            )
+            .unwrap();
+        drop(connection);
+
+        let repository = Repository::open(&path).unwrap();
+        repository.rebuild_derived_data().unwrap();
+        let restored = repository
+            .connection
+            .query_row(
+                "SELECT selection_source, selection_propensity
+                 FROM word_observations WHERE session_id = ?1",
+                [id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?)),
+            )
+            .unwrap();
+        assert_eq!(restored, ("targeted".into(), 0.125));
     }
 
     #[test]
@@ -2669,6 +2911,126 @@ mod tests {
                 .unwrap(),
             "casa"
         );
+    }
+
+    #[test]
+    fn rebuild_reverte_metricas_se_a_projecao_falhar() {
+        let temporary = tempfile::tempdir().unwrap();
+        let repository = Repository::open(&temporary.path().join("history.db")).unwrap();
+        let config = TestConfig {
+            mode: TestMode::Words { count: 1 },
+            ..TestConfig::default()
+        };
+        let mut engine = TestEngine::new(config.clone(), ["casa".into()]);
+        engine.update(InputEvent::Key {
+            action: KeyAction::Text("casa".into()),
+            at_ms: 400,
+        });
+        let raw =
+            RawEventCodec::materialize(engine.recorded_events(), 400, RawSessionEnd::Completed);
+        let id = repository
+            .save_session_with_provenance(
+                &config,
+                engine.status(),
+                engine.metrics(),
+                &[],
+                &raw,
+                &SessionProvenance {
+                    stimuli: vec!["casa".into()],
+                    ..SessionProvenance::default()
+                },
+            )
+            .unwrap();
+        repository
+            .connection
+            .execute("UPDATE sessions SET wpm = 1 WHERE id = ?1", [id])
+            .unwrap();
+        repository
+            .connection
+            .execute_batch(
+                "CREATE TEMP TRIGGER impedir_skill
+                 BEFORE INSERT ON word_skill
+                 BEGIN SELECT RAISE(ABORT, 'falha injetada'); END;",
+            )
+            .unwrap();
+
+        assert!(repository.rebuild_derived_data().is_err());
+        assert_eq!(
+            repository
+                .connection
+                .query_row("SELECT wpm FROM sessions WHERE id = ?1", [id], |row| row
+                    .get::<_, f64>(0))
+                .unwrap(),
+            1.0
+        );
+        assert_eq!(
+            repository
+                .connection
+                .query_row(
+                    "SELECT COUNT(*) FROM word_observations WHERE session_id = ?1",
+                    [id],
+                    |row| row.get::<_, u64>(0),
+                )
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn rebuild_usa_o_historico_legado_no_baseline_cronologico() {
+        let temporary = tempfile::tempdir().unwrap();
+        let repository = Repository::open(&temporary.path().join("history.db")).unwrap();
+        for index in 0..8 {
+            repository
+                .save_session_with_observations(
+                    &TestConfig::default(),
+                    &TestStatus::Completed { ended_at_ms: index },
+                    Metrics::default(),
+                    &[word_observation(&format!("legada{index}"), false)],
+                )
+                .unwrap();
+        }
+        let config = TestConfig {
+            mode: TestMode::Words { count: 1 },
+            ..TestConfig::default()
+        };
+        let mut engine = TestEngine::new(config.clone(), ["casa".into()]);
+        for (grapheme, at_ms) in [("c", 100), ("a", 300), ("s", 500), ("a", 700)] {
+            engine.update(InputEvent::Key {
+                action: KeyAction::Text(grapheme.into()),
+                at_ms,
+            });
+        }
+        let baseline = repository.baseline_profile("portuguese").unwrap();
+        let expected = derive_word_observations(&engine, &baseline, false, false, &[])[0]
+            .latency_ratio
+            .unwrap();
+        let raw =
+            RawEventCodec::materialize(engine.recorded_events(), 700, RawSessionEnd::Completed);
+        let id = repository
+            .save_session_with_provenance(
+                &config,
+                engine.status(),
+                engine.metrics(),
+                &[],
+                &raw,
+                &SessionProvenance {
+                    stimuli: vec!["casa".into()],
+                    ..SessionProvenance::default()
+                },
+            )
+            .unwrap();
+
+        repository.rebuild_derived_data().unwrap();
+        let rebuilt = repository
+            .connection
+            .query_row(
+                "SELECT latency_ratio FROM word_observations WHERE session_id = ?1",
+                [id],
+                |row| row.get::<_, f64>(0),
+            )
+            .unwrap();
+        assert!((rebuilt - expected).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -3099,6 +3461,30 @@ mod tests {
     }
 
     #[test]
+    fn baseline_limita_memoria_sem_perder_as_taxas_historicas() {
+        let temporary = tempfile::tempdir().unwrap();
+        let repository = Repository::open(&temporary.path().join("history.db")).unwrap();
+        let session_id = repository
+            .save_session(
+                &TestConfig::default(),
+                &TestStatus::Completed { ended_at_ms: 1 },
+                Metrics::default(),
+            )
+            .unwrap();
+        let transaction = repository.connection.unchecked_transaction().unwrap();
+        for index in 0..(BASELINE_LATENCY_WINDOW + 100) {
+            let mut observation = word_observation(&format!("palavra{index}"), index == 0);
+            observation.grapheme_count = 4;
+            insert_word_observation(&transaction, session_id, &observation).unwrap();
+        }
+        transaction.commit().unwrap();
+
+        let baseline = repository.baseline_profile("portuguese").unwrap();
+        assert_eq!(baseline.latency_samples.len(), BASELINE_LATENCY_WINDOW);
+        assert_eq!(baseline.uncorrected_samples, 1);
+    }
+
+    #[test]
     fn mecanica_e_materializada_separada_da_palavra() {
         let temporary = tempfile::tempdir().unwrap();
         let repository = Repository::open(&temporary.path().join("history.db")).unwrap();
@@ -3212,7 +3598,19 @@ mod tests {
         let repository = Repository::open(&temporary.path().join("history.db")).unwrap();
         let config = TestConfig::default();
         assert_eq!(
-            repository.next_session_kind(&config).unwrap(),
+            repository
+                .next_session_kind(&config, &eligible_words())
+                .unwrap(),
+            SessionKind::Practice
+        );
+        let quote = TestConfig {
+            mode: TestMode::Quote,
+            ..config.clone()
+        };
+        assert_eq!(
+            repository
+                .next_session_kind(&quote, &eligible_words())
+                .unwrap(),
             SessionKind::Practice
         );
         for ended_at_ms in 1..=3 {
@@ -3225,7 +3623,9 @@ mod tests {
                 .unwrap();
         }
         assert_eq!(
-            repository.next_session_kind(&config).unwrap(),
+            repository
+                .next_session_kind(&config, &eligible_words())
+                .unwrap(),
             SessionKind::Transfer
         );
         for ended_at_ms in 4..=7 {
@@ -3238,7 +3638,9 @@ mod tests {
                 .unwrap();
         }
         assert_eq!(
-            repository.next_session_kind(&config).unwrap(),
+            repository
+                .next_session_kind(&config, &eligible_words())
+                .unwrap(),
             SessionKind::Assessment
         );
     }
@@ -3258,7 +3660,39 @@ mod tests {
                 .unwrap();
         }
         assert_eq!(
-            repository.next_session_kind(&config).unwrap(),
+            repository
+                .next_session_kind(&config, &eligible_words())
+                .unwrap(),
+            SessionKind::Transfer
+        );
+        repository
+            .connection
+            .execute(
+                "INSERT INTO skill_review (
+                    language, word, last_seen_unix_s, last_session_id, consecutive_clean_sessions
+                 ) VALUES ('english', 'house', ?1, 11, 1)",
+                [Local::now().timestamp() - 3 * 86_400],
+            )
+            .unwrap();
+        assert_eq!(
+            repository
+                .next_session_kind(&config, &eligible_words())
+                .unwrap(),
+            SessionKind::Transfer
+        );
+        repository
+            .connection
+            .execute(
+                "INSERT INTO skill_review (
+                    language, word, last_seen_unix_s, last_session_id, consecutive_clean_sessions
+                 ) VALUES ('portuguese', 'fora-do-pacote', ?1, 11, 1)",
+                [Local::now().timestamp() - 3 * 86_400],
+            )
+            .unwrap();
+        assert_eq!(
+            repository
+                .next_session_kind(&config, &eligible_words())
+                .unwrap(),
             SessionKind::Transfer
         );
         repository
@@ -3271,7 +3705,9 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            repository.next_session_kind(&config).unwrap(),
+            repository
+                .next_session_kind(&config, &eligible_words())
+                .unwrap(),
             SessionKind::Retention
         );
     }

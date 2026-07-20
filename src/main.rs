@@ -91,6 +91,7 @@ fn main() -> Result<()> {
         &repository,
     )?;
     let shutdown = shutdown_flag()?;
+    ui::inicializar_capacidades_do_terminal();
 
     ratatui::run(|terminal| {
         let _mouse_guard = scopeguard::guard((), |_| {
@@ -346,7 +347,12 @@ impl App {
             }
             adaptive.set_baseline(language, baseline.rates);
         }
-        let session_kind = repository.next_session_kind(&preferences.test)?;
+        let session_kind = repository.next_session_kind(
+            &preferences.test,
+            catalog
+                .word_pack(&preferences.test.language, &preferences.test.word_pack)
+                .context("o pacote de palavras configurado não está disponível")?,
+        )?;
         let (engine, generator, selections, current_quote) =
             new_test(&catalog, &preferences.test, seed, &adaptive, session_kind)?;
         let quote_favorite = current_quote
@@ -420,7 +426,15 @@ impl App {
             self.session_baseline.rates,
         );
         self.seed = rand::random();
-        let session_kind = repository.next_session_kind(&self.preferences.test)?;
+        let session_kind = repository.next_session_kind(
+            &self.preferences.test,
+            self.catalog
+                .word_pack(
+                    &self.preferences.test.language,
+                    &self.preferences.test.word_pack,
+                )
+                .context("o pacote de palavras configurado não está disponível")?,
+        )?;
         let (engine, generator, selections, current_quote) = new_test(
             &self.catalog,
             &self.preferences.test,
@@ -644,7 +658,8 @@ impl App {
         statistics
             .priority_patterns
             .retain(|pattern| pattern.language == config.language);
-        if let Some(candidates) = self.catalog.word_pack(&config.language, &config.word_pack) {
+        if let Some(configured_words) = self.catalog.word_pack(&config.language, &config.word_pack)
+        {
             let draws = match config.mode {
                 TestMode::Words { count } => usize::from(count),
                 TestMode::Time { seconds } => {
@@ -658,12 +673,40 @@ impl App {
                 .iter()
                 .map(|word| word.word.clone())
                 .collect::<Vec<_>>();
-            let chances = self.adaptive.estimated_session_chances(
-                &config.language,
-                &targets,
-                candidates,
-                draws,
-            );
+            let next_kind = repository.next_session_kind(config, configured_words)?;
+            let (candidates, retention_words) =
+                session_word_pool(configured_words, config, &self.adaptive, next_kind);
+            let chances = if matches!(config.mode, TestMode::Quote) {
+                HashMap::new()
+            } else if next_kind == SessionKind::Practice && config.adaptive {
+                self.adaptive.estimated_session_chances(
+                    &config.language,
+                    &targets,
+                    &candidates,
+                    draws,
+                )
+            } else {
+                let uniform = if candidates.is_empty() || draws == 0 {
+                    0.0
+                } else {
+                    1.0 - (1.0 - 1.0 / candidates.len() as f64).powi(draws as i32)
+                };
+                targets
+                    .iter()
+                    .map(|word| {
+                        let chance = if next_kind == SessionKind::Retention
+                            && retention_words.contains(word)
+                        {
+                            1.0
+                        } else if candidates.contains(word) {
+                            uniform
+                        } else {
+                            0.0
+                        };
+                        (word.clone(), chance)
+                    })
+                    .collect()
+            };
             for word in &mut statistics.priority_words {
                 word.estimated_session_chance = chances.get(&word.word).copied().unwrap_or(0.0);
             }
@@ -1076,7 +1119,7 @@ fn handle_mouse(
 
     let Some(cards) = ui::config_card_areas(viewport, &app.engine.config().mode) else {
         app.settings_open = true;
-        app.settings_focus = 0;
+        app.settings_focus = initial_settings_focus(&app.engine.config().mode);
         return Ok(MouseOutcome::Changed);
     };
     let x = mouse.column;
@@ -1362,7 +1405,7 @@ fn handle_key(
         && !matches!(app.engine.status(), TestStatus::Running { .. })
     {
         app.settings_open = true;
-        app.settings_focus = 0;
+        app.settings_focus = initial_settings_focus(&app.engine.config().mode);
         return Ok(false);
     }
     if pressed == app.preferences.keymap.cancel {
@@ -1484,10 +1527,16 @@ fn handle_settings_key(
     match code {
         KeyCode::Tab | KeyCode::Down => {
             app.settings_focus = (app.settings_focus + 1) % 9;
+            if matches!(app.engine.config().mode, TestMode::Quote) && app.settings_focus == 0 {
+                app.settings_focus = 1;
+            }
             return Ok(false);
         }
         KeyCode::BackTab | KeyCode::Up => {
             app.settings_focus = app.settings_focus.checked_sub(1).unwrap_or(8);
+            if matches!(app.engine.config().mode, TestMode::Quote) && app.settings_focus == 0 {
+                app.settings_focus = 8;
+            }
             return Ok(false);
         }
         _ => {}
@@ -1593,6 +1642,10 @@ fn handle_settings_key(
     Ok(false)
 }
 
+fn initial_settings_focus(mode: &TestMode) -> usize {
+    usize::from(matches!(mode, TestMode::Quote))
+}
+
 fn next<T: Copy + PartialEq>(values: &[T], current: T) -> T {
     let index = values
         .iter()
@@ -1662,13 +1715,48 @@ fn word_generator(
     let configured_words = catalog
         .word_pack(&config.language, &config.word_pack)
         .context("o pacote de palavras configurado não está disponível")?;
+    let (words, retention_words) =
+        session_word_pool(configured_words, config, adaptive, session_kind);
+    let generator = WordGenerator::new(&words, rng, config.punctuation, config.numbers);
+    Ok(match session_kind {
+        SessionKind::Assessment => generator.with_assessment(),
+        SessionKind::Practice if config.adaptive => {
+            generator.with_adaptive(&config.language, adaptive.clone())
+        }
+        SessionKind::Retention => generator.with_forced_words(retention_words),
+        SessionKind::Practice | SessionKind::Transfer | SessionKind::Repeat => generator,
+    })
+}
+
+fn session_word_pool(
+    configured_words: &[String],
+    config: &tuipe::typing::TestConfig,
+    adaptive: &AdaptiveSampler,
+    session_kind: SessionKind,
+) -> (Vec<String>, Vec<String>) {
+    let retention_words = if session_kind == SessionKind::Retention {
+        adaptive.retention_candidates(&config.language, configured_words)
+    } else {
+        Vec::new()
+    };
     let partitioned = match session_kind {
         SessionKind::Transfer => configured_words
             .iter()
             .filter(|word| is_transfer_holdout(word))
             .cloned()
             .collect::<Vec<_>>(),
-        SessionKind::Retention => adaptive.retention_candidates(&config.language, configured_words),
+        SessionKind::Retention => {
+            let mut pool = retention_words.clone();
+            for word in configured_words {
+                if pool.len() >= 3 {
+                    break;
+                }
+                if !pool.contains(word) {
+                    pool.push(word.clone());
+                }
+            }
+            pool
+        }
         SessionKind::Practice if config.adaptive => configured_words
             .iter()
             .filter(|word| !is_transfer_holdout(word))
@@ -1676,22 +1764,12 @@ fn word_generator(
             .collect(),
         SessionKind::Assessment | SessionKind::Practice | SessionKind::Repeat => Vec::new(),
     };
-    let words = if partitioned.len() >= 3 {
-        partitioned.as_slice()
+    let words = if partitioned.is_empty() {
+        configured_words.to_vec()
     } else {
-        configured_words
+        partitioned
     };
-    let generator = WordGenerator::new(words, rng, config.punctuation, config.numbers);
-    Ok(match session_kind {
-        SessionKind::Assessment => generator.with_assessment(),
-        SessionKind::Practice if config.adaptive => {
-            generator.with_adaptive(&config.language, adaptive.clone())
-        }
-        SessionKind::Practice
-        | SessionKind::Transfer
-        | SessionKind::Retention
-        | SessionKind::Repeat => generator,
-    })
+    (words, retention_words)
 }
 
 /// Partição FNV-1a estável: aproximadamente 10% do pack nunca entra na prática
@@ -1861,6 +1939,17 @@ mod tests {
         assert_eq!(app.settings_focus, 0);
         handle_settings_key(&mut app, &repository, KeyCode::Enter, KeyModifiers::NONE).unwrap();
         assert!(app.preferences.test.punctuation);
+
+        let quote_config = tuipe::typing::TestConfig {
+            mode: TestMode::Quote,
+            ..tuipe::typing::TestConfig::default()
+        };
+        let mut quote = app_de_teste(quote_config, &["casa "]);
+        handle_key(&mut quote, &repository, KeyCode::Esc, KeyModifiers::NONE).unwrap();
+        assert!(quote.settings_open);
+        assert_eq!(quote.settings_focus, 1);
+        handle_settings_key(&mut quote, &repository, KeyCode::Up, KeyModifiers::NONE).unwrap();
+        assert_eq!(quote.settings_focus, 8);
     }
 
     #[test]
@@ -2020,6 +2109,16 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(first, second);
         assert!((70..=130).contains(&first.len()));
+
+        let words = (0..100)
+            .map(|index| format!("palavra{index}"))
+            .collect::<Vec<_>>();
+        let config = tuipe::typing::TestConfig::default();
+        let adaptive = AdaptiveSampler::new(AdaptivePolicy::default());
+        let (practice, _) = session_word_pool(&words, &config, &adaptive, SessionKind::Practice);
+        let (transfer, _) = session_word_pool(&words, &config, &adaptive, SessionKind::Transfer);
+        assert!(practice.iter().all(|word| !is_transfer_holdout(word)));
+        assert!(transfer.iter().all(|word| is_transfer_holdout(word)));
     }
 
     #[test]

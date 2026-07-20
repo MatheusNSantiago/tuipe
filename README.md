@@ -29,9 +29,10 @@ Para executar sem instalar:
 cargo run --release
 ```
 
-O tuipe usa os ícones Nerd Font quando encontra uma fonte compatível instalada
-e seleciona o conjunto Unicode automaticamente nos demais computadores. A
-detecção pode ser sobrescrita para diagnóstico sem recompilar:
+No Kitty, o tuipe consulta a fonte ativa e usa os ícones Nerd Font quando ela é
+compatível. Nos demais terminais, o conjunto Unicode seguro é usado por padrão,
+pois não existe um protocolo portátil para descobrir a fonte ativa. A seleção
+pode ser sobrescrita sem recompilar:
 
 ```sh
 TUIPE_ICONS=nerd tuipe
