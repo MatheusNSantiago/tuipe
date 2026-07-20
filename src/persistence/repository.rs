@@ -4,7 +4,7 @@ use std::{
     path::Path,
 };
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use chrono::{Datelike, Local};
 use rusqlite::{Connection, OptionalExtension, params};
 
@@ -452,13 +452,17 @@ impl Repository {
                 |row| {
                     Ok((
                         row.get::<_, u16>(0)?,
-                        row.get::<_, i64>(1)? as usize,
+                        row.get::<_, i64>(1)?,
                         row.get::<_, Vec<u8>>(2)?,
                     ))
                 },
             )
             .optional()?
-            .map(|(version, size, blob)| RawEventCodec::decode(version, size, &blob))
+            .map(|(version, size, blob)| {
+                let size = usize::try_from(size)
+                    .context("tamanho negativo nos eventos brutos persistidos")?;
+                RawEventCodec::decode(version, size, &blob)
+            })
             .transpose()
     }
 
@@ -502,12 +506,14 @@ impl Repository {
             .query_map([], |row| {
                 Ok((
                     row.get::<_, u16>(0)?,
-                    row.get::<_, i64>(1)? as usize,
+                    row.get::<_, i64>(1)?,
                     row.get::<_, Vec<u8>>(2)?,
                 ))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         for (version, size, blob) in raw_rows {
+            let size =
+                usize::try_from(size).context("tamanho negativo nos eventos brutos persistidos")?;
             RawEventCodec::decode(version, size, &blob)?;
         }
 

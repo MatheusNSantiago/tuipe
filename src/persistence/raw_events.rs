@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::{collections::HashMap, io::Read};
 
 use crate::typing::{RecordedInputEvent, RecordedInputKind};
 
@@ -31,8 +31,26 @@ pub enum RawSessionEnd {
 
 pub struct RawEventCodec;
 
+#[derive(Debug, Serialize, Deserialize)]
+struct RawEventV1 {
+    delta_ms: u32,
+    kind: RawEventKindV1,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+enum RawEventKindV1 {
+    Insert { text: String, correct: bool },
+    Backspace,
+    Restart,
+    Finish,
+    Fail,
+}
+
 impl RawEventCodec {
-    pub const VERSION: u16 = 2;
+    pub const VERSION: u16 = 3;
+    pub const MAX_UNCOMPRESSED_SIZE: usize = 8 * 1024 * 1024;
+    const MAX_EVENTS: usize = 100_000;
+    const MAX_EVENT_TEXT: usize = 64 * 1024;
 
     /// Converte o relógio monotônico absoluto do motor em deltas compactos e
     /// acrescenta a causa terminal da sessão.
@@ -73,6 +91,10 @@ impl RawEventCodec {
     pub fn encode(events: &[RawEvent]) -> Result<(usize, Vec<u8>)> {
         Self::validate(events)?;
         let postcard = postcard::to_allocvec(events).context("serializar eventos brutos")?;
+        anyhow::ensure!(
+            postcard.len() <= Self::MAX_UNCOMPRESSED_SIZE,
+            "eventos brutos excedem o limite de segurança"
+        );
         let size = postcard.len();
         Ok((size, zstd::stream::encode_all(postcard.as_slice(), 3)?))
     }
@@ -83,16 +105,29 @@ impl RawEventCodec {
         compressed: &[u8],
     ) -> Result<Vec<RawEvent>> {
         anyhow::ensure!(
-            version == Self::VERSION,
+            (1..=Self::VERSION).contains(&version),
             "versão não suportada do codec de eventos brutos: {version}"
         );
-        let decoded = zstd::stream::decode_all(compressed)?;
+        anyhow::ensure!(
+            uncompressed_size <= Self::MAX_UNCOMPRESSED_SIZE,
+            "eventos brutos excedem o limite de segurança"
+        );
+        let decoder = zstd::stream::read::Decoder::new(compressed)?;
+        let mut decoded = Vec::with_capacity(uncompressed_size);
+        decoder
+            .take((uncompressed_size as u64).saturating_add(1))
+            .read_to_end(&mut decoded)?;
         anyhow::ensure!(
             decoded.len() == uncompressed_size,
             "o tamanho dos eventos brutos não corresponde ao cabeçalho"
         );
-        let events: Vec<RawEvent> =
-            postcard::from_bytes(&decoded).context("decodificar eventos brutos")?;
+        let events: Vec<RawEvent> = if version == 1 {
+            let legacy: Vec<RawEventV1> =
+                postcard::from_bytes(&decoded).context("decodificar eventos brutos v1")?;
+            legacy.into_iter().map(RawEvent::from).collect()
+        } else {
+            postcard::from_bytes(&decoded).context("decodificar eventos brutos")?
+        };
         Self::validate(&events)?;
         Ok(events)
     }
@@ -100,6 +135,10 @@ impl RawEventCodec {
     /// Repassa o fluxo como um editor determinístico. Isso detecta blobs
     /// íntegros na compressão, mas semanticamente impossíveis.
     pub fn validate(events: &[RawEvent]) -> Result<()> {
+        anyhow::ensure!(
+            events.len() <= Self::MAX_EVENTS,
+            "sessão bruta possui eventos demais"
+        );
         let mut inputs = HashMap::<u32, String>::new();
         let mut terminal = false;
         for event in events {
@@ -117,6 +156,11 @@ impl RawEventCodec {
                         input_after,
                         ..
                     } => {
+                        anyhow::ensure!(
+                            input_before.len() <= Self::MAX_EVENT_TEXT
+                                && input_after.len() <= Self::MAX_EVENT_TEXT,
+                            "snapshot legado excede o limite por evento"
+                        );
                         let current = inputs.entry(*word_index).or_default();
                         anyhow::ensure!(
                             current == input_before,
@@ -124,12 +168,77 @@ impl RawEventCodec {
                         );
                         current.clone_from(input_after);
                     }
-                    RecordedInputKind::Focus { .. } | RecordedInputKind::Paste { .. } => {}
+                    RecordedInputKind::InsertDelta { grapheme, .. } => {
+                        anyhow::ensure!(
+                            !grapheme.is_empty() && grapheme.len() <= Self::MAX_EVENT_TEXT,
+                            "delta de inserção possui tamanho inválido"
+                        );
+                        inputs.entry(*word_index).or_default().push_str(grapheme);
+                    }
+                    RecordedInputKind::DeleteDelta {
+                        deleted_graphemes, ..
+                    } => {
+                        let current = inputs.entry(*word_index).or_default();
+                        anyhow::ensure!(
+                            usize::from(*deleted_graphemes)
+                                <= unicode_segmentation::UnicodeSegmentation::graphemes(
+                                    current.as_str(),
+                                    true
+                                )
+                                .count(),
+                            "delta de exclusão ultrapassa a entrada existente"
+                        );
+                        remove_last_graphemes(current, *deleted_graphemes);
+                    }
+                    RecordedInputKind::Focus { .. }
+                    | RecordedInputKind::Paste { .. }
+                    | RecordedInputKind::PasteRedacted { .. } => {}
                 },
             }
         }
         anyhow::ensure!(terminal, "a sessão bruta não possui causa terminal");
         Ok(())
+    }
+}
+
+impl From<RawEventV1> for RawEvent {
+    fn from(event: RawEventV1) -> Self {
+        let kind = match event.kind {
+            RawEventKindV1::Insert { text, correct } => RawEventKind::Input {
+                word_index: 0,
+                event: RecordedInputKind::InsertDelta {
+                    grapheme: text,
+                    expected: None,
+                    correct,
+                },
+            },
+            RawEventKindV1::Backspace => RawEventKind::Input {
+                word_index: 0,
+                event: RecordedInputKind::DeleteDelta {
+                    deleted_graphemes: 1,
+                    corrected_graphemes: 0,
+                    whole_word: false,
+                },
+            },
+            RawEventKindV1::Restart => RawEventKind::Terminal(RawSessionEnd::Restarted),
+            RawEventKindV1::Finish => RawEventKind::Terminal(RawSessionEnd::Completed),
+            RawEventKindV1::Fail => RawEventKind::Terminal(RawSessionEnd::Failed),
+        };
+        Self {
+            delta_ms: event.delta_ms,
+            kind,
+        }
+    }
+}
+
+fn remove_last_graphemes(text: &mut String, count: u16) {
+    use unicode_segmentation::UnicodeSegmentation;
+
+    for _ in 0..count {
+        let Some((index, _)) = text.grapheme_indices(true).next_back() else {
+            break;
+        };
+        text.truncate(index);
     }
 }
 
@@ -159,6 +268,47 @@ mod tests {
             events
         );
         assert!(RawEventCodec::decode(1, size, &blob).is_err());
+    }
+
+    #[test]
+    fn codec_v1_historico_continua_legivel() {
+        let legacy = vec![
+            RawEventV1 {
+                delta_ms: 5,
+                kind: RawEventKindV1::Insert {
+                    text: "á".into(),
+                    correct: true,
+                },
+            },
+            RawEventV1 {
+                delta_ms: 7,
+                kind: RawEventKindV1::Finish,
+            },
+        ];
+        let bytes = postcard::to_allocvec(&legacy).unwrap();
+        let blob = zstd::stream::encode_all(bytes.as_slice(), 3).unwrap();
+
+        let decoded = RawEventCodec::decode(1, bytes.len(), &blob).unwrap();
+
+        assert!(matches!(
+            decoded[0].kind,
+            RawEventKind::Input {
+                event: RecordedInputKind::InsertDelta { .. },
+                ..
+            }
+        ));
+        assert_eq!(
+            decoded.last().map(|event| &event.kind),
+            Some(&RawEventKind::Terminal(RawSessionEnd::Completed))
+        );
+    }
+
+    #[test]
+    fn decoder_limita_a_descompressao_antes_de_alocar_o_blob_inteiro() {
+        let oversized = vec![0_u8; RawEventCodec::MAX_UNCOMPRESSED_SIZE + 1];
+        let blob = zstd::stream::encode_all(oversized.as_slice(), 1).unwrap();
+
+        assert!(RawEventCodec::decode(RawEventCodec::VERSION, oversized.len(), &blob).is_err());
     }
 
     #[test]

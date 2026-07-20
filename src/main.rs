@@ -9,7 +9,8 @@ use anyhow::{Context, Result};
 use crossterm::{
     cursor::SetCursorStyle,
     event::{
-        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
+        self, DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
+        EnableFocusChange, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
         MouseButton, MouseEvent, MouseEventKind,
     },
     execute,
@@ -52,12 +53,16 @@ fn main() -> Result<()> {
             );
             let _ = execute!(
                 stdout,
+                DisableBracketedPaste,
+                DisableFocusChange,
                 DisableMouseCapture,
                 SetCursorStyle::DefaultUserShape
             );
         });
         execute!(
             std::io::stdout(),
+            EnableBracketedPaste,
+            EnableFocusChange,
             EnableMouseCapture,
             SetCursorStyle::BlinkingBar
         )?;
@@ -366,6 +371,11 @@ impl App {
                                         expected: Some(expected),
                                         correct: false,
                                         ..
+                                    }
+                                    | RecordedInputKind::InsertDelta {
+                                        expected: Some(expected),
+                                        correct: false,
+                                        ..
                                     } if mechanics_for_token(expected).contains(&mechanic)
                                 )
                         });
@@ -427,8 +437,14 @@ impl App {
                         interrupted = true;
                     }
                 }
-                RecordedInputKind::Insert { .. } | RecordedInputKind::Delete { .. } => {
-                    let current_delete = matches!(event.kind, RecordedInputKind::Delete { .. });
+                RecordedInputKind::Insert { .. }
+                | RecordedInputKind::Delete { .. }
+                | RecordedInputKind::InsertDelta { .. }
+                | RecordedInputKind::DeleteDelta { .. } => {
+                    let current_delete = matches!(
+                        event.kind,
+                        RecordedInputKind::Delete { .. } | RecordedInputKind::DeleteDelta { .. }
+                    );
                     let counts = &mut event_counts[event.word_index];
                     counts.0 = counts.0.saturating_add(1);
                     counts.1 = counts.1.saturating_add(u16::from(current_delete));
@@ -444,7 +460,7 @@ impl App {
                     previous_key = Some((event.at_ms, event.word_index, current_delete));
                     interrupted = false;
                 }
-                RecordedInputKind::Paste { .. } => {}
+                RecordedInputKind::Paste { .. } | RecordedInputKind::PasteRedacted { .. } => {}
             }
         }
 

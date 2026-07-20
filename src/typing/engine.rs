@@ -50,6 +50,7 @@ pub struct RecordedInputEvent {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RecordedInputKind {
+    /// Formato legado do codec 2. Mantido apenas para ler históricos antigos.
     Insert {
         grapheme: String,
         expected: Option<String>,
@@ -70,13 +71,32 @@ pub enum RecordedInputKind {
     Paste {
         text: String,
     },
+    InsertDelta {
+        grapheme: String,
+        expected: Option<String>,
+        correct: bool,
+    },
+    DeleteDelta {
+        deleted_graphemes: u16,
+        corrected_graphemes: u16,
+        whole_word: bool,
+    },
+    PasteRedacted {
+        graphemes: u32,
+    },
+}
+
+#[derive(Debug, Clone)]
+enum CharacterEdit {
+    Insert(String),
+    Delete(u16),
 }
 
 #[derive(Debug, Clone)]
 struct CharacterEvent {
     word_index: usize,
-    input_after: String,
-    correct: bool,
+    edit: CharacterEdit,
+    correct: Option<bool>,
     at_ms: u64,
 }
 
@@ -163,18 +183,28 @@ impl TestEngine {
             return Vec::new();
         }
 
-        self.current_at_ms = match &event {
+        let at_ms = match &event {
             InputEvent::Tick { at_ms }
             | InputEvent::Key { at_ms, .. }
             | InputEvent::External { at_ms, .. } => *at_ms,
         };
+        self.current_at_ms = self.current_at_ms.max(at_ms);
 
         match event {
-            InputEvent::Tick { at_ms } => self.handle_tick(at_ms),
-            InputEvent::Key { action, at_ms } => self.handle_key(action, at_ms),
+            InputEvent::Tick { at_ms } => self.advance_deadline(at_ms),
+            InputEvent::Key { action, at_ms } => {
+                let mut transitions = self.advance_deadline(at_ms);
+                if !self.is_terminal() {
+                    transitions.extend(self.handle_key(action, at_ms));
+                }
+                transitions
+            }
             InputEvent::External { event, at_ms } => {
-                self.record_external(event, at_ms);
-                Vec::new()
+                let transitions = self.advance_deadline(at_ms);
+                if !self.is_terminal() {
+                    self.record_external(event, at_ms);
+                }
+                transitions
             }
         }
     }
@@ -182,7 +212,9 @@ impl TestEngine {
     fn record_external(&mut self, event: ExternalEvent, at_ms: u64) {
         let kind = match event {
             ExternalEvent::Focus { gained } => RecordedInputKind::Focus { gained },
-            ExternalEvent::Paste { text } => RecordedInputKind::Paste { text },
+            ExternalEvent::Paste { text } => RecordedInputKind::PasteRedacted {
+                graphemes: text.graphemes(true).count().try_into().unwrap_or(u32::MAX),
+            },
         };
         self.recorded_events.push(RecordedInputEvent {
             at_ms,
@@ -191,7 +223,7 @@ impl TestEngine {
         });
     }
 
-    fn handle_tick(&mut self, at_ms: u64) -> Vec<Transition> {
+    fn advance_deadline(&mut self, at_ms: u64) -> Vec<Transition> {
         let TestStatus::Running { started_at_ms } = self.status else {
             return Vec::new();
         };
@@ -199,8 +231,11 @@ impl TestEngine {
             return Vec::new();
         };
 
-        if at_ms.saturating_sub(started_at_ms) >= u64::from(seconds) * 1_000 {
-            self.status = TestStatus::Completed { ended_at_ms: at_ms };
+        let deadline_ms = started_at_ms.saturating_add(u64::from(seconds) * 1_000);
+        if at_ms >= deadline_ms {
+            self.status = TestStatus::Completed {
+                ended_at_ms: deadline_ms,
+            };
             return vec![Transition::Completed];
         }
         Vec::new()
@@ -234,11 +269,11 @@ impl TestEngine {
     fn insert_grapheme(&mut self, grapheme: &str, at_ms: u64) -> Vec<Transition> {
         let mut transitions = self.start_if_needed(at_ms);
         let word_index = self.active_word;
-        let input_before = self.attempts[word_index].input.clone();
+        let input_length = grapheme_count(&self.attempts[word_index].input);
 
         // O handler before-insert do Monkeytype descarta um separador inicial no
         // modo normal não estrito. O tuipe não possui a opção strict-space.
-        if input_before.is_empty()
+        if input_length == 0
             && is_separator(grapheme)
             && self.config.difficulty == Difficulty::Normal
         {
@@ -246,11 +281,15 @@ impl TestEngine {
         }
 
         let target = self.targets[word_index].with_commit();
-        let expected = grapheme_at(&target, grapheme_count(&input_before)).map(str::to_owned);
+        let expected = grapheme_at(&target, input_length).map(str::to_owned);
         let correct = expected
             .as_deref()
             .is_some_and(|expected| expected == grapheme);
         let commit = is_separator(grapheme);
+        let input_limit = grapheme_count(&target).saturating_add(20);
+        if input_length >= input_limit && !commit {
+            return transitions;
+        }
 
         let attempt = &mut self.attempts[word_index];
         if let Some(last_keypress_ms) = attempt.last_keypress_ms {
@@ -261,30 +300,27 @@ impl TestEngine {
         attempt.first_keypress_ms.get_or_insert(at_ms);
         attempt.last_keypress_ms = Some(at_ms);
 
-        let after = format!("{input_before}{grapheme}");
         self.character_events.push(CharacterEvent {
             word_index,
-            input_after: after.clone(),
-            correct,
+            edit: CharacterEdit::Insert(grapheme.to_owned()),
+            correct: Some(correct),
             at_ms,
         });
         self.recorded_events.push(RecordedInputEvent {
             at_ms,
             word_index,
-            kind: RecordedInputKind::Insert {
+            kind: RecordedInputKind::InsertDelta {
                 grapheme: grapheme.to_owned(),
                 expected,
-                input_before: input_before.clone(),
-                input_after: after.clone(),
                 correct,
             },
         });
         let can_advance =
-            commit && !(input_before.is_empty() && self.config.difficulty != Difficulty::Normal);
+            commit && !(input_length == 0 && self.config.difficulty != Difficulty::Normal);
         let last_word = self.active_word + 1 == self.targets.len();
         let completes_bounded_test = last_word
             && !matches!(self.config.mode, TestMode::Time { .. })
-            && (after == target || can_advance);
+            && (self.attempts[word_index].input == target || can_advance);
 
         // O handler upstream avança primeiro e avalia a dificuldade depois.
         // Preservamos a tentativa confirmada antes de expor a falha terminal.
@@ -302,7 +338,9 @@ impl TestEngine {
 
         let failed = match self.config.difficulty {
             Difficulty::Normal => false,
-            Difficulty::Expert => commit && !input_before.is_empty() && after != target,
+            Difficulty::Expert => {
+                commit && input_length > 0 && self.attempts[word_index].input != target
+            }
             Difficulty::Master => !correct,
         };
 
@@ -360,13 +398,26 @@ impl TestEngine {
             self.recorded_events.push(RecordedInputEvent {
                 at_ms,
                 word_index: self.active_word,
-                kind: RecordedInputKind::Delete {
-                    deleted: removed_suffix(&input_before, &attempt.input),
-                    input_before,
-                    input_after: attempt.input.clone(),
+                kind: RecordedInputKind::DeleteDelta {
+                    deleted_graphemes: grapheme_count(&removed_suffix(
+                        &input_before,
+                        &attempt.input,
+                    ))
+                    .try_into()
+                    .unwrap_or(u16::MAX),
                     corrected_graphemes: 0,
                     whole_word: delete_word,
                 },
+            });
+            self.character_events.push(CharacterEvent {
+                word_index: self.active_word,
+                edit: CharacterEdit::Delete(
+                    grapheme_count(&removed_suffix(&input_before, &attempt.input))
+                        .try_into()
+                        .unwrap_or(u16::MAX),
+                ),
+                correct: None,
+                at_ms,
             });
             return;
         }
@@ -381,14 +432,21 @@ impl TestEngine {
         let input_after = self.attempts[word_index].input.clone();
         let target = self.targets[word_index].with_commit();
         let corrected_graphemes = corrected_suffix_count(&input_before, &input_after, &target);
+        let deleted_graphemes = grapheme_count(&removed_suffix(&input_before, &input_after))
+            .try_into()
+            .unwrap_or(u16::MAX);
         self.attempts[word_index].corrections += u32::from(corrected_graphemes);
+        self.character_events.push(CharacterEvent {
+            word_index,
+            edit: CharacterEdit::Delete(deleted_graphemes),
+            correct: None,
+            at_ms,
+        });
         self.recorded_events.push(RecordedInputEvent {
             at_ms,
             word_index,
-            kind: RecordedInputKind::Delete {
-                deleted: removed_suffix(&input_before, &input_after),
-                input_before,
-                input_after,
+            kind: RecordedInputKind::DeleteDelta {
+                deleted_graphemes,
                 corrected_graphemes,
                 whole_word: delete_word,
             },
@@ -403,7 +461,12 @@ impl TestEngine {
     }
 
     pub fn metrics(&self) -> Metrics {
-        let duration_ms = match self.status {
+        Metrics::from_engine(self, self.elapsed_ms())
+    }
+
+    /// Tempo da sessão sem reconstruir métricas, históricos ou alocações.
+    pub fn elapsed_ms(&self) -> u64 {
+        match self.status {
             TestStatus::Ready => 0,
             TestStatus::Running { started_at_ms } => {
                 self.current_at_ms.saturating_sub(started_at_ms)
@@ -420,12 +483,7 @@ impl TestEngine {
                 };
                 ended_at_ms.saturating_sub(started_at_ms)
             }
-        };
-        Metrics::from_engine(self, duration_ms)
-    }
-
-    pub fn elapsed_ms(&self) -> u64 {
-        self.metrics().duration_ms
+        }
     }
 
     pub fn reset_with_same_words(&self) -> Self {
@@ -443,12 +501,10 @@ impl TestEngine {
     pub(crate) fn accuracy_counts(&self) -> (u32, u32) {
         self.character_events
             .iter()
-            .fold((0, 0), |(correct, incorrect), event| {
-                if event.correct {
-                    (correct + 1, incorrect)
-                } else {
-                    (correct, incorrect + 1)
-                }
+            .fold((0, 0), |(correct, incorrect), event| match event.correct {
+                Some(true) => (correct + 1, incorrect),
+                Some(false) => (correct, incorrect + 1),
+                None => (correct, incorrect),
             })
     }
 
@@ -467,7 +523,7 @@ impl TestEngine {
             let index = (elapsed.saturating_sub(1) / 1_000) as usize;
             let index = index.min(bucket_count - 1);
             keypresses[index] += 1;
-            if !event.correct {
+            if event.correct == Some(false) {
                 errors[index] += 1;
             }
         }
@@ -491,7 +547,16 @@ impl TestEngine {
                     if event.at_ms.saturating_sub(started_at) > boundary_ms {
                         break;
                     }
-                    inputs[event.word_index].clone_from(&event.input_after);
+                    match &event.edit {
+                        CharacterEdit::Insert(grapheme) => {
+                            inputs[event.word_index].push_str(grapheme);
+                        }
+                        CharacterEdit::Delete(count) => {
+                            for _ in 0..*count {
+                                pop_grapheme(&mut inputs[event.word_index]);
+                            }
+                        }
+                    }
                     event_index += 1;
                 }
 
@@ -558,6 +623,12 @@ fn grapheme_at(text: &str, index: usize) -> Option<&str> {
     text.graphemes(true).nth(index)
 }
 
+fn pop_grapheme(text: &mut String) {
+    if let Some((index, _)) = text.grapheme_indices(true).next_back() {
+        text.truncate(index);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -582,6 +653,34 @@ mod tests {
         });
         assert_eq!(engine.attempts()[0].input, "");
         assert!(matches!(engine.status(), TestStatus::Running { .. }));
+    }
+
+    #[test]
+    fn entrada_extra_respeita_o_limite_da_referencia() {
+        let mut engine = engine(Difficulty::Normal, &["casa "]);
+        engine.update(InputEvent::Key {
+            action: KeyAction::Text("x".repeat(10_000)),
+            at_ms: 10,
+        });
+
+        assert_eq!(grapheme_count(&engine.attempts()[0].input), 25);
+        assert_eq!(engine.recorded_events().len(), 25);
+    }
+
+    #[test]
+    fn colagem_registra_apenas_tamanho_e_nunca_o_conteudo() {
+        let mut engine = engine(Difficulty::Normal, &["casa "]);
+        engine.update(InputEvent::External {
+            event: ExternalEvent::Paste {
+                text: "segredo-123".into(),
+            },
+            at_ms: 10,
+        });
+
+        assert_eq!(
+            engine.recorded_events()[0].kind,
+            RecordedInputKind::PasteRedacted { graphemes: 11 }
+        );
     }
 
     #[test]
@@ -654,6 +753,51 @@ mod tests {
         let metrics = engine.metrics();
         assert_eq!(metrics.wpm_history, vec![60.0, 54.0]);
         assert_eq!(metrics.burst_history, vec![60.0, 48.0]);
+    }
+
+    #[test]
+    fn prazo_cronometrado_ignora_entrada_no_limite_e_depois_dele() {
+        for at_ms in [30_100, 30_101] {
+            let mut engine = engine(Difficulty::Normal, &["casa "]);
+            engine.config.mode = TestMode::Time { seconds: 30 };
+            engine.update(InputEvent::Key {
+                action: KeyAction::Text("c".into()),
+                at_ms: 100,
+            });
+
+            let transitions = engine.update(InputEvent::Key {
+                action: KeyAction::Text("x".into()),
+                at_ms,
+            });
+
+            assert_eq!(engine.attempts()[0].input, "c");
+            assert_eq!(engine.elapsed_ms(), 30_000);
+            assert_eq!(
+                engine.status(),
+                &TestStatus::Completed {
+                    ended_at_ms: 30_100
+                }
+            );
+            assert_eq!(transitions, vec![Transition::Completed]);
+        }
+    }
+
+    #[test]
+    fn prazo_cronometrado_aceita_entrada_um_milissegundo_antes_do_limite() {
+        let mut engine = engine(Difficulty::Normal, &["casa "]);
+        engine.config.mode = TestMode::Time { seconds: 30 };
+        engine.update(InputEvent::Key {
+            action: KeyAction::Text("c".into()),
+            at_ms: 100,
+        });
+
+        engine.update(InputEvent::Key {
+            action: KeyAction::Text("a".into()),
+            at_ms: 30_099,
+        });
+
+        assert_eq!(engine.attempts()[0].input, "ca");
+        assert!(matches!(engine.status(), TestStatus::Running { .. }));
     }
 
     #[test]
