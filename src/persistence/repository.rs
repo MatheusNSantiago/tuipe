@@ -376,27 +376,44 @@ impl Repository {
                 usize::try_from(size).context("tamanho negativo nos eventos brutos persistidos")?;
             RawEventCodec::decode(version, size, &blob)?;
         }
-        let mut statement = connection.prepare(
-            "SELECT id, stimuli_json, selections_json, shadow_stimuli_json,
-                    shadow_selections_json, shadow_policy_version
-             FROM sessions ORDER BY id",
-        )?;
-        let mut rows = statement.query([])?;
-        while let Some(row) = rows.next()? {
-            let session_id = row.get::<_, i64>(0)?;
-            let stimuli = serde_json::from_str::<Vec<String>>(&row.get::<_, String>(1)?)?;
-            let selections =
-                serde_json::from_str::<Vec<Option<WordSelection>>>(&row.get::<_, String>(2)?)?;
-            let shadow_stimuli = serde_json::from_str::<Vec<String>>(&row.get::<_, String>(3)?)?;
-            let shadow_selections =
-                serde_json::from_str::<Vec<Option<WordSelection>>>(&row.get::<_, String>(4)?)?;
-            let shadow_version = row.get::<_, Option<u16>>(5)?;
-            validate_selection_trace(session_id, "ativa", &stimuli, &selections)?;
-            validate_selection_trace(session_id, "shadow", &shadow_stimuli, &shadow_selections)?;
-            anyhow::ensure!(
-                shadow_version.is_some() == !shadow_stimuli.is_empty(),
-                "sessão #{session_id}: versão e estímulos shadow divergem"
-            );
+        if table_has_column(&connection, "sessions", "stimuli_json")?
+            && table_has_column(&connection, "sessions", "selections_json")?
+        {
+            let has_shadow = table_has_column(&connection, "sessions", "shadow_stimuli_json")?
+                && table_has_column(&connection, "sessions", "shadow_selections_json")?
+                && table_has_column(&connection, "sessions", "shadow_policy_version")?;
+            let sql = if has_shadow {
+                "SELECT id, stimuli_json, selections_json, shadow_stimuli_json,
+                        shadow_selections_json, shadow_policy_version
+                 FROM sessions ORDER BY id"
+            } else {
+                "SELECT id, stimuli_json, selections_json, '[]', '[]', NULL
+                 FROM sessions ORDER BY id"
+            };
+            let mut statement = connection.prepare(sql)?;
+            let mut rows = statement.query([])?;
+            while let Some(row) = rows.next()? {
+                let session_id = row.get::<_, i64>(0)?;
+                let stimuli = serde_json::from_str::<Vec<String>>(&row.get::<_, String>(1)?)?;
+                let selections =
+                    serde_json::from_str::<Vec<Option<WordSelection>>>(&row.get::<_, String>(2)?)?;
+                let shadow_stimuli =
+                    serde_json::from_str::<Vec<String>>(&row.get::<_, String>(3)?)?;
+                let shadow_selections =
+                    serde_json::from_str::<Vec<Option<WordSelection>>>(&row.get::<_, String>(4)?)?;
+                let shadow_version = row.get::<_, Option<u16>>(5)?;
+                validate_selection_trace(session_id, "ativa", &stimuli, &selections)?;
+                validate_selection_trace(
+                    session_id,
+                    "shadow",
+                    &shadow_stimuli,
+                    &shadow_selections,
+                )?;
+                anyhow::ensure!(
+                    shadow_version.is_some() == !shadow_stimuli.is_empty(),
+                    "sessão #{session_id}: versão e estímulos shadow divergem"
+                );
+            }
         }
         Ok(())
     }
@@ -2506,12 +2523,23 @@ fn validate_selection_trace(
         selections.is_empty() || selections.len() == stimuli.len(),
         "sessão #{session_id}: seleção {label} não corresponde aos estímulos"
     );
-    for selection in selections.iter().flatten() {
+    for (stimulus, selection) in
+        stimuli
+            .iter()
+            .zip(selections)
+            .filter_map(|(stimulus, selection)| {
+                selection.as_ref().map(|selection| (stimulus, selection))
+            })
+    {
         anyhow::ensure!(
             !selection.word.is_empty()
                 && selection.propensity.is_finite()
                 && (0.0..=1.0).contains(&selection.propensity),
             "sessão #{session_id}: seleção {label} inválida"
+        );
+        anyhow::ensure!(
+            lexical_stimulus(stimulus).as_deref() == Some(selection.word.as_str()),
+            "sessão #{session_id}: seleção {label} não corresponde ao texto"
         );
     }
     Ok(())
@@ -3080,6 +3108,70 @@ mod tests {
                 .unwrap()
                 .completed_tests,
             1
+        );
+    }
+
+    #[test]
+    fn doctor_novo_valida_banco_schema_oito_sem_migra_lo() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("schema-8.db");
+        let repository = Repository::open(&path).unwrap();
+        drop(repository);
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "ALTER TABLE sessions DROP COLUMN shadow_stimuli_json;
+                 ALTER TABLE sessions DROP COLUMN shadow_selections_json;
+                 ALTER TABLE sessions DROP COLUMN shadow_policy_version;
+                 ALTER TABLE adaptive_policy_state DROP COLUMN shadow_version;
+                 UPDATE schema_version SET version = 8;",
+            )
+            .unwrap();
+        drop(connection);
+
+        Repository::doctor(&path).unwrap();
+        let connection = Connection::open(&path).unwrap();
+        assert_eq!(
+            connection
+                .query_row("SELECT version FROM schema_version", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            8
+        );
+        assert!(!table_has_column(&connection, "sessions", "shadow_stimuli_json").unwrap());
+    }
+
+    #[test]
+    fn doctor_rejeita_selecao_shadow_que_nao_corresponde_ao_estimulo() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("shadow-invalido.db");
+        let repository = Repository::open(&path).unwrap();
+        repository
+            .save_session_with_provenance(
+                &TestConfig::default(),
+                &TestStatus::Completed { ended_at_ms: 1 },
+                Metrics::default(),
+                &[],
+                &[],
+                &SessionProvenance {
+                    shadow_stimuli: vec!["casa ".into()],
+                    shadow_selections: vec![Some(WordSelection {
+                        word: "tempo".into(),
+                        source: SelectionSource::Targeted,
+                        propensity: 0.25,
+                    })],
+                    shadow_policy_version: Some(CURRENT_POLICY_VERSION),
+                    ..SessionProvenance::default()
+                },
+            )
+            .unwrap();
+        drop(repository);
+
+        assert!(
+            Repository::doctor(&path)
+                .unwrap_err()
+                .to_string()
+                .contains("não corresponde ao texto")
         );
     }
 

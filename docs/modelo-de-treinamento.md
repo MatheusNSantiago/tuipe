@@ -557,8 +557,9 @@ Limitações ainda abertas:
   classificadas robustamente, mas uma degradação contínua pode alcançar a
   posterior;
 - não há perfil físico automático, pois terminais não expõem o teclado real;
-- calibração prospectiva, intervalos de incerteza no painel, fronteira
-  velocidade–precisão e rollback de política ainda não estão prontos.
+- calibração prospectiva, intervalos de incerteza no painel e fronteira
+  velocidade–precisão ainda não estão prontos; o rollback operacional já é
+  reversível e preserva a candidata em shadow mode.
 
 ## Plano de implementação
 
@@ -598,7 +599,8 @@ Limitações ainda abertas:
 - [x] Implementar a mistura representativa/direcionada/exploração/transferência.
 - [x] Aplicar espaçamento, diversidade, holdout e limites de cobertura.
 - [x] Calcular chance de sessão com o sequenciador real.
-- [x] Manter uma política candidata em shadow mode antes da promoção.
+- [ ] Validar prospectivamente uma política candidata em shadow mode antes de
+  promover uma nova versão.
 - [x] Manter rollback operacional e reversível por versão.
 - [ ] Calibrar parâmetros por ganho retido e transferido com dados prospectivos.
 

@@ -1285,8 +1285,10 @@ pub fn reset_confirmation_action_at(
 }
 
 fn label_hit(line: &str, label: &str, x: usize) -> bool {
-    line.find(label)
-        .is_some_and(|start| (start..start + label.width()).contains(&x))
+    line.find(label).is_some_and(|byte_start| {
+        let start = line[..byte_start].width();
+        (start..start + label.width()).contains(&x)
+    })
 }
 
 fn render_word_detail(frame: &mut Frame, area: Rect, detail: &WordDetail, theme: &Theme) {
@@ -2997,8 +2999,33 @@ fn render_result_chart(
     quote: Option<QuoteRenderState<'_>>,
     icones: Icons,
 ) {
+    let mut context = Vec::<Line<'static>>::new();
+    if let Some(kind) = session_kind_descriptor(session_kind, icones) {
+        context.push(Line::styled(
+            truncate_to_width(&kind, usize::from(area.width)),
+            Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
+        ));
+    }
+    if let Some(quote) = quote {
+        let heart = if quote.favorite {
+            icones.favorito
+        } else {
+            icones.nao_favorito
+        };
+        let prefix = format!("{heart} ");
+        context.push(Line::styled(
+            format!(
+                "{prefix}{}",
+                truncate_to_width(
+                    quote.source,
+                    usize::from(area.width).saturating_sub(prefix.width())
+                )
+            ),
+            Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
+        ));
+    }
     let sections = Layout::vertical([
-        Constraint::Length(1),
+        Constraint::Length(1 + context.len() as u16),
         Constraint::Min(4),
         Constraint::Length(1),
     ])
@@ -3033,33 +3060,9 @@ fn render_result_chart(
             ),
         ]);
     }
-    if let Some(kind) = session_kind_descriptor(session_kind, icones) {
-        let fragment = format!("   ·   {kind}");
-        if line_width(&title).saturating_add(fragment.width()) <= usize::from(area.width) {
-            title.push(Span::styled(
-                fragment,
-                Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
-            ));
-        }
-    }
-    if let Some(quote) = quote {
-        let heart = if quote.favorite {
-            icones.favorito
-        } else {
-            icones.nao_favorito
-        };
-        let prefix = format!("   ·   {heart} ");
-        let remaining = usize::from(area.width)
-            .saturating_sub(line_width(&title))
-            .saturating_sub(prefix.width());
-        if remaining >= 4 {
-            title.push(Span::styled(
-                format!("{prefix}{}", truncate_to_width(quote.source, remaining)),
-                Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
-            ));
-        }
-    }
-    frame.render_widget(Paragraph::new(Line::from(title)), sections[0]);
+    let mut title_lines = vec![Line::from(title)];
+    title_lines.extend(context);
+    frame.render_widget(Paragraph::new(title_lines), sections[0]);
 
     let chart_columns = Layout::horizontal([
         Constraint::Length(RESULT_AXIS_LABEL_WIDTH),
@@ -3944,10 +3947,6 @@ fn quote_source_label(source: &str, maximum: usize) -> String {
     } else {
         format!("{}…", graphemes[..maximum.saturating_sub(1)].concat())
     }
-}
-
-fn line_width(spans: &[Span<'_>]) -> usize {
-    spans.iter().map(|span| span.content.width()).sum()
 }
 
 fn truncate_to_width(text: &str, maximum: usize) -> String {
@@ -5154,6 +5153,21 @@ mod tests {
             assert!(rendered.contains(expected));
             assert!(!rendered.contains("escolher sessão"));
         }
+
+        let mut completed = TestEngine::new(
+            TestConfig {
+                mode: TestMode::Words { count: 1 },
+                ..TestConfig::default()
+            },
+            ["olá".into()],
+        );
+        completed.update(InputEvent::Key {
+            action: KeyAction::Text("olá".into()),
+            at_ms: 10,
+        });
+        let narrow_result =
+            render_engine_with_kind(70, 22, &completed, false, SessionKind::Assessment);
+        assert!(narrow_result.contains("avaliação de progresso"));
     }
 
     #[test]
@@ -5365,6 +5379,21 @@ mod tests {
                     == Some(StatisticsAction::ConfirmReset)
             })
         }));
+
+        let content = page_content(viewport);
+        let footer = "↑↓ selecionar   enter detalhes   R zerar modelo   esc voltar";
+        let visual_x = footer[..footer.find("R zerar").unwrap()].width() as u16;
+        assert_eq!(
+            statistics_action_at(
+                viewport,
+                &statistics,
+                StatisticsPage::Overview,
+                0,
+                HistoryFilter::All,
+                Position::new(content.x + visual_x, viewport.bottom() - 1),
+            ),
+            Some(StatisticsAction::ResetModel)
+        );
     }
 
     #[test]

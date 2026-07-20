@@ -2241,6 +2241,54 @@ mod tests {
     }
 
     #[test]
+    fn shadow_acompanha_extensao_continua_e_e_persistido() {
+        let temporary = tempfile::tempdir().unwrap();
+        let repository = Repository::open(&temporary.path().join("history.db")).unwrap();
+        repository.rollback_adaptive_policy().unwrap();
+        let mut app = App::new(
+            Preferences::default(),
+            ContentCatalog::bundled().unwrap(),
+            temporary.path().join("config.toml"),
+            None,
+            &repository,
+        )
+        .unwrap();
+        let initial_len = app.engine.targets().len();
+
+        for _ in 0..initial_len {
+            if app.engine.targets().len() > initial_len {
+                break;
+            }
+            let text = app.engine.targets()[app.engine.active_word()].with_commit();
+            app.update(InputEvent::Key {
+                action: KeyAction::Text(text),
+                at_ms: app.engine.recorded_events().len() as u64 + 1,
+            });
+        }
+
+        let provenance = app.provenance();
+        assert_eq!(app.engine.targets().len(), initial_len + 40);
+        assert_eq!(provenance.stimuli.len(), provenance.selections.len());
+        assert_eq!(provenance.shadow_stimuli.len(), initial_len + 40);
+        assert_eq!(
+            provenance.shadow_stimuli.len(),
+            provenance.shadow_selections.len()
+        );
+        let id = repository
+            .save_session_with_provenance(
+                app.engine.config(),
+                app.engine.status(),
+                app.engine.metrics(),
+                &[],
+                &[],
+                &provenance,
+            )
+            .unwrap();
+        assert_eq!(repository.session_provenance(id).unwrap(), Some(provenance));
+        Repository::doctor(&temporary.path().join("history.db")).unwrap();
+    }
+
+    #[test]
     fn ctrl_w_and_ctrl_backspace_remove_the_active_word() {
         assert_eq!(
             typing_action(KeyCode::Char('w'), KeyModifiers::CONTROL, true),
