@@ -24,7 +24,7 @@ expression: "render_engine_at(70, 50, &engine)"
        │
       0└───────────────────────────────────────────────────────────
        1                                                        1.7
-
+                teste encerrado pelo modo especialista
    tipo de teste         wpm                   precisão
    palavras 4            71                    92%
    ◎ português

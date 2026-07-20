@@ -2544,6 +2544,14 @@ fn render_result(
     render_result_chart(frame, top, &metrics, theme, session_kind, quote, icones);
 
     let details_top = top.bottom().saturating_add(1);
+    if matches!(engine.status(), TestStatus::Failed { .. }) {
+        frame.render_widget(
+            Paragraph::new("teste encerrado pelo modo especialista")
+                .alignment(Alignment::Center)
+                .style(Style::default().fg(theme_color(theme, &theme.error, 3.0))),
+            Rect::new(body.x, top.bottom(), body.width, 1),
+        );
+    }
     render_result_details(
         frame,
         Rect::new(
@@ -2570,7 +2578,7 @@ fn render_compact_result(
 ) {
     let metrics = engine.metrics();
     let stats = metrics.characters;
-    let lines = vec![
+    let mut lines = vec![
         Line::from(vec![
             Span::styled(
                 "wpm ",
@@ -2633,6 +2641,12 @@ fn render_compact_result(
         ]),
         Line::from(""),
     ];
+    if matches!(engine.status(), TestStatus::Failed { .. }) {
+        lines[3] = Line::styled(
+            "teste encerrado pelo modo especialista",
+            Style::default().fg(theme_color(theme, &theme.error, 3.0)),
+        );
+    }
     let descriptor_text = result_descriptor(engine, icones);
     let mut descriptor = descriptor_text
         .lines()

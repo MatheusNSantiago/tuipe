@@ -1594,7 +1594,9 @@ fn handle_key(
         return Ok(false);
     }
     if pressed == app.preferences.keymap.cancel {
-        app.repeat(repository)?;
+        if matches!(app.engine.status(), TestStatus::Running { .. }) {
+            app.restart(repository)?;
+        }
         return Ok(false);
     }
     let resultado_recente = app.bloqueia_atalhos_do_resultado();
@@ -1655,11 +1657,11 @@ fn typing_action(code: KeyCode, modifiers: KeyModifiers, delete_word: bool) -> O
     if delete_word {
         return Some(KeyAction::DeleteWordBackward);
     }
+    let command_modifiers =
+        modifiers & (KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER);
+    let is_alt_gr = command_modifiers == KeyModifiers::CONTROL | KeyModifiers::ALT;
     match code {
-        KeyCode::Char(character)
-            if !modifiers
-                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER) =>
-        {
+        KeyCode::Char(character) if command_modifiers.is_empty() || is_alt_gr => {
             Some(KeyAction::Text(character.to_string()))
         }
         KeyCode::Backspace => Some(KeyAction::Backspace),
@@ -1959,6 +1961,42 @@ mod tests {
             typing_action(KeyCode::Char('h'), KeyModifiers::CONTROL, false),
             None
         );
+    }
+
+    #[test]
+    fn alt_gr_entregue_como_ctrl_alt_continua_digitavel() {
+        assert_eq!(
+            typing_action(
+                KeyCode::Char('€'),
+                KeyModifiers::CONTROL | KeyModifiers::ALT,
+                false
+            ),
+            Some(KeyAction::Text("€".into()))
+        );
+    }
+
+    #[test]
+    fn ctrl_c_cancela_a_execucao_sem_marca_la_como_repeticao() {
+        let temporary = tempfile::tempdir().unwrap();
+        let repository = Repository::open(&temporary.path().join("history.db")).unwrap();
+        let mut app = app_de_teste(tuipe::typing::TestConfig::default(), &["casa "]);
+        app.update(InputEvent::Key {
+            action: KeyAction::Text("c".into()),
+            at_ms: 10,
+        });
+        assert!(matches!(app.engine.status(), TestStatus::Running { .. }));
+
+        handle_key(
+            &mut app,
+            &repository,
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL,
+        )
+        .unwrap();
+
+        assert!(matches!(app.engine.status(), TestStatus::Ready));
+        assert!(!app.repeated_test);
+        assert_ne!(app.session_kind, SessionKind::Repeat);
     }
 
     #[test]

@@ -9,6 +9,7 @@ use std::os::unix::fs::PermissionsExt;
 
 use anyhow::Result;
 use crokey::KeyCombination;
+use crossterm::event::{KeyCode, KeyModifiers};
 use directories::BaseDirs;
 use serde::{Deserialize, Serialize};
 
@@ -109,6 +110,24 @@ impl Keymap {
                 "o atalho de {name} precisa ser uma combinação de uma tecla"
             );
         }
+        for (name, binding) in [
+            ("próximo", self.next),
+            ("estatísticas globais", self.statistics_global),
+            ("configurações", self.settings),
+            ("cancelar", self.cancel),
+        ]
+        .into_iter()
+        .chain(
+            self.delete_word
+                .iter()
+                .copied()
+                .map(|binding| ("apagar palavra", binding)),
+        ) {
+            anyhow::ensure!(
+                !captura_texto_digitavel(binding),
+                "o atalho de {name} não pode usar um caractere digitável sem Ctrl, Alt ou Super"
+            );
+        }
         for (index, (name, binding)) in bindings.iter().enumerate() {
             if let Some((other, _)) = bindings[..index]
                 .iter()
@@ -137,6 +156,13 @@ impl Keymap {
             )
         }
     }
+}
+
+fn captura_texto_digitavel(binding: KeyCombination) -> bool {
+    matches!(binding.codes.first(), KeyCode::Char(_))
+        && !binding
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER)
 }
 
 fn binding(value: &str) -> KeyCombination {
@@ -348,5 +374,27 @@ mod tests {
 
         assert!(loaded.quarantined.is_some());
         assert_eq!(loaded.preferences.keymap, Keymap::default());
+    }
+
+    #[test]
+    fn atalho_que_roubaria_uma_letra_isola_a_configuracao() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("config.toml");
+        fs::write(&path, "[keymap]\ncancel = 'x'\n").unwrap();
+
+        let loaded = Preferences::load_recovering(&path).unwrap();
+
+        assert!(loaded.quarantined.is_some());
+        assert_eq!(loaded.preferences.keymap, Keymap::default());
+    }
+
+    #[test]
+    fn atalho_com_modificador_continua_valido() {
+        let keymap = Keymap {
+            cancel: crokey::parse("ctrl-x").unwrap(),
+            ..Keymap::default()
+        };
+
+        keymap.validate().unwrap();
     }
 }
