@@ -34,6 +34,10 @@ impl AplicativoNoTerminal {
     }
 
     fn iniciar_com_cores(home: &Path, colors: &str) -> Self {
+        Self::iniciar_com_perfil(home, colors, Some("unicode"))
+    }
+
+    fn iniciar_com_perfil(home: &Path, colors: &str, icons: Option<&str>) -> Self {
         let par = NativePtySystem::default()
             .openpty(PtySize {
                 rows: 28,
@@ -47,8 +51,10 @@ impl AplicativoNoTerminal {
         comando.env("XDG_CONFIG_HOME", home.join("config"));
         comando.env("XDG_DATA_HOME", home.join("data"));
         comando.env("TERM", "xterm-256color");
-        comando.env("TUIPE_ICONS", "unicode");
         comando.env("TUIPE_COLORS", colors);
+        if let Some(icons) = icons {
+            comando.env("TUIPE_ICONS", icons);
+        }
 
         let child = par
             .slave
@@ -139,6 +145,18 @@ fn confirmar_protocolos_restaurados(saida: &[u8]) {
             String::from_utf8_lossy(sequencia)
         );
     }
+}
+
+#[test]
+fn inicia_com_deteccao_automatica_de_icones() {
+    let home = tempfile::tempdir().expect("criar diretório temporário");
+    let mut app = AplicativoNoTerminal::iniciar_com_perfil(home.path(), "256", None);
+    app.esperar_saida(INICIO_COLAGEM);
+    app.escrever(b"\x1b");
+    thread::sleep(Duration::from_millis(80));
+    app.escrever(b"q");
+
+    confirmar_protocolos_restaurados(&app.esperar_encerrar());
 }
 
 #[test]
