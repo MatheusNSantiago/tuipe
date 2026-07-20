@@ -1122,6 +1122,9 @@ fn run(
                     break;
                 }
                 Event::Key(key) if key.kind == KeyEventKind::Press => true,
+                Event::Key(key) if key.kind == KeyEventKind::Repeat => {
+                    handle_typing_repeat(app, key.code, key.modifiers)
+                }
                 Event::Mouse(mouse) => {
                     match handle_mouse(app, repository, mouse, terminal.size()?)? {
                         MouseOutcome::Unchanged => false,
@@ -1664,6 +1667,31 @@ fn typing_action(code: KeyCode, modifiers: KeyModifiers, delete_word: bool) -> O
     }
 }
 
+fn handle_typing_repeat(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> bool {
+    if app.settings_open
+        || app.statistics_open
+        || matches!(
+            app.engine.status(),
+            TestStatus::Completed { .. } | TestStatus::Failed { .. }
+        )
+    {
+        return false;
+    }
+    let pressed: crokey::KeyCombination = KeyEvent::new(code, modifiers).into();
+    let Some(action) = typing_action(
+        code,
+        modifiers,
+        app.preferences.keymap.delete_word.contains(&pressed),
+    ) else {
+        return false;
+    };
+    app.update(InputEvent::Key {
+        action,
+        at_ms: app.elapsed_ms(),
+    });
+    true
+}
+
 fn handle_settings_key(
     app: &mut App,
     repository: &Repository,
@@ -1931,6 +1959,32 @@ mod tests {
             typing_action(KeyCode::Char('h'), KeyModifiers::CONTROL, false),
             None
         );
+    }
+
+    #[test]
+    fn repeticao_do_terminal_so_repete_entrada_de_digitacao() {
+        let mut app = app_de_teste(tuipe::typing::TestConfig::default(), &["casa "]);
+
+        assert!(handle_typing_repeat(
+            &mut app,
+            KeyCode::Char('c'),
+            KeyModifiers::NONE
+        ));
+        assert_eq!(app.engine.attempts()[0].input, "c");
+        assert!(handle_typing_repeat(
+            &mut app,
+            KeyCode::Backspace,
+            KeyModifiers::NONE
+        ));
+        assert!(app.engine.attempts()[0].input.is_empty());
+
+        app.settings_open = true;
+        assert!(!handle_typing_repeat(
+            &mut app,
+            KeyCode::Char('q'),
+            KeyModifiers::NONE
+        ));
+        assert!(app.engine.attempts()[0].input.is_empty());
     }
 
     #[test]
