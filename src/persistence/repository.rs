@@ -1,8 +1,11 @@
 use std::{
     collections::{BTreeMap, HashMap},
-    fs,
+    fs::{self, OpenOptions},
     path::Path,
 };
+
+#[cfg(unix)]
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
 use anyhow::{Context, Result};
 use chrono::{Datelike, Local};
@@ -12,7 +15,7 @@ use crate::adaptive::{
     MechanicSkill, NgramSkill, Observation, PersonalBaseline, ReviewState, SelectionSource,
     WordSkill, lexical_ngrams,
 };
-use crate::gamification::{StreakState, XpGain, XpState, award};
+use crate::gamification::{StreakState, XpState, award};
 use crate::persistence::{RawEvent, RawEventCodec};
 use crate::typing::{Metrics, TestConfig, TestStatus};
 
@@ -176,8 +179,18 @@ impl Repository {
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
+            restrict_directory(parent)?;
+        }
+        let new_database = !path.exists();
+        if new_database {
+            create_private_file(path)?;
         }
         let connection = Connection::open(path)?;
+        validate_schema_version(&connection)?;
+        if !new_database {
+            restrict_file(path)?;
+        }
+        connection.busy_timeout(std::time::Duration::from_secs(5))?;
         connection.pragma_update(None, "journal_mode", "WAL")?;
         connection.pragma_update(None, "foreign_keys", "ON")?;
         migrate(&connection)?;
@@ -436,10 +449,15 @@ impl Repository {
                 params![language, word, observed_at, session_id, i64::from(clean),],
             )?;
         }
-        transaction.commit()?;
         if matches!(status, TestStatus::Completed { .. }) {
-            self.award_completed_session(config, &metrics)?;
+            let mut xp = load_state_from(&transaction, "xp_state")?;
+            let mut streak = load_state_from(&transaction, "streak_state")?;
+            let day = Local::now().date_naive().num_days_from_ce();
+            award(&mut xp, &mut streak, config, &metrics, day);
+            save_state_to(&transaction, "xp_state", &xp)?;
+            save_state_to(&transaction, "streak_state", &streak)?;
         }
+        transaction.commit()?;
         Ok(session_id)
     }
 
@@ -757,34 +775,8 @@ impl Repository {
         })
     }
 
-    fn award_completed_session(&self, config: &TestConfig, metrics: &Metrics) -> Result<XpGain> {
-        let (mut xp, mut streak) = self.progress()?;
-        let day = Local::now().date_naive().num_days_from_ce();
-        let gain = award(&mut xp, &mut streak, config, metrics, day);
-        self.save_state("xp_state", &xp)?;
-        self.save_state("streak_state", &streak)?;
-        Ok(gain)
-    }
-
     fn load_state<T: serde::de::DeserializeOwned + Default>(&self, table: &str) -> Result<T> {
-        let sql = format!("SELECT state FROM {table} WHERE id = 1");
-        let encoded = self
-            .connection
-            .query_row(&sql, [], |row| row.get::<_, Vec<u8>>(0))
-            .optional()?;
-        Ok(encoded
-            .map(|data| postcard::from_bytes(&data))
-            .transpose()?
-            .unwrap_or_default())
-    }
-
-    fn save_state<T: serde::Serialize>(&self, table: &str, state: &T) -> Result<()> {
-        let sql = format!(
-            "INSERT INTO {table} (id, state) VALUES (1, ?1) ON CONFLICT(id) DO UPDATE SET state = excluded.state"
-        );
-        self.connection
-            .execute(&sql, [postcard::to_allocvec(state)?])?;
-        Ok(())
+        load_state_from(&self.connection, table)
     }
 
     pub fn load_word_skills(&self, language: &str) -> Result<Vec<(String, String, WordSkill)>> {
@@ -1064,6 +1056,32 @@ fn pattern_diagnostic(
     }
 }
 
+fn load_state_from<T: serde::de::DeserializeOwned + Default>(
+    connection: &Connection,
+    table: &str,
+) -> Result<T> {
+    let sql = format!("SELECT state FROM {table} WHERE id = 1");
+    let encoded = connection
+        .query_row(&sql, [], |row| row.get::<_, Vec<u8>>(0))
+        .optional()?;
+    Ok(encoded
+        .map(|data| postcard::from_bytes(&data))
+        .transpose()?
+        .unwrap_or_default())
+}
+
+fn save_state_to<T: serde::Serialize>(
+    connection: &Connection,
+    table: &str,
+    state: &T,
+) -> Result<()> {
+    let sql = format!(
+        "INSERT INTO {table} (id, state) VALUES (1, ?1) ON CONFLICT(id) DO UPDATE SET state = excluded.state"
+    );
+    connection.execute(&sql, [postcard::to_allocvec(state)?])?;
+    Ok(())
+}
+
 fn mechanic_label(mechanic: &str) -> String {
     match mechanic {
         "capitalizacao" => "maiúsculas".into(),
@@ -1079,10 +1097,38 @@ fn mechanic_label(mechanic: &str) -> String {
     }
 }
 
+const CURRENT_SCHEMA_VERSION: i64 = 6;
+
+fn validate_schema_version(connection: &Connection) -> Result<Option<i64>> {
+    let exists = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_version')",
+        [],
+        |row| row.get::<_, bool>(0),
+    )?;
+    if !exists {
+        return Ok(None);
+    }
+    let versions = connection
+        .prepare("SELECT version FROM schema_version")?
+        .query_map([], |row| row.get::<_, i64>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    anyhow::ensure!(
+        versions.len() == 1,
+        "a versão do banco deve possuir exatamente um registro"
+    );
+    let version = versions[0];
+    anyhow::ensure!(version >= 1, "versão inválida do banco: {version}");
+    anyhow::ensure!(
+        version <= CURRENT_SCHEMA_VERSION,
+        "o banco foi criado por uma versão mais nova do tuipe ({version}); esta versão suporta até {CURRENT_SCHEMA_VERSION}"
+    );
+    Ok(Some(version))
+}
+
 fn migrate(connection: &Connection) -> Result<()> {
-    connection.execute_batch(
-        "BEGIN;
-         CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL);
+    let transaction = connection.unchecked_transaction()?;
+    transaction.execute_batch(
+        "CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL);
          INSERT INTO schema_version (version) SELECT 1 WHERE NOT EXISTS (SELECT 1 FROM schema_version);
          CREATE TABLE IF NOT EXISTS sessions (
            id INTEGER PRIMARY KEY, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -1124,59 +1170,58 @@ fn migrate(connection: &Connection) -> Result<()> {
          CREATE TABLE IF NOT EXISTS favorite_quotes (quote_id INTEGER PRIMARY KEY);
          CREATE TABLE IF NOT EXISTS xp_state (id INTEGER PRIMARY KEY CHECK(id = 1), state BLOB NOT NULL);
          CREATE TABLE IF NOT EXISTS streak_state (id INTEGER PRIMARY KEY CHECK(id = 1), state BLOB NOT NULL);
-         CREATE TABLE IF NOT EXISTS raw_events (session_id INTEGER PRIMARY KEY REFERENCES sessions(id), codec_version INTEGER NOT NULL, uncompressed_size INTEGER NOT NULL, blob BLOB NOT NULL);
-         COMMIT;",
+         CREATE TABLE IF NOT EXISTS raw_events (session_id INTEGER PRIMARY KEY REFERENCES sessions(id), codec_version INTEGER NOT NULL, uncompressed_size INTEGER NOT NULL, blob BLOB NOT NULL);",
     )?;
-    if !table_has_column(connection, "word_observations", "fast_success")? {
-        connection.execute(
+    if !table_has_column(&transaction, "word_observations", "fast_success")? {
+        transaction.execute(
             "ALTER TABLE word_observations ADD COLUMN fast_success INTEGER NOT NULL DEFAULT 0",
             [],
         )?;
     }
-    if !table_has_column(connection, "word_observations", "grapheme_count")? {
-        connection.execute(
+    if !table_has_column(&transaction, "word_observations", "grapheme_count")? {
+        transaction.execute(
             "ALTER TABLE word_observations ADD COLUMN grapheme_count INTEGER NOT NULL DEFAULT 0",
             [],
         )?;
     }
-    if !table_has_column(connection, "word_observations", "slow")? {
-        connection.execute(
+    if !table_has_column(&transaction, "word_observations", "slow")? {
+        transaction.execute(
             "ALTER TABLE word_observations ADD COLUMN slow INTEGER NOT NULL DEFAULT 0",
             [],
         )?;
     }
-    if !table_has_column(connection, "word_observations", "latency_ratio")? {
-        connection.execute(
+    if !table_has_column(&transaction, "word_observations", "latency_ratio")? {
+        transaction.execute(
             "ALTER TABLE word_observations ADD COLUMN latency_ratio REAL",
             [],
         )?;
     }
-    if !table_has_column(connection, "sessions", "session_kind")? {
-        connection.execute(
+    if !table_has_column(&transaction, "sessions", "session_kind")? {
+        transaction.execute(
             "ALTER TABLE sessions ADD COLUMN session_kind TEXT NOT NULL DEFAULT 'practice'",
             [],
         )?;
     }
-    if !table_has_column(connection, "word_observations", "evidence_weight")? {
-        connection.execute(
+    if !table_has_column(&transaction, "word_observations", "evidence_weight")? {
+        transaction.execute(
             "ALTER TABLE word_observations ADD COLUMN evidence_weight REAL NOT NULL DEFAULT 1",
             [],
         )?;
     }
-    if !table_has_column(connection, "word_observations", "selection_source")? {
-        connection.execute(
+    if !table_has_column(&transaction, "word_observations", "selection_source")? {
+        transaction.execute(
             "ALTER TABLE word_observations ADD COLUMN selection_source TEXT",
             [],
         )?;
     }
-    if !table_has_column(connection, "word_observations", "selection_propensity")? {
-        connection.execute(
+    if !table_has_column(&transaction, "word_observations", "selection_propensity")? {
+        transaction.execute(
             "ALTER TABLE word_observations ADD COLUMN selection_propensity REAL",
             [],
         )?;
     }
-    if !table_has_column(connection, "word_observations", "mechanics_json")? {
-        connection.execute(
+    if !table_has_column(&transaction, "word_observations", "mechanics_json")? {
+        transaction.execute(
             "ALTER TABLE word_observations ADD COLUMN mechanics_json TEXT NOT NULL DEFAULT '[]'",
             [],
         )?;
@@ -1186,8 +1231,8 @@ fn migrate(connection: &Connection) -> Result<()> {
         ("stimuli_json", "TEXT NOT NULL DEFAULT '[]'"),
         ("policy_version", "INTEGER NOT NULL DEFAULT 0"),
     ] {
-        if !table_has_column(connection, "sessions", column)? {
-            connection.execute(
+        if !table_has_column(&transaction, "sessions", column)? {
+            transaction.execute(
                 &format!("ALTER TABLE sessions ADD COLUMN {column} {definition}"),
                 [],
             )?;
@@ -1201,14 +1246,40 @@ fn migrate(connection: &Connection) -> Result<()> {
         ("corrective_events", "INTEGER NOT NULL DEFAULT 0"),
         ("censored", "INTEGER NOT NULL DEFAULT 0"),
     ] {
-        if !table_has_column(connection, "word_observations", column)? {
-            connection.execute(
+        if !table_has_column(&transaction, "word_observations", column)? {
+            transaction.execute(
                 &format!("ALTER TABLE word_observations ADD COLUMN {column} {definition}"),
                 [],
             )?;
         }
     }
-    connection.execute("UPDATE schema_version SET version = 6", [])?;
+    transaction.execute(
+        "UPDATE schema_version SET version = ?1",
+        [CURRENT_SCHEMA_VERSION],
+    )?;
+    transaction.commit()?;
+    Ok(())
+}
+
+fn create_private_file(path: &Path) -> Result<()> {
+    let mut options = OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    options.open(path)?;
+    restrict_file(path)?;
+    Ok(())
+}
+
+fn restrict_file(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    Ok(())
+}
+
+fn restrict_directory(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
     Ok(())
 }
 
@@ -1248,6 +1319,97 @@ mod tests {
             )
             .unwrap();
         assert_eq!(id, 1);
+    }
+
+    #[test]
+    fn banco_de_versao_futura_e_rejeitado_sem_downgrade() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("future.db");
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE schema_version (version INTEGER NOT NULL);
+                 INSERT INTO schema_version VALUES (999);",
+            )
+            .unwrap();
+        drop(connection);
+
+        let error = Repository::open(&path).err().unwrap().to_string();
+
+        assert!(error.contains("versão mais nova"));
+        let connection = Connection::open(&path).unwrap();
+        assert_eq!(
+            connection
+                .query_row("SELECT version FROM schema_version", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            999
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table'",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            1
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn banco_e_diretorio_sao_privados() {
+        let temporary = tempfile::tempdir().unwrap();
+        let directory = temporary.path().join("tuipe");
+        let path = directory.join("tuipe.db");
+
+        Repository::open(&path).unwrap();
+
+        assert_eq!(
+            fs::metadata(&directory).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    #[test]
+    fn falha_na_gamificacao_reverte_a_sessao_inteira() {
+        let temporary = tempfile::tempdir().unwrap();
+        let repository = Repository::open(&temporary.path().join("history.db")).unwrap();
+        repository
+            .connection
+            .execute("INSERT INTO streak_state (id, state) VALUES (1, X'FF')", [])
+            .unwrap();
+
+        let result = repository.save_session(
+            &TestConfig::default(),
+            &TestStatus::Completed { ended_at_ms: 1 },
+            Metrics::default(),
+        );
+
+        assert!(result.is_err());
+        assert_eq!(
+            repository
+                .connection
+                .query_row("SELECT COUNT(*) FROM sessions", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            repository
+                .connection
+                .query_row("SELECT COUNT(*) FROM xp_state", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            0
+        );
     }
 
     #[test]
