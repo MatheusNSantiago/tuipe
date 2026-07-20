@@ -1213,9 +1213,8 @@ fn render_word_detail(frame: &mut Frame, area: Rect, detail: &WordDetail, theme:
             ]),
             Line::styled(
                 format!(
-                    "chance na próxima: {} · {}",
-                    estimated_chance_label(priority.estimated_session_chance),
-                    evidence_stage_compact(priority.effective_exposures)
+                    "chance estimada na próxima sessão: {}",
+                    estimated_chance_label(priority.estimated_session_chance)
                 ),
                 Style::default().fg(theme_color(theme, &theme.main, 3.0)),
             ),
@@ -1292,9 +1291,8 @@ fn render_word_detail(frame: &mut Frame, area: Rect, detail: &WordDetail, theme:
     );
     frame.render_widget(
         Paragraph::new(format!(
-            "chance estimada na próxima sessão automática: {} · {}",
-            estimated_chance_label(priority.estimated_session_chance),
-            evidence_stage(priority.effective_exposures)
+            "chance estimada na próxima sessão automática: {}",
+            estimated_chance_label(priority.estimated_session_chance)
         ))
         .style(Style::default().fg(theme_color(theme, &theme.main, 3.0))),
         sections[1],
@@ -1395,32 +1393,6 @@ fn estimated_chance_label(chance: f64) -> String {
         0.0
     };
     format!("≈{:.0}%", chance * 100.0)
-}
-
-fn evidence_stage(effective_exposures: f64) -> &'static str {
-    let confidence = evidence_confidence(effective_exposures);
-    if confidence < 0.35 {
-        "evidência inicial"
-    } else if confidence < 0.7 {
-        "evidência em formação"
-    } else {
-        "evidência consistente"
-    }
-}
-
-fn evidence_stage_compact(effective_exposures: f64) -> &'static str {
-    let confidence = evidence_confidence(effective_exposures);
-    if confidence < 0.35 {
-        "inicial"
-    } else if confidence < 0.7 {
-        "em formação"
-    } else {
-        "consistente"
-    }
-}
-
-fn evidence_confidence(effective_exposures: f64) -> f64 {
-    1.0 - (-effective_exposures.max(0.0) / 8.0).exp()
 }
 
 fn word_speed_line(detail: &WordDetail, theme: &Theme) -> Line<'static> {

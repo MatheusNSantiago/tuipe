@@ -3,7 +3,7 @@ source: src/ui.rs
 expression: rendered
 ---
      detalhes da palavra  ·  através  ·  português
-     chance estimada na próxima sessão automática: ≈18% · evidência consistente
+     chance estimada na próxima sessão automática: ≈18%
      falhas                 correções              exposições             amostras
      30%                    20%                    10                     12
 
