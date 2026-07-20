@@ -3,7 +3,7 @@ source: src/ui.rs
 expression: progress
 ---
      estatísticas  1 visão geral  2 progresso  3 histórico  ·  nível 0  ·  sequência 0 dias
-     wpm em avaliações  ·  12 testes mais recentes
+     wpm em testes de progresso  ·  12 testes mais recentes
       100│
          │               ⢀       ⡀      ⢀       ⠠       ⠄       ⠄      ⠠       ⠂       ⠂      ⠐
          │⠁      ⠈
@@ -13,7 +13,7 @@ expression: progress
          │
         0└─────────────────────────────────────────────────────────────────────────────────────
          #1                                        #7                                       #12
-     testes totais  avaliações      wpm médio      precisão       melhor          tempo ativo
+     testes totais  progresso       wpm médio      precisão       melhor          tempo ativo
      42             12              84             96%            112             1h 01m
 
      distribuição de wpm                            atividade diária  ·  últimos 14 dias

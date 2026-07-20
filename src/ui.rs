@@ -40,6 +40,7 @@ const RESULT_MEDIUM_WIDTH: u16 = 54;
 const RESULT_GROUP_HEIGHT: u16 = 4;
 const RESULT_CHART_HEIGHT: u16 = 12;
 const RESULT_AXIS_LABEL_WIDTH: u16 = 4;
+const RESULT_ERROR_AXIS_LABEL_WIDTH: u16 = 3;
 const CURVE_SAMPLES_PER_INTERVAL: u16 = 16;
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
@@ -51,6 +52,7 @@ enum ColorProfile {
 }
 
 static COLOR_PROFILE: OnceLock<ColorProfile> = OnceLock::new();
+static ICON_PROFILE: OnceLock<Icons> = OnceLock::new();
 
 type ThemeColorKey = ((u8, u8, u8), (u8, u8, u8), u16, ColorProfile);
 
@@ -120,10 +122,22 @@ const ICONES_NERD: Icons = Icons {
 };
 
 fn icones_do_terminal() -> Icons {
-    match env::var("TUIPE_ICONS").ok().as_deref() {
+    *ICON_PROFILE.get_or_init(|| match env::var("TUIPE_ICONS").ok().as_deref() {
         Some("unicode") => ICONES_UNICODE,
-        _ => ICONES_NERD,
-    }
+        Some("nerd") => ICONES_NERD,
+        _ if system_has_nerd_font() => ICONES_NERD,
+        _ => ICONES_UNICODE,
+    })
+}
+
+fn system_has_nerd_font() -> bool {
+    let mut collection = fontique::Collection::default();
+    collection.family_names().any(is_nerd_font_family)
+}
+
+fn is_nerd_font_family(family: &str) -> bool {
+    let family = family.to_lowercase();
+    family.contains("nerd font") || family.ends_with(" nf")
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -137,6 +151,7 @@ pub enum PersistenceUiState {
 #[derive(Clone, Copy)]
 struct RenderContext<'a> {
     settings_open: bool,
+    settings_focus: usize,
     theme_name: &'a str,
     session_kind: SessionKind,
     persistence: PersistenceUiState,
@@ -156,6 +171,14 @@ struct FooterContext<'a> {
 }
 
 #[derive(Clone, Copy)]
+struct SettingsContext<'a> {
+    theme_name: &'a str,
+    keymap: &'a Keymap,
+    focus: usize,
+    icones: Icons,
+}
+
+#[derive(Clone, Copy)]
 pub struct QuoteRenderState<'a> {
     pub source: &'a str,
     pub favorite: bool,
@@ -164,6 +187,7 @@ pub struct QuoteRenderState<'a> {
 #[derive(Clone, Copy)]
 pub struct RenderState<'a> {
     pub settings_open: bool,
+    pub settings_focus: usize,
     pub theme_name: &'a str,
     pub session_kind: SessionKind,
     pub persistence: PersistenceUiState,
@@ -226,6 +250,15 @@ pub enum SettingsAction {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ResultAction {
+    Next,
+    Repeat,
+    Statistics,
+    Favorite,
+    Quit,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StatisticsAction {
     Page(StatisticsPage),
     Session(usize),
@@ -238,6 +271,7 @@ pub fn render(frame: &mut Frame, engine: &TestEngine, theme: &Theme, state: Rend
         theme,
         RenderContext {
             settings_open: state.settings_open,
+            settings_focus: state.settings_focus,
             theme_name: state.theme_name,
             session_kind: state.session_kind,
             persistence: state.persistence,
@@ -516,7 +550,7 @@ fn render_statistics_summary_compact(
             ]),
             Line::styled(
                 format!(
-                    "{} comparáveis  ·  melhor {:.0}  ·  {} ativos",
+                    "{} testes iguais  ·  melhor {:.0}  ·  {} ativos",
                     statistics.comparable_tests,
                     statistics.best_wpm,
                     format_active_time(statistics.active_ms)
@@ -535,7 +569,7 @@ fn render_wpm_distribution(frame: &mut Frame, area: Rect, buckets: &[WpmBucket],
     )];
     if buckets.is_empty() {
         lines.push(Line::styled(
-            "ainda sem testes comparáveis",
+            "ainda sem testes na mesma configuração",
             Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
         ));
     } else {
@@ -1413,7 +1447,7 @@ fn render_statistics_compact(
                 Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
             ),
             Span::styled(
-                format!("{} comparáveis", statistics.comparable_tests),
+                format!("{} testes iguais", statistics.comparable_tests),
                 Style::default().fg(theme_color(theme, &theme.main, 3.0)),
             ),
         ]),
@@ -1514,9 +1548,9 @@ fn render_statistics_compact(
                 .take(compact_diagnostic_limit(area.height))
                 .map(|pattern| {
                     let kind = if pattern.kind == "mecânica" {
-                        "mec"
+                        "técnica"
                     } else {
-                        "seq"
+                        "sequência"
                     };
                     let label = if area.width < 60 {
                         format!("{kind} {}", pattern.pattern)
@@ -1564,7 +1598,7 @@ fn render_statistics_compact(
 fn compact_trend(sessions: &[SessionSummary], theme: &Theme) -> Line<'static> {
     if sessions.len() < 4 {
         return Line::styled(
-            "tendência disponível após 4 testes comparáveis",
+            "tendência disponível após 4 testes na mesma configuração",
             Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
         );
     }
@@ -1573,7 +1607,7 @@ fn compact_trend(sessions: &[SessionSummary], theme: &Theme) -> Line<'static> {
     let last = median_wpm(&sessions[middle..]);
     Line::from(vec![
         Span::styled(
-            format!("{} comparáveis", sessions.len()),
+            format!("{} testes iguais", sessions.len()),
             Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
         ),
         Span::styled(
@@ -1581,7 +1615,7 @@ fn compact_trend(sessions: &[SessionSummary], theme: &Theme) -> Line<'static> {
             Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
         ),
         Span::styled(
-            format!("{first:.0} → {last:.0} wpm · medianas"),
+            format!("{first:.0} → {last:.0} wpm típico"),
             Style::default().fg(theme_color(theme, &theme.main, 3.0)),
         ),
     ])
@@ -1622,7 +1656,7 @@ fn render_statistics_chart(
         Paragraph::new(Line::from(vec![
             Span::styled(
                 if assessments_only {
-                    "wpm em avaliações"
+                    "wpm em testes de progresso"
                 } else {
                     "wpm por teste"
                 },
@@ -1716,7 +1750,7 @@ fn render_statistics_summary(
         .iter()
         .all(|test| test.kind == SessionKind::Assessment)
     {
-        "avaliações"
+        "progresso"
     } else {
         "base comparável"
     };
@@ -1848,9 +1882,9 @@ fn render_priority_patterns(
                 .take(area.height.saturating_sub(2) as usize)
                 .map(|pattern| {
                     let kind = if pattern.kind == "mecânica" {
-                        "mec"
+                        "técnica"
                     } else {
-                        "seq"
+                        "sequência"
                     };
                     let label = format!("{kind} {}", pattern.pattern)
                         .graphemes(true)
@@ -1884,6 +1918,7 @@ fn render_com_icones(
 ) {
     let RenderContext {
         settings_open,
+        settings_focus,
         theme_name,
         session_kind,
         persistence,
@@ -1905,18 +1940,24 @@ fn render_com_icones(
 
     let content = page_content(viewport);
     let ready = matches!(engine.status(), TestStatus::Ready);
+    let result = matches!(
+        engine.status(),
+        TestStatus::Completed { .. } | TestStatus::Failed { .. }
+    );
 
     // O Monkeytype mantém a geometria da página enquanto o chrome desaparece
     // ao ganhar foco. Reservar as linhas impede que as palavras saltem quando
     // o primeiro caractere inicia o teste.
-    if ready {
+    if ready || result && viewport.height >= 18 {
         render_header(
             frame,
             Rect::new(content.x, viewport.y + 2, content.width, 2),
             theme,
             icones,
         );
-        render_config_bar(frame, viewport, engine, theme, icones);
+        if ready {
+            render_config_bar(frame, viewport, engine, theme, icones);
+        }
     }
 
     let compact = viewport.height < 18;
@@ -1991,20 +2032,62 @@ fn render_com_icones(
         );
     }
     if settings_open {
-        render_settings(frame, viewport, engine, theme, theme_name, keymap, icones);
-    } else if ready && let Some(notice) = notice {
-        frame.render_widget(
-            Paragraph::new(notice)
-                .alignment(Alignment::Center)
-                .style(Style::default().fg(theme_color(theme, &theme.error, 3.0))),
-            Rect::new(
-                content.x,
-                viewport.bottom().saturating_sub(3),
-                content.width,
-                1,
-            ),
+        render_settings(
+            frame,
+            viewport,
+            engine,
+            theme,
+            SettingsContext {
+                theme_name,
+                keymap,
+                focus: settings_focus,
+                icones,
+            },
         );
+    } else if ready && let Some(notice) = notice {
+        render_startup_notice(frame, viewport, notice, theme);
     }
+}
+
+fn render_startup_notice(frame: &mut Frame, viewport: Rect, notice: &str, theme: &Theme) {
+    let area = centered_width(
+        centered_height(viewport, 12.min(viewport.height.saturating_sub(2))),
+        76,
+    );
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(theme_color(theme, &theme.error, 3.0)))
+            .style(Style::default().bg(color(&theme.bg))),
+        area,
+    );
+    let inner = Rect::new(
+        area.x.saturating_add(2),
+        area.y.saturating_add(2),
+        area.width.saturating_sub(4),
+        area.height.saturating_sub(4),
+    );
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::styled(
+                "recuperação concluída",
+                Style::default()
+                    .fg(theme_color(theme, &theme.error, 3.0))
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Line::from(notice),
+            Line::from(""),
+            Line::styled(
+                "enter continuar",
+                Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
+            ),
+        ])
+        .alignment(Alignment::Center)
+        .wrap(Wrap { trim: true }),
+        inner,
+    );
 }
 
 fn render_header(frame: &mut Frame, area: Rect, theme: &Theme, icones: Icons) {
@@ -2030,16 +2113,19 @@ fn render_settings(
     viewport: Rect,
     engine: &TestEngine,
     theme: &Theme,
-    theme_name: &str,
-    keymap: &Keymap,
-    icones: Icons,
+    context: SettingsContext<'_>,
 ) {
-    for y in viewport.y..viewport.bottom() {
-        for x in viewport.x..viewport.right() {
-            let style = frame.buffer_mut()[(x, y)].style();
-            frame.buffer_mut()[(x, y)].set_style(style.add_modifier(Modifier::DIM));
-        }
-    }
+    let SettingsContext {
+        theme_name,
+        keymap,
+        focus,
+        icones,
+    } = context;
+    frame.render_widget(Clear, viewport);
+    frame.render_widget(
+        Block::default().style(Style::default().bg(color(&theme.bg))),
+        viewport,
+    );
     let compact = viewport.width < 62 || viewport.height < 21;
     let area = settings_area(viewport);
     frame.render_widget(Clear, area);
@@ -2058,9 +2144,9 @@ fn render_settings(
         height: area.height.saturating_sub(4),
     };
     let config = engine.config();
-    let sections = vec![
+    let mut sections = vec![
         Line::styled(
-            format!("{} configurações do teste", icones.configuracoes),
+            format!("{} configurações do teste · ↑↓ enter", icones.configuracoes),
             Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
         ),
         if matches!(config.mode, TestMode::Quote) {
@@ -2156,6 +2242,11 @@ fn render_settings(
             Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
         ),
     ];
+    if let Some(line) = sections.get_mut(focus.min(8) + 1) {
+        *line = line
+            .clone()
+            .style(Style::default().bg(color(&theme.sub_alt)));
+    }
     let lines = if compact {
         sections
     } else {
@@ -2186,6 +2277,8 @@ pub fn settings_area(viewport: Rect) -> Rect {
 pub fn settings_action_at(
     viewport: Rect,
     config: &crate::typing::TestConfig,
+    theme_name: &str,
+    keymap: &Keymap,
     position: Position,
 ) -> Option<SettingsAction> {
     let area = settings_area(viewport);
@@ -2251,9 +2344,18 @@ pub fn settings_action_at(
             1 => Some(SettingsAction::Pack1k),
             _ => Some(SettingsAction::Pack5k),
         },
-        8 => Some(SettingsAction::NextTheme),
-        9 if position.x < inner.x + inner.width / 2 => Some(SettingsAction::Close),
-        9 => Some(SettingsAction::Quit),
+        8 => {
+            let start = inner.x + UnicodeWidthStr::width("t tema  ") as u16;
+            hit_chip(position.x, start, &[theme_name]).map(|_| SettingsAction::NextTheme)
+        }
+        9 => {
+            let close = format!("{} fechar", Keymap::label(keymap.settings));
+            let quit = format!("{} sair", Keymap::label(keymap.quit));
+            match hit_text(position.x, inner.x, &[&close, &quit], 4)? {
+                0 => Some(SettingsAction::Close),
+                _ => Some(SettingsAction::Quit),
+            }
+        }
         _ => None,
     }
 }
@@ -2266,6 +2368,18 @@ fn hit_chip(x: u16, start: u16, labels: &[&str]) -> Option<usize> {
             return Some(index);
         }
         cursor = cursor.saturating_add(width + 2);
+    }
+    None
+}
+
+fn hit_text(x: u16, start: u16, labels: &[&str], gap: u16) -> Option<usize> {
+    let mut cursor = start;
+    for (index, label) in labels.iter().enumerate() {
+        let width = UnicodeWidthStr::width(*label) as u16;
+        if (cursor..cursor.saturating_add(width)).contains(&x) {
+            return Some(index);
+        }
+        cursor = cursor.saturating_add(width + gap);
     }
     None
 }
@@ -2740,32 +2854,29 @@ fn render_result_chart(
     let chart_columns = Layout::horizontal([
         Constraint::Length(RESULT_AXIS_LABEL_WIDTH),
         Constraint::Min(10),
+        Constraint::Length(RESULT_ERROR_AXIS_LABEL_WIDTH),
     ])
     .split(sections[1]);
     let labels = chart_columns[0];
     let plot = chart_columns[1];
+    let error_labels = chart_columns[2];
     let wpm_points = metrics
         .wpm_history
         .iter()
         .enumerate()
         .map(|(index, value)| (index as f64, *value))
         .collect::<Vec<_>>();
-    let error_points = metrics
-        .error_history
-        .iter()
-        .enumerate()
-        .filter(|(_, count)| **count > 0)
-        .map(|(index, _)| (index as f64, metrics.wpm_history[index]))
-        .collect::<Vec<_>>();
     let last_point = wpm_points.len().saturating_sub(1) as f64;
-    let smooth_wpm_points = smooth_wpm_points(&wpm_points);
+    let smoothed_wpm_points = smooth_wpm_points(&wpm_points);
     let peak_wpm = wpm_points
         .iter()
         .map(|point| point.1)
         .fold(metrics.raw_wpm.max(metrics.wpm), f64::max);
     let chart_ceiling = ((peak_wpm.max(20.0) / 20.0).ceil() * 20.0).max(20.0);
+    let (error_ceiling, error_points) = result_error_points(&metrics.error_history, chart_ceiling);
 
     render_chart_y_labels(frame, labels, plot, chart_ceiling, theme);
+    render_chart_error_labels(frame, error_labels, plot, error_ceiling, theme);
     frame.render_widget(
         Canvas::default()
             .marker(Marker::Braille)
@@ -2782,7 +2893,7 @@ fn render_result_chart(
                     coords: &wpm_points,
                     color: theme_color(theme, &theme.main, 3.0),
                 });
-                for points in smooth_wpm_points.windows(2) {
+                for points in smoothed_wpm_points.windows(2) {
                     context.draw(&CanvasLine {
                         x1: points[0].0,
                         y1: points[0].1,
@@ -2801,6 +2912,22 @@ fn render_result_chart(
         plot,
     );
     render_chart_x_labels(frame, sections[2], plot, metrics, theme);
+}
+
+fn result_error_points(history: &[u32], chart_ceiling: f64) -> (u32, Vec<(f64, f64)>) {
+    let error_ceiling = history.iter().copied().max().unwrap_or(0).max(1);
+    let points = history
+        .iter()
+        .enumerate()
+        .filter(|(_, count)| **count > 0)
+        .map(|(index, count)| {
+            (
+                index as f64,
+                f64::from(*count) / f64::from(error_ceiling) * chart_ceiling,
+            )
+        })
+        .collect();
+    (error_ceiling, points)
 }
 
 fn smooth_wpm_points(points: &[(f64, f64)]) -> Vec<(f64, f64)> {
@@ -2835,6 +2962,25 @@ fn render_chart_y_labels(frame: &mut Frame, area: Rect, plot: Rect, ceiling: f64
             plot.height.saturating_sub(1) / 2,
             format!("{:.0}", ceiling / 2.0),
         ),
+        (plot.height.saturating_sub(1), "0".to_owned()),
+    ] {
+        frame.render_widget(
+            Paragraph::new(Line::styled(label, style)).alignment(Alignment::Right),
+            Rect::new(area.x, plot.y + offset, area.width, 1),
+        );
+    }
+}
+
+fn render_chart_error_labels(
+    frame: &mut Frame,
+    area: Rect,
+    plot: Rect,
+    ceiling: u32,
+    theme: &Theme,
+) {
+    let style = Style::default().fg(theme_color(theme, &theme.error, 3.0));
+    for (offset, label) in [
+        (0, ceiling.to_string()),
         (plot.height.saturating_sub(1), "0".to_owned()),
     ] {
         frame.render_widget(
@@ -3144,22 +3290,7 @@ fn result_action_icons(
     theme: &Theme,
 ) -> Line<'static> {
     let mut spans = Vec::new();
-    let mut icons = vec![
-        icones.proximo,
-        icones.repeticao,
-        icones.estatisticas,
-        icones.sair,
-    ];
-    if let Some(quote) = quote {
-        icons.insert(
-            3,
-            if quote.favorite {
-                icones.favorito
-            } else {
-                icones.nao_favorito
-            },
-        );
-    }
+    let icons = result_icons(icones, quote.map(|quote| quote.favorite));
     for (index, icon) in icons.into_iter().enumerate() {
         if index > 0 {
             spans.push(Span::raw("        "));
@@ -3170,6 +3301,125 @@ fn result_action_icons(
         ));
     }
     Line::from(spans)
+}
+
+fn result_icons(icones: Icons, quote_favorite: Option<bool>) -> Vec<&'static str> {
+    let mut icons = vec![
+        icones.proximo,
+        icones.repeticao,
+        icones.estatisticas,
+        icones.sair,
+    ];
+    if let Some(favorite) = quote_favorite {
+        icons.insert(
+            3,
+            if favorite {
+                icones.favorito
+            } else {
+                icones.nao_favorito
+            },
+        );
+    }
+    icons
+}
+
+pub fn result_action_at(
+    viewport: Rect,
+    keymap: &Keymap,
+    has_quote: bool,
+    position: Position,
+) -> Option<ResultAction> {
+    let content = page_content(viewport);
+    if !content.contains(position) {
+        return None;
+    }
+    let actions = [
+        ResultAction::Next,
+        ResultAction::Repeat,
+        ResultAction::Statistics,
+        ResultAction::Favorite,
+        ResultAction::Quit,
+    ];
+    let icones = icones_do_terminal();
+    if viewport.width < 60 {
+        let row_actions: &[(ResultAction, String)] = if position.y == viewport.bottom() - 2 {
+            &[
+                (
+                    ResultAction::Next,
+                    format!("{} {} próximo", icones.proximo, Keymap::label(keymap.next)),
+                ),
+                (
+                    ResultAction::Repeat,
+                    format!(
+                        "{} {} repetir",
+                        icones.repeticao,
+                        Keymap::label(keymap.repeat)
+                    ),
+                ),
+            ]
+        } else if position.y == viewport.bottom() - 1 {
+            &[
+                (
+                    ResultAction::Statistics,
+                    format!(
+                        "{} {} dados",
+                        icones.estatisticas,
+                        Keymap::label(keymap.statistics)
+                    ),
+                ),
+                (
+                    ResultAction::Quit,
+                    format!("{} {} sair", icones.sair, Keymap::label(keymap.quit)),
+                ),
+            ]
+        } else {
+            return None;
+        };
+        return centered_text_hit(content, position.x, row_actions, 4);
+    }
+    if position.y != viewport.bottom() - 2 {
+        return None;
+    }
+    let icons = result_icons(icones, has_quote.then_some(false));
+    let width = icons
+        .iter()
+        .map(|icon| UnicodeWidthStr::width(*icon) as u16)
+        .sum::<u16>()
+        .saturating_add(8 * icons.len().saturating_sub(1) as u16);
+    let mut cursor = content.x + content.width.saturating_sub(width) / 2;
+    for (index, icon) in icons.iter().enumerate() {
+        let icon_width = UnicodeWidthStr::width(*icon) as u16;
+        if (cursor..cursor.saturating_add(icon_width.max(1))).contains(&position.x) {
+            let action_index = if !has_quote && index == 3 { 4 } else { index };
+            return actions.get(action_index).copied();
+        }
+        cursor = cursor.saturating_add(icon_width + 8);
+    }
+    None
+}
+
+fn centered_text_hit(
+    area: Rect,
+    x: u16,
+    actions: &[(ResultAction, String)],
+    gap: u16,
+) -> Option<ResultAction> {
+    let widths = actions
+        .iter()
+        .map(|(_, label)| UnicodeWidthStr::width(label.as_str()) as u16)
+        .collect::<Vec<_>>();
+    let total = widths
+        .iter()
+        .sum::<u16>()
+        .saturating_add(gap * actions.len().saturating_sub(1) as u16);
+    let mut cursor = area.x + area.width.saturating_sub(total) / 2;
+    for ((action, _), width) in actions.iter().zip(widths) {
+        if (cursor..cursor.saturating_add(width)).contains(&x) {
+            return Some(*action);
+        }
+        cursor = cursor.saturating_add(width + gap);
+    }
+    None
 }
 
 fn compact_action_line(actions: [(&str, &str, &str); 2], theme: &Theme) -> Line<'static> {
@@ -3540,10 +3790,14 @@ fn render_size_requirement(
             format!("terminal atual: {}×{}", area.width, area.height),
             Style::default().fg(theme_color(theme, &theme.main, 3.0)),
         ),
+        Line::styled(
+            "redimensione ou ctrl+c para sair",
+            Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
+        ),
     ];
     frame.render_widget(
         Paragraph::new(lines).alignment(Alignment::Center),
-        centered_height(area, 4),
+        centered_height(area, 5),
     );
 }
 
@@ -3869,6 +4123,7 @@ mod tests {
                     theme,
                     RenderContext {
                         settings_open: false,
+                        settings_focus: 0,
                         theme_name,
                         session_kind: SessionKind::Practice,
                         persistence: PersistenceUiState::Saved,
@@ -3935,6 +4190,7 @@ mod tests {
                     theme,
                     RenderContext {
                         settings_open,
+                        settings_focus: 0,
                         theme_name: "arch",
                         session_kind,
                         persistence,
@@ -3983,6 +4239,7 @@ mod tests {
                     theme,
                     RenderContext {
                         settings_open: false,
+                        settings_focus: 0,
                         theme_name: "arch",
                         session_kind: SessionKind::Transfer,
                         persistence: PersistenceUiState::Saved,
@@ -4352,12 +4609,83 @@ mod tests {
         let config = TestConfig::default();
 
         assert_eq!(
-            settings_action_at(viewport, &config, Position::new(inner.x + 12, inner.y + 3),),
+            settings_action_at(
+                viewport,
+                &config,
+                "arch",
+                &Keymap::default(),
+                Position::new(inner.x + 12, inner.y + 3),
+            ),
             Some(SettingsAction::ModeWords)
         );
         assert_eq!(
-            settings_action_at(viewport, &config, Position::new(inner.x + 1, inner.y + 6),),
+            settings_action_at(
+                viewport,
+                &config,
+                "arch",
+                &Keymap::default(),
+                Position::new(inner.x + 1, inner.y + 6),
+            ),
             Some(SettingsAction::Difficulty(Difficulty::Normal))
+        );
+        assert_eq!(
+            settings_action_at(
+                viewport,
+                &config,
+                "arch",
+                &Keymap::default(),
+                Position::new(inner.x + 9, inner.y + 12),
+            ),
+            Some(SettingsAction::NextTheme)
+        );
+        assert_eq!(
+            settings_action_at(
+                viewport,
+                &config,
+                "arch",
+                &Keymap::default(),
+                Position::new(inner.x + 30, inner.y + 12),
+            ),
+            None
+        );
+        assert_eq!(
+            settings_action_at(
+                viewport,
+                &config,
+                "arch",
+                &Keymap::default(),
+                Position::new(inner.x + 15, inner.y + 14),
+            ),
+            Some(SettingsAction::Quit)
+        );
+        assert_eq!(
+            settings_action_at(
+                viewport,
+                &config,
+                "arch",
+                &Keymap::default(),
+                Position::new(inner.x + 40, inner.y + 14),
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn clique_no_resultado_exige_o_controle_visivel() {
+        let viewport = Rect::new(0, 0, 100, 28);
+        let keymap = Keymap::default();
+
+        assert_eq!(
+            result_action_at(viewport, &keymap, false, Position::new(36, 26)),
+            Some(ResultAction::Next)
+        );
+        assert_eq!(
+            result_action_at(viewport, &keymap, false, Position::new(63, 26)),
+            Some(ResultAction::Quit)
+        );
+        assert_eq!(
+            result_action_at(viewport, &keymap, false, Position::new(95, 26)),
+            None
         );
     }
 
@@ -4623,6 +4951,21 @@ mod tests {
         assert_eq!(curve.first(), Some(&observed[0]));
         assert_eq!(curve.last(), Some(&observed[2]));
         assert_eq!(curve.len(), 33);
+    }
+
+    #[test]
+    fn erros_no_grafico_usam_a_escala_propria() {
+        let (ceiling, points) = result_error_points(&[1, 0, 4], 120.0);
+
+        assert_eq!(ceiling, 4);
+        assert_eq!(points, vec![(0.0, 30.0), (2.0, 120.0)]);
+    }
+
+    #[test]
+    fn reconhece_os_nomes_comuns_de_nerd_fonts() {
+        assert!(is_nerd_font_family("JetBrainsMono Nerd Font"));
+        assert!(is_nerd_font_family("Hack NF"));
+        assert!(!is_nerd_font_family("JetBrains Mono"));
     }
 
     #[test]

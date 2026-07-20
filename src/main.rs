@@ -202,6 +202,7 @@ struct App {
     persistence_error: Option<String>,
     config_path: PathBuf,
     settings_open: bool,
+    settings_focus: usize,
     statistics_open: bool,
     statistics_page: ui::StatisticsPage,
     statistics_selected_word: usize,
@@ -363,6 +364,7 @@ impl App {
             persistence_error: None,
             config_path,
             settings_open: false,
+            settings_focus: 0,
             statistics_open: false,
             statistics_page: ui::StatisticsPage::Overview,
             statistics_selected_word: 0,
@@ -805,6 +807,7 @@ fn run(
                     theme,
                     ui::RenderState {
                         settings_open: app.settings_open,
+                        settings_focus: app.settings_focus,
                         theme_name: &app.preferences.theme,
                         session_kind: app.session_kind,
                         persistence: app.persistence_ui_state(),
@@ -954,6 +957,10 @@ fn handle_mouse(
     if mouse.kind != MouseEventKind::Down(MouseButton::Left) {
         return Ok(MouseOutcome::Unchanged);
     }
+    if app.startup_notice.is_some() {
+        app.startup_notice = None;
+        return Ok(MouseOutcome::Changed);
+    }
 
     let viewport = ratatui::layout::Rect::new(0, 0, terminal.width, terminal.height);
     if app.statistics_open {
@@ -1012,7 +1019,13 @@ fn handle_mouse(
             app.settings_open = false;
             return Ok(MouseOutcome::Changed);
         }
-        let Some(action) = ui::settings_action_at(viewport, app.engine.config(), position) else {
+        let Some(action) = ui::settings_action_at(
+            viewport,
+            app.engine.config(),
+            &app.preferences.theme,
+            &app.preferences.keymap,
+            position,
+        ) else {
             return Ok(MouseOutcome::Unchanged);
         };
         return Ok(if handle_settings_mouse_action(app, repository, action)? {
@@ -1024,28 +1037,31 @@ fn handle_mouse(
     if matches!(
         app.engine.status(),
         TestStatus::Completed { .. } | TestStatus::Failed { .. }
-    ) && mouse.row >= terminal.height.saturating_sub(3)
-    {
-        let padding = (terminal.width / 20).max(2);
-        let content_width = terminal.width.saturating_sub(padding * 2).max(1);
-        let relative = mouse.column.saturating_sub(padding).min(content_width - 1);
-        let actions = if app.current_quote.is_some() { 5 } else { 4 };
-        let action = (relative * actions / content_width).min(actions - 1);
+    ) {
+        let position = ratatui::layout::Position::new(mouse.column, mouse.row);
+        let Some(action) = ui::result_action_at(
+            viewport,
+            &app.preferences.keymap,
+            app.current_quote.is_some(),
+            position,
+        ) else {
+            return Ok(MouseOutcome::Unchanged);
+        };
         if app.persistence_pending || app.persistence_error.is_some() {
             return Ok(MouseOutcome::Unchanged);
         }
-        if action > 0 && app.bloqueia_atalhos_do_resultado() {
+        if action != ui::ResultAction::Next && app.bloqueia_atalhos_do_resultado() {
             return Ok(MouseOutcome::Unchanged);
         }
         match action {
-            0 => app.restart(repository)?,
-            1 => app.repeat(repository)?,
-            2 => {
+            ui::ResultAction::Next => app.restart(repository)?,
+            ui::ResultAction::Repeat => app.repeat(repository)?,
+            ui::ResultAction::Statistics => {
                 app.load_statistics(repository)?;
                 app.statistics_open = true;
             }
-            3 if actions == 5 => app.toggle_quote_favorite(repository)?,
-            _ => return Ok(MouseOutcome::Quit),
+            ui::ResultAction::Favorite => app.toggle_quote_favorite(repository)?,
+            ui::ResultAction::Quit => return Ok(MouseOutcome::Quit),
         }
         return Ok(MouseOutcome::Changed);
     }
@@ -1060,6 +1076,7 @@ fn handle_mouse(
 
     let Some(cards) = ui::config_card_areas(viewport, &app.engine.config().mode) else {
         app.settings_open = true;
+        app.settings_focus = 0;
         return Ok(MouseOutcome::Changed);
     };
     let x = mouse.column;
@@ -1206,6 +1223,12 @@ fn handle_key(
     modifiers: KeyModifiers,
 ) -> Result<bool> {
     let pressed: crokey::KeyCombination = KeyEvent::new(code, modifiers).into();
+    if app.startup_notice.is_some() {
+        if matches!(code, KeyCode::Enter | KeyCode::Esc) {
+            app.startup_notice = None;
+        }
+        return Ok(false);
+    }
     if app.statistics_open {
         if let Some(reset) = app.statistics_reset.take() {
             match code {
@@ -1339,13 +1362,15 @@ fn handle_key(
         && !matches!(app.engine.status(), TestStatus::Running { .. })
     {
         app.settings_open = true;
+        app.settings_focus = 0;
         return Ok(false);
     }
     if pressed == app.preferences.keymap.cancel {
         if matches!(app.engine.status(), TestStatus::Running { .. }) {
             app.restart(repository)?;
+            return Ok(false);
         }
-        return Ok(false);
+        return Ok(true);
     }
     let resultado_recente = app.bloqueia_atalhos_do_resultado();
     if pressed == app.preferences.keymap.favorite && terminal && !resultado_recente {
@@ -1452,10 +1477,45 @@ fn handle_settings_key(
     if pressed == app.preferences.keymap.quit {
         return Ok(true);
     }
-    if pressed == app.preferences.keymap.settings || pressed == app.preferences.keymap.next {
+    if pressed == app.preferences.keymap.settings {
         app.settings_open = false;
         return Ok(false);
     }
+    match code {
+        KeyCode::Tab | KeyCode::Down => {
+            app.settings_focus = (app.settings_focus + 1) % 9;
+            return Ok(false);
+        }
+        KeyCode::BackTab | KeyCode::Up => {
+            app.settings_focus = app.settings_focus.checked_sub(1).unwrap_or(8);
+            return Ok(false);
+        }
+        _ => {}
+    }
+    let code = if matches!(code, KeyCode::Enter | KeyCode::Left | KeyCode::Right) {
+        match app.settings_focus {
+            0 => match (
+                app.preferences.test.punctuation,
+                app.preferences.test.numbers,
+            ) {
+                (false, false) | (true, true) => KeyCode::Char('p'),
+                (true, false) | (false, true) => KeyCode::Char('n'),
+            },
+            1 => KeyCode::Char('m'),
+            2 => KeyCode::Char('v'),
+            3 => KeyCode::Char('d'),
+            4 => KeyCode::Char('a'),
+            5 => KeyCode::Char('l'),
+            6 => KeyCode::Char('k'),
+            7 => KeyCode::Char('t'),
+            _ => {
+                app.settings_open = false;
+                return Ok(false);
+            }
+        }
+    } else {
+        code
+    };
     match code {
         KeyCode::Char('m') => app.apply_preference(repository, |preferences| {
             preferences.test.mode = match preferences.test.mode {
@@ -1745,6 +1805,15 @@ mod tests {
         assert!(matches!(app.engine.status(), TestStatus::Ready));
         assert!(!app.repeated_test);
         assert_ne!(app.session_kind, SessionKind::Repeat);
+        assert!(
+            handle_key(
+                &mut app,
+                &repository,
+                KeyCode::Char('c'),
+                KeyModifiers::CONTROL,
+            )
+            .unwrap()
+        );
     }
 
     #[test]
@@ -1771,6 +1840,27 @@ mod tests {
             KeyModifiers::NONE
         ));
         assert!(app.engine.attempts()[0].input.is_empty());
+    }
+
+    #[test]
+    fn configuracoes_aceitam_tab_setas_e_enter() {
+        let temporary = tempfile::tempdir().unwrap();
+        let repository = Repository::open(&temporary.path().join("history.db")).unwrap();
+        let mut app = app_de_teste(tuipe::typing::TestConfig::default(), &["casa "]);
+        app.settings_open = true;
+
+        handle_settings_key(&mut app, &repository, KeyCode::Tab, KeyModifiers::NONE).unwrap();
+        assert_eq!(app.settings_focus, 1);
+        handle_settings_key(&mut app, &repository, KeyCode::Right, KeyModifiers::NONE).unwrap();
+        assert!(matches!(
+            app.preferences.test.mode,
+            TestMode::Words { count: 25 }
+        ));
+
+        handle_settings_key(&mut app, &repository, KeyCode::Up, KeyModifiers::NONE).unwrap();
+        assert_eq!(app.settings_focus, 0);
+        handle_settings_key(&mut app, &repository, KeyCode::Enter, KeyModifiers::NONE).unwrap();
+        assert!(app.preferences.test.punctuation);
     }
 
     #[test]
@@ -1806,7 +1896,7 @@ mod tests {
     }
 
     #[test]
-    fn clique_em_sair_devolve_ordem_de_encerramento() {
+    fn somente_o_icone_de_sair_devolve_ordem_de_encerramento() {
         let temporary = tempfile::tempdir().unwrap();
         let repository = Repository::open(&temporary.path().join("history.db")).unwrap();
         let mut app = app_de_teste(tuipe::typing::TestConfig::default(), &["que "]);
@@ -1818,13 +1908,27 @@ mod tests {
         app.started = Instant::now() - Duration::from_secs(31);
         app.persisted = true;
 
-        let outcome = handle_mouse(
+        let vazio = handle_mouse(
             &mut app,
             &repository,
             MouseEvent {
                 kind: MouseEventKind::Down(MouseButton::Left),
                 column: 95,
                 row: 27,
+                modifiers: KeyModifiers::NONE,
+            },
+            ratatui::layout::Size::new(100, 28),
+        )
+        .unwrap();
+        assert_eq!(vazio, MouseOutcome::Unchanged);
+
+        let outcome = handle_mouse(
+            &mut app,
+            &repository,
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 63,
+                row: 26,
                 modifiers: KeyModifiers::NONE,
             },
             ratatui::layout::Size::new(100, 28),

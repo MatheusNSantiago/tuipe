@@ -30,6 +30,7 @@ fn main() {
     let keymap = Keymap::default();
     let render_state = RenderState {
         settings_open: false,
+        settings_focus: 0,
         theme_name: "arch",
         session_kind: SessionKind::Practice,
         persistence: PersistenceUiState::Saved,

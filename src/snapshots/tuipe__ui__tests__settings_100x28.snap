@@ -4,17 +4,17 @@ expression: "render_engine_with_settings(100, 28, &engine, true)"
 ---
 
 
-     ⌨ tuipe
+
                      ╭────────────────────────────────────────────────────────╮
                      │                                                        │
-         ╭───────────│ ⚙ configurações do teste                               │──────────╮
-         │  @ pontuaç│                                                        │  60  120 │
-         ╰───────────│  p pontuação    n números                              │──────────╯
+                     │ ⚙ configurações do teste · ↑↓ enter                    │
+                     │                                                        │
+                     │  p pontuação    n números                              │
                      │  m tempo    m palavras    m citação                    │
                      │                                                        │
                      │  v 15    v 30    v 60    v 120                         │
                      │  d normal    d especialista    d mestre                │
-     olá mundo prátic│                                                        │
+                     │                                                        │
                      │  a adaptativo                                          │
                      │  l português    l inglês                               │
                      │                                                        │
@@ -26,6 +26,3 @@ expression: "render_engine_with_settings(100, 28, &engine, true)"
                      │                                                        │
                      │                                                        │
                      ╰────────────────────────────────────────────────────────╯
-
-
-                    comece a digitar    esc configurações    ctrl+s estatísticas

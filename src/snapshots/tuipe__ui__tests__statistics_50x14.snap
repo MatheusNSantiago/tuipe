@@ -4,15 +4,15 @@ expression: "render_statistics_at(50, 14)"
 ---
   1 visão  2 progresso  3 histórico
   estatísticas
-  42 testes totais  ·  12 comparáveis
+  42 testes totais  ·  12 testes iguais
   84 wpm  ·  96% precisão  ·  melhor 112
-  12 comparáveis  ·  74 → 80 wpm · medianas
+  12 testes iguais  ·  74 → 80 wpm típico
 
   palavras prioritárias
   › através  chance 18.0%  falha 30%
 
   padrões que pedem treino
-  mec acento agudo  5 palavras  falha 21%
+  técnica acento agudo  5 palavras  falha 21%
 
 
   ↑↓ mover  enter detalhes  R zerar  esc voltar

@@ -4,7 +4,7 @@ expression: "render_engine_with_settings(50, 14, &engine, true)"
 ---
 ╭────────────────────────────────────────────────╮
 │                                                │
-│ ⚙ configurações do teste                       │
+│ ⚙ configurações do teste · ↑↓ enter            │
 │  p pontuação    n números                      │
 │  m tempo    m palavras    m citação            │
 │  v 15    v 30    v 60    v 120                 │

@@ -46,3 +46,8 @@ A primeira release pública deve oferecer o pacote Cargo e um binário Linux
 série 0.1: o usuário escolhe quando atualizar, e as notas da versão devem indicar
 qualquer migração ou necessidade de reconstrução. A publicação só deve ocorrer
 depois que o repositório público e o canal de feedback existirem.
+
+O artefato Linux é produzido por `scripts/build-portable-linux.sh` dentro de
+Debian Bullseye, sem herdar a glibc recente da máquina de desenvolvimento. O
+script usa `Cargo.lock`, separa o diretório de build e gera o checksum junto do
+binário.

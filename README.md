@@ -29,10 +29,12 @@ Para executar sem instalar:
 cargo run --release
 ```
 
-Os ícones usam Nerd Font por padrão. Em terminais sem Nerd Font, o fallback
-Unicode pode ser ativado sem recompilar:
+O tuipe usa os ícones Nerd Font quando encontra uma fonte compatível instalada
+e seleciona o conjunto Unicode automaticamente nos demais computadores. A
+detecção pode ser sobrescrita para diagnóstico sem recompilar:
 
 ```sh
+TUIPE_ICONS=nerd tuipe
 TUIPE_ICONS=unicode tuipe
 ```
 
@@ -118,7 +120,8 @@ sessões, métricas, eventos brutos, XP e streak.
 
 ### Configurações
 
-Na janela aberta por `esc`, cada tecla percorre as opções do respectivo grupo:
+Na janela aberta por `esc`, cada tecla percorre as opções do respectivo grupo.
+`↑`/`↓` ou `tab` movem o foco; `←`/`→` ou `enter` alteram a opção selecionada:
 
 | Tecla | Configuração |
 | --- | --- |
@@ -196,4 +199,5 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo test
 cargo build --release
 cargo bench --bench latencia_input_render
+scripts/build-portable-linux.sh
 ```
