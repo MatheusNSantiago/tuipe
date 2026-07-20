@@ -64,6 +64,7 @@ impl SessionKind {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct StatisticsOverview {
     pub completed_tests: u64,
+    pub comparable_tests: u64,
     pub active_ms: u64,
     pub average_wpm: f64,
     pub average_accuracy: f64,
@@ -895,6 +896,7 @@ impl Repository {
             |row| {
                 Ok(StatisticsOverview {
                     completed_tests: row.get(0)?,
+                    comparable_tests: 0,
                     active_ms: row.get::<_, i64>(1)? as u64,
                     average_wpm: row.get(2)?,
                     average_accuracy: row.get(3)?,
@@ -908,6 +910,11 @@ impl Repository {
                 })
             },
         )?;
+        overview.comparable_tests = if assessments_only {
+            assessment_count
+        } else {
+            overview.completed_tests
+        };
         let mut statement = self.connection.prepare(
             "SELECT id, elapsed_ms, wpm, accuracy, raw_wpm, correct_chars,
                     incorrect_chars, extra_chars, config_toml, session_kind
@@ -951,15 +958,21 @@ impl Repository {
 
     fn priority_words(&self) -> Result<Vec<PriorityWord>> {
         let policy = crate::adaptive::AdaptivePolicy::default();
-        let mut scored = self
-            .load_all_word_skills()?
+        let skills = self.load_all_word_skills()?;
+        let mut baselines = HashMap::new();
+        for (language, _, _) in &skills {
+            if !baselines.contains_key(language) {
+                baselines.insert(language.clone(), self.baseline_profile(language)?.rates);
+            }
+        }
+        let mut scored = skills
             .into_iter()
             .map(|(language, word, skill)| {
-                let baseline = self.baseline_profile(&language)?.rates;
+                let baseline = baselines[&language];
                 let difficulty = policy.difficulty_with_baseline(&skill, baseline);
-                Ok((word, skill, difficulty))
+                (word, skill, difficulty)
             })
-            .collect::<Result<Vec<_>>>()?;
+            .collect::<Vec<_>>();
         scored.sort_by(|left, right| right.2.total_cmp(&left.2));
         Ok(scored
             .into_iter()
@@ -991,9 +1004,21 @@ impl Repository {
 
     fn priority_patterns(&self) -> Result<Vec<PriorityPattern>> {
         let policy = crate::adaptive::AdaptivePolicy::default();
+        let ngrams = self.load_all_ngram_skills()?;
+        let mechanics = self.load_all_mechanic_skills()?;
+        let mut baselines = HashMap::new();
+        for language in ngrams
+            .iter()
+            .map(|(language, _, _)| language)
+            .chain(mechanics.iter().map(|(language, _, _)| language))
+        {
+            if !baselines.contains_key(language) {
+                baselines.insert(language.clone(), self.baseline_profile(language)?.rates);
+            }
+        }
         let mut patterns = Vec::new();
-        for (language, pattern, skill) in self.load_all_ngram_skills()? {
-            let baseline = self.baseline_profile(&language)?.rates;
+        for (language, pattern, skill) in ngrams {
+            let baseline = baselines[&language];
             let difficulty = policy.ngram_difficulty(&skill, baseline);
             if difficulty > 0.0 {
                 patterns.push(pattern_diagnostic(
@@ -1007,8 +1032,8 @@ impl Repository {
                 ));
             }
         }
-        for (language, pattern, skill) in self.load_all_mechanic_skills()? {
-            let baseline = self.baseline_profile(&language)?.rates;
+        for (language, pattern, skill) in mechanics {
+            let baseline = baselines[&language];
             let difficulty = policy.mechanic_difficulty(&skill, baseline);
             if difficulty > 0.0 {
                 patterns.push(pattern_diagnostic(
@@ -1469,6 +1494,7 @@ mod tests {
             repository.statistics_overview().unwrap(),
             StatisticsOverview {
                 completed_tests: 1,
+                comparable_tests: 1,
                 active_ms: 12_000,
                 average_wpm: 80.0,
                 average_accuracy: 95.0,

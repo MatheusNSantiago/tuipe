@@ -1,9 +1,8 @@
 ---
 source: src/ui.rs
-assertion_line: 1639
-expression: rendered
+expression: "render_statistics_at(100, 28)"
 ---
-     estatísticas
+     estatísticas  ·  nível 0  ·  streak 0 dias
      wpm em avaliações  ·  12 testes mais recentes
       100│
          │                                      ⢀       ⡀       ⡀      ⢀       ⠄       ⠄      ⠠
@@ -15,12 +14,12 @@ expression: rendered
          │
         0└─────────────────────────────────────────────────────────────────────────────────────
          #1                                        #7                                       #12
-     testes            wpm médio          precisão          nível              streak
-     42                84                 96%               0                  0 dias
+     testes totais  avaliações      wpm médio      precisão       melhor          tempo ativo
+     42             12              84             96%            112             1h 01m
 
      palavras prioritárias                               padrões que pedem treino
-     palavra       chance   falha   corr   exp           tipo/padrão       falha corr exp ctx
-     através        18.0%     30%    20%   10            mec acento agudo    21%  14%  14 5
+     palavra       chance  falha  correção  exposições   tipo/padrão       falha  palavras
+     através        18.0%    30%    20%     10           mec acento agudo    21% 5 palavras
 
 
 

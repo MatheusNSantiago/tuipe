@@ -202,11 +202,19 @@ pub fn render_statistics(frame: &mut Frame, statistics: &StatisticsOverview, the
     ])
     .split(content);
     frame.render_widget(
-        Paragraph::new("estatísticas").style(Style::default().fg(theme_color(
-            theme,
-            &theme.text,
-            4.5,
-        ))),
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                "estatísticas",
+                Style::default().fg(theme_color(theme, &theme.text, 4.5)),
+            ),
+            Span::styled(
+                format!(
+                    "  ·  nível {}  ·  streak {} dias",
+                    statistics.level, statistics.streak
+                ),
+                Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
+            ),
+        ])),
         sections[0],
     );
     render_statistics_chart(frame, sections[1], &statistics.recent_tests, theme);
@@ -236,13 +244,19 @@ fn render_statistics_compact(
         ),
         Line::from(vec![
             Span::styled(
-                format!("{} testes", statistics.completed_tests),
+                format!("{} testes totais", statistics.completed_tests),
                 Style::default().fg(theme_color(theme, &theme.main, 3.0)),
             ),
             Span::styled(
                 "  ·  ",
                 Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
             ),
+            Span::styled(
+                format!("{} comparáveis", statistics.comparable_tests),
+                Style::default().fg(theme_color(theme, &theme.main, 3.0)),
+            ),
+        ]),
+        Line::from(vec![
             Span::styled(
                 format!("{:.0} wpm", statistics.average_wpm),
                 Style::default().fg(theme_color(theme, &theme.main, 3.0)),
@@ -255,18 +269,12 @@ fn render_statistics_compact(
                 format!("{:.0}% precisão", statistics.average_accuracy),
                 Style::default().fg(theme_color(theme, &theme.main, 3.0)),
             ),
-        ]),
-        Line::from(vec![
-            Span::styled(
-                format!("nível {}", statistics.level),
-                Style::default().fg(theme_color(theme, &theme.main, 3.0)),
-            ),
             Span::styled(
                 "  ·  ",
                 Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
             ),
             Span::styled(
-                format!("streak {} dias", statistics.streak),
+                format!("melhor {:.0}", statistics.best_wpm),
                 Style::default().fg(theme_color(theme, &theme.main, 3.0)),
             ),
         ]),
@@ -378,15 +386,18 @@ fn render_statistics_compact(
 }
 
 fn compact_trend(sessions: &[SessionSummary], theme: &Theme) -> Line<'static> {
-    let Some((first, last)) = sessions.first().zip(sessions.last()) else {
+    if sessions.len() < 4 {
         return Line::styled(
-            "tendência ainda indisponível",
+            "tendência disponível após 4 testes comparáveis",
             Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
         );
-    };
+    }
+    let middle = sessions.len() / 2;
+    let first = median_wpm(&sessions[..middle]);
+    let last = median_wpm(&sessions[middle..]);
     Line::from(vec![
         Span::styled(
-            format!("testes #{}–#{}", first.id, last.id),
+            format!("{} comparáveis", sessions.len()),
             Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
         ),
         Span::styled(
@@ -394,10 +405,24 @@ fn compact_trend(sessions: &[SessionSummary], theme: &Theme) -> Line<'static> {
             Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
         ),
         Span::styled(
-            format!("{:.0} → {:.0} wpm", first.wpm, last.wpm),
+            format!("{first:.0} → {last:.0} wpm · medianas"),
             Style::default().fg(theme_color(theme, &theme.main, 3.0)),
         ),
     ])
+}
+
+fn median_wpm(sessions: &[SessionSummary]) -> f64 {
+    let mut values = sessions
+        .iter()
+        .map(|session| session.wpm)
+        .collect::<Vec<_>>();
+    values.sort_by(f64::total_cmp);
+    let middle = values.len() / 2;
+    if values.len().is_multiple_of(2) {
+        (values[middle - 1] + values[middle]) / 2.0
+    } else {
+        values[middle]
+    }
 }
 
 fn compact_diagnostic_limit(height: u16) -> usize {
@@ -510,14 +535,24 @@ fn render_statistics_summary(
     statistics: &StatisticsOverview,
     theme: &Theme,
 ) {
+    let comparable_label = if statistics
+        .recent_tests
+        .iter()
+        .all(|test| test.kind == SessionKind::Assessment)
+    {
+        "avaliações"
+    } else {
+        "base comparável"
+    };
     let values = [
-        ("testes", statistics.completed_tests.to_string()),
+        ("testes totais", statistics.completed_tests.to_string()),
+        (comparable_label, statistics.comparable_tests.to_string()),
         ("wpm médio", format!("{:.0}", statistics.average_wpm)),
         ("precisão", format!("{:.0}%", statistics.average_accuracy)),
-        ("nível", statistics.level.to_string()),
-        ("streak", format!("{} dias", statistics.streak)),
+        ("melhor", format!("{:.0}", statistics.best_wpm)),
+        ("tempo ativo", format_active_time(statistics.active_ms)),
     ];
-    for (area, (label, value)) in Layout::horizontal(vec![Constraint::Ratio(1, 5); 5])
+    for (area, (label, value)) in Layout::horizontal(vec![Constraint::Ratio(1, 6); 6])
         .spacing(2)
         .split(area)
         .iter()
@@ -539,6 +574,16 @@ fn render_statistics_summary(
     }
 }
 
+fn format_active_time(milliseconds: u64) -> String {
+    let minutes = milliseconds / 60_000;
+    let hours = minutes / 60;
+    if hours > 0 {
+        format!("{hours}h {:02}m", minutes % 60)
+    } else {
+        format!("{minutes}m")
+    }
+}
+
 fn render_priority_words(frame: &mut Frame, area: Rect, words: &[PriorityWord], theme: &Theme) {
     let mut lines = vec![Line::styled(
         "palavras prioritárias",
@@ -551,7 +596,7 @@ fn render_priority_words(frame: &mut Frame, area: Rect, words: &[PriorityWord], 
         ));
     } else {
         lines.push(Line::styled(
-            "palavra       chance   falha   corr   exp",
+            "palavra       chance  falha  correção  exposições",
             Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
         ));
         lines.extend(
@@ -565,7 +610,7 @@ fn render_priority_words(frame: &mut Frame, area: Rect, words: &[PriorityWord], 
                             Style::default().fg(theme_color(theme, &theme.main, 3.0)),
                         ),
                         Span::styled(
-                            format!("{:>5.1}%   ", word.estimated_session_chance * 100.0),
+                            format!("{:>5.1}%  ", word.estimated_session_chance * 100.0),
                             Style::default().fg(theme_color(theme, &theme.main, 3.0)),
                         ),
                         Span::styled(
@@ -573,7 +618,7 @@ fn render_priority_words(frame: &mut Frame, area: Rect, words: &[PriorityWord], 
                             Style::default().fg(theme_color(theme, &theme.error, 3.0)),
                         ),
                         Span::styled(
-                            format!("{:>4.0}%  ", word.corrected_error_rate * 100.0),
+                            format!("{:>4.0}%    ", word.corrected_error_rate * 100.0),
                             Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
                         ),
                         Span::styled(
@@ -604,7 +649,7 @@ fn render_priority_patterns(
         ));
     } else {
         lines.push(Line::styled(
-            "tipo/padrão       falha corr exp ctx",
+            "tipo/padrão       falha  palavras",
             Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
         ));
         lines.extend(
@@ -631,15 +676,7 @@ fn render_priority_patterns(
                             Style::default().fg(theme_color(theme, &theme.error, 3.0)),
                         ),
                         Span::styled(
-                            format!("{:>3.0}% ", pattern.corrected_error_rate * 100.0),
-                            Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
-                        ),
-                        Span::styled(
-                            format!("{:>3.0} ", pattern.effective_exposures),
-                            Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
-                        ),
-                        Span::styled(
-                            pattern.distinct_words.to_string(),
+                            format!("{} palavras", pattern.distinct_words),
                             Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
                         ),
                     ])
@@ -932,10 +969,14 @@ fn render_config_bar(
         return;
     };
 
-    let active = Style::default()
+    let mut active = Style::default()
         .fg(theme_color(theme, &theme.main, 3.0))
         .add_modifier(Modifier::BOLD);
-    let idle = Style::default().fg(theme_color(theme, &theme.sub, 2.0));
+    let mut idle = Style::default().fg(theme_color(theme, &theme.sub, 2.0));
+    if color_profile() == ColorProfile::None {
+        active = active.add_modifier(Modifier::REVERSED);
+        idle = idle.add_modifier(Modifier::DIM);
+    }
 
     let modifier_idle = if matches!(config.mode, TestMode::Quote) {
         idle.add_modifier(Modifier::DIM)
@@ -1473,8 +1514,8 @@ fn render_result_details(
     let stats = metrics.characters;
     let details = vec![
         result_group_lines("tipo de teste", result_descriptor(engine, icones), theme),
-        result_group_lines("wpm", format!("{:.0}", metrics.wpm), theme),
-        result_group_lines("precisão", format!("{:.0}%", metrics.accuracy), theme),
+        result_group_lines_primary("wpm", format!("{:.0}", metrics.wpm), theme),
+        result_group_lines_primary("precisão", format!("{:.0}%", metrics.accuracy), theme),
         result_group_lines("bruto", format!("{:.0}", metrics.raw_wpm), theme),
         result_group_lines(
             "caracteres",
@@ -1586,6 +1627,23 @@ fn result_group_lines(name: &str, result: String, theme: &Theme) -> Vec<Line<'st
     lines
 }
 
+fn result_group_lines_primary(name: &str, result: String, theme: &Theme) -> Vec<Line<'static>> {
+    vec![
+        Line::styled(
+            name.to_owned(),
+            Style::default()
+                .fg(theme_color(theme, &theme.sub, 2.0))
+                .add_modifier(Modifier::BOLD),
+        ),
+        Line::styled(
+            result,
+            Style::default()
+                .fg(theme_color(theme, &theme.main, 3.0))
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]
+}
+
 fn render_footer(
     frame: &mut Frame,
     area: Rect,
@@ -1685,6 +1743,15 @@ fn styled_words(engine: &TestEngine, theme: &Theme) -> Vec<StyledWord> {
                     (None, Some(_)) => Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
                     (None, None) => unreachable!(),
                 };
+                if color_profile() == ColorProfile::None {
+                    style = style.add_modifier(match (typed, expected) {
+                        (Some(actual), Some(expected)) if actual == expected => Modifier::BOLD,
+                        (Some(_), Some(_)) => Modifier::REVERSED,
+                        (Some(_), None) => Modifier::REVERSED | Modifier::UNDERLINED,
+                        (None, Some(_)) => Modifier::DIM,
+                        (None, None) => Modifier::empty(),
+                    });
+                }
                 if attempt.committed && input != target_text {
                     style = style.add_modifier(Modifier::UNDERLINED);
                 }
@@ -1856,7 +1923,7 @@ fn button_group(buttons: &[(&str, bool)], theme: &Theme) -> Line<'static> {
 }
 
 fn chip(text: String, active: bool, theme: &Theme) -> Span<'static> {
-    let style = if active {
+    let mut style = if active {
         Style::default()
             .fg(color(&theme.bg))
             .bg(theme_color(theme, &theme.main, 3.0))
@@ -1865,6 +1932,13 @@ fn chip(text: String, active: bool, theme: &Theme) -> Span<'static> {
             .fg(theme_color(theme, &theme.sub, 2.0))
             .bg(color(&theme.sub_alt))
     };
+    if color_profile() == ColorProfile::None {
+        style = style.add_modifier(if active {
+            Modifier::BOLD | Modifier::REVERSED
+        } else {
+            Modifier::DIM
+        });
+    }
     Span::styled(format!(" {text} "), style)
 }
 
@@ -2015,14 +2089,61 @@ fn theme_color(theme: &Theme, value: &str, minimum_contrast: f64) -> Color {
                 if let Some(color) = cache.borrow().get(&key) {
                     return *color;
                 }
-                let adjusted = ensure_contrast(foreground, background, minimum_contrast);
-                let resolved = color_from_rgb(adjusted, profile);
+                let resolved = contrasting_color(foreground, background, minimum_contrast, profile);
                 cache.borrow_mut().insert(key, resolved);
                 resolved
             })
         }
         _ => Color::Reset,
     }
+}
+
+fn contrasting_color(
+    foreground: (u8, u8, u8),
+    background: (u8, u8, u8),
+    minimum: f64,
+    profile: ColorProfile,
+) -> Color {
+    let adjusted = ensure_contrast(foreground, background, minimum);
+    match profile {
+        ColorProfile::TrueColor => Color::Rgb(adjusted.0, adjusted.1, adjusted.2),
+        ColorProfile::None => Color::Reset,
+        ColorProfile::Ansi256 => {
+            let background = ansi256_rgb(rgb_to_ansi256(background.0, background.1, background.2));
+            let candidates =
+                (0_u8..=u8::MAX).map(|index| (Color::Indexed(index), ansi256_rgb(index)));
+            closest_contrasting_candidate(candidates, adjusted, background, minimum)
+        }
+        ColorProfile::Ansi16 => {
+            let background_color = rgb_to_ansi16(background.0, background.1, background.2);
+            let background = ansi16_rgb(background_color).unwrap_or(background);
+            closest_contrasting_candidate(ANSI16_PALETTE, adjusted, background, minimum)
+        }
+    }
+}
+
+fn closest_contrasting_candidate(
+    candidates: impl IntoIterator<Item = (Color, (u8, u8, u8))>,
+    target: (u8, u8, u8),
+    background: (u8, u8, u8),
+    minimum: f64,
+) -> Color {
+    let candidates = candidates.into_iter().collect::<Vec<_>>();
+    candidates
+        .iter()
+        .filter(|(_, rgb)| contrast_ratio(*rgb, background) >= minimum - 0.001)
+        .min_by_key(|(_, rgb)| rgb_distance(*rgb, target))
+        .or_else(|| {
+            candidates.iter().max_by(|(_, left), (_, right)| {
+                contrast_ratio(*left, background).total_cmp(&contrast_ratio(*right, background))
+            })
+        })
+        .map_or(Color::Reset, |(color, _)| *color)
+}
+
+fn rgb_distance(left: (u8, u8, u8), right: (u8, u8, u8)) -> u32 {
+    let channel = |left: u8, right: u8| u32::from(left.abs_diff(right)).pow(2);
+    channel(left.0, right.0) + channel(left.1, right.1) + channel(left.2, right.2)
 }
 
 fn color_with_profile(value: &str, profile: ColorProfile) -> Color {
@@ -2110,26 +2231,52 @@ fn rgb_to_ansi256(red: u8, green: u8, blue: u8) -> u8 {
     16 + 36 * quantize(red) + 6 * quantize(green) + quantize(blue)
 }
 
+fn ansi256_rgb(index: u8) -> (u8, u8, u8) {
+    match index {
+        0..=15 => ANSI16_PALETTE[usize::from(index)].1,
+        16..=231 => {
+            let index = index - 16;
+            let channel = |value: u8| if value == 0 { 0 } else { 55 + value * 40 };
+            (
+                channel(index / 36),
+                channel(index % 36 / 6),
+                channel(index % 6),
+            )
+        }
+        232..=255 => {
+            let gray = 8 + (index - 232) * 10;
+            (gray, gray, gray)
+        }
+    }
+}
+
+const ANSI16_PALETTE: [(Color, (u8, u8, u8)); 16] = [
+    (Color::Black, (0, 0, 0)),
+    (Color::Red, (128, 0, 0)),
+    (Color::Green, (0, 128, 0)),
+    (Color::Yellow, (128, 128, 0)),
+    (Color::Blue, (0, 0, 128)),
+    (Color::Magenta, (128, 0, 128)),
+    (Color::Cyan, (0, 128, 128)),
+    (Color::Gray, (192, 192, 192)),
+    (Color::DarkGray, (128, 128, 128)),
+    (Color::LightRed, (255, 0, 0)),
+    (Color::LightGreen, (0, 255, 0)),
+    (Color::LightYellow, (255, 255, 0)),
+    (Color::LightBlue, (0, 0, 255)),
+    (Color::LightMagenta, (255, 0, 255)),
+    (Color::LightCyan, (0, 255, 255)),
+    (Color::White, (255, 255, 255)),
+];
+
+fn ansi16_rgb(color: Color) -> Option<(u8, u8, u8)> {
+    ANSI16_PALETTE
+        .iter()
+        .find_map(|(candidate, rgb)| (*candidate == color).then_some(*rgb))
+}
+
 fn rgb_to_ansi16(red: u8, green: u8, blue: u8) -> Color {
-    const PALETTE: [(Color, (u8, u8, u8)); 16] = [
-        (Color::Black, (0, 0, 0)),
-        (Color::Red, (128, 0, 0)),
-        (Color::Green, (0, 128, 0)),
-        (Color::Yellow, (128, 128, 0)),
-        (Color::Blue, (0, 0, 128)),
-        (Color::Magenta, (128, 0, 128)),
-        (Color::Cyan, (0, 128, 128)),
-        (Color::Gray, (192, 192, 192)),
-        (Color::DarkGray, (128, 128, 128)),
-        (Color::LightRed, (255, 0, 0)),
-        (Color::LightGreen, (0, 255, 0)),
-        (Color::LightYellow, (255, 255, 0)),
-        (Color::LightBlue, (0, 0, 255)),
-        (Color::LightMagenta, (255, 0, 255)),
-        (Color::LightCyan, (0, 255, 255)),
-        (Color::White, (255, 255, 255)),
-    ];
-    PALETTE
+    ANSI16_PALETTE
         .iter()
         .min_by_key(|(_, candidate)| {
             let red = i32::from(red) - i32::from(candidate.0);
@@ -2232,6 +2379,7 @@ mod tests {
     fn statistics_fixture() -> StatisticsOverview {
         StatisticsOverview {
             completed_tests: 42,
+            comparable_tests: 12,
             active_ms: 3_661_000,
             average_wpm: 84.0,
             average_accuracy: 96.0,
@@ -2316,6 +2464,16 @@ mod tests {
             assert!(!rendered.contains("adaptativo"));
             insta::assert_snapshot!(format!("test_{width}x{height}"), rendered);
         }
+    }
+
+    #[test]
+    fn teste_real_preenche_tres_linhas_no_ultrawide() {
+        let words = (0..120).map(|index| format!("palavra{index:03} "));
+        let engine = TestEngine::new(TestConfig::default(), words);
+        let rendered = render_engine_at(180, 40, &engine);
+
+        assert!(rendered.contains("palavra000"));
+        assert!(rendered.contains("palavra030"));
     }
 
     #[test]
@@ -2518,12 +2676,29 @@ mod tests {
                 ("erro", theme.error.as_str(), 3.0),
                 ("erro extra", theme.error_extra.as_str(), 3.0),
             ] {
-                let resolved = ensure_contrast(parse_rgb(value).unwrap(), background, minimum);
-                assert!(
-                    contrast_ratio(resolved, background) >= minimum - 0.02,
-                    "tema {name}, papel {role} ficou abaixo do contraste mínimo"
-                );
+                for profile in [
+                    ColorProfile::TrueColor,
+                    ColorProfile::Ansi256,
+                    ColorProfile::Ansi16,
+                ] {
+                    let resolved =
+                        contrasting_color(parse_rgb(value).unwrap(), background, minimum, profile);
+                    let resolved = color_rgb(resolved).unwrap();
+                    let background = color_rgb(color_from_rgb(background, profile)).unwrap();
+                    assert!(
+                        contrast_ratio(resolved, background) >= minimum - 0.02,
+                        "tema {name}, papel {role}, perfil {profile:?} ficou abaixo do contraste mínimo"
+                    );
+                }
             }
+        }
+    }
+
+    fn color_rgb(color: Color) -> Option<(u8, u8, u8)> {
+        match color {
+            Color::Rgb(red, green, blue) => Some((red, green, blue)),
+            Color::Indexed(index) => Some(ansi256_rgb(index)),
+            other => ansi16_rgb(other),
         }
     }
 }

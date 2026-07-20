@@ -1155,7 +1155,9 @@ fn new_test(
         }
         TestMode::Time { .. } => {
             let mut generator = word_generator(catalog, config, rng, adaptive, session_kind)?;
-            let (words, selections) = generate(&mut generator, 40);
+            // O buffer inicial precisa preencher três linhas reais também em
+            // terminais ultrawide, como o gerador contínuo do Monkeytype.
+            let (words, selections) = generate(&mut generator, 120);
             (words, Some(generator), selections)
         }
     };

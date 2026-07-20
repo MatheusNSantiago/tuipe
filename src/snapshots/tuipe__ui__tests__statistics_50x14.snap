@@ -3,9 +3,9 @@ source: src/ui.rs
 expression: "render_statistics_at(50, 14)"
 ---
   estatísticas
-  42 testes  ·  84 wpm  ·  96% precisão
-  nível 0  ·  streak 0 dias
-  testes #1–#12  ·  71 → 82 wpm
+  42 testes totais  ·  12 comparáveis
+  84 wpm  ·  96% precisão  ·  melhor 112
+  12 comparáveis  ·  74 → 80 wpm · medianas
 
   palavras prioritárias
   através  chance 18.0%  falha 30%
