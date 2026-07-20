@@ -1,6 +1,6 @@
 use ratatui::{
     Frame,
-    layout::{Alignment, Constraint, Layout, Rect},
+    layout::{Alignment, Constraint, Layout, Position, Rect},
     style::{Color, Modifier, Style},
     symbols::Marker,
     text::{Line, Span},
@@ -68,6 +68,10 @@ struct Icons {
     transferencia: &'static str,
     retencao: &'static str,
     repeticao: &'static str,
+    proximo: &'static str,
+    estatisticas: &'static str,
+    sair: &'static str,
+    mouse: &'static str,
 }
 
 const ICONES_UNICODE: Icons = Icons {
@@ -82,6 +86,10 @@ const ICONES_UNICODE: Icons = Icons {
     transferencia: "⇄",
     retencao: "↺",
     repeticao: "↻",
+    proximo: "›",
+    estatisticas: "⌁",
+    sair: "×",
+    mouse: "↖",
 };
 
 const ICONES_NERD: Icons = Icons {
@@ -96,6 +104,10 @@ const ICONES_NERD: Icons = Icons {
     transferencia: "",
     retencao: "",
     repeticao: "",
+    proximo: "",
+    estatisticas: "",
+    sair: "",
+    mouse: "",
 };
 
 fn icones_do_terminal() -> Icons {
@@ -120,6 +132,7 @@ struct RenderContext<'a> {
     session_kind: SessionKind,
     persistence: PersistenceUiState,
     notice: Option<&'a str>,
+    focus_warning: bool,
     icones: Icons,
 }
 
@@ -130,6 +143,27 @@ pub struct RenderState<'a> {
     pub session_kind: SessionKind,
     pub persistence: PersistenceUiState,
     pub notice: Option<&'a str>,
+    pub focus_warning: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SettingsAction {
+    TogglePunctuation,
+    ToggleNumbers,
+    ModeTime,
+    ModeWords,
+    ModeQuote,
+    Value(usize),
+    Difficulty(Difficulty),
+    ToggleAdaptive,
+    LanguagePortuguese,
+    LanguageEnglish,
+    PackCommon,
+    Pack1k,
+    Pack5k,
+    NextTheme,
+    Close,
+    Quit,
 }
 
 pub fn render(frame: &mut Frame, engine: &TestEngine, theme: &Theme, state: RenderState<'_>) {
@@ -143,6 +177,7 @@ pub fn render(frame: &mut Frame, engine: &TestEngine, theme: &Theme, state: Rend
             session_kind: state.session_kind,
             persistence: state.persistence,
             notice: state.notice,
+            focus_warning: state.focus_warning,
             icones: icones_do_terminal(),
         },
     );
@@ -701,6 +736,7 @@ fn render_com_icones(
         session_kind,
         persistence,
         notice,
+        focus_warning,
         icones,
     } = context;
     let viewport = frame.area();
@@ -761,6 +797,14 @@ fn render_com_icones(
         TestStatus::Ready | TestStatus::Running { .. } => {
             render_test(frame, test_area, engine, theme, session_kind, icones)
         }
+    }
+    if focus_warning
+        && matches!(
+            engine.status(),
+            TestStatus::Ready | TestStatus::Running { .. }
+        )
+    {
+        render_focus_warning(frame, test_area, theme, icones);
     }
     if ready
         || matches!(
@@ -832,8 +876,7 @@ fn render_settings(
         }
     }
     let compact = viewport.width < 62 || viewport.height < 21;
-    let modal_height = if compact { 14 } else { 21 };
-    let area = centered_width(centered_height(viewport, modal_height), 58);
+    let area = settings_area(viewport);
     frame.render_widget(Clear, area);
     frame.render_widget(
         Block::default()
@@ -960,6 +1003,122 @@ fn render_settings(
             .collect()
     };
     frame.render_widget(Paragraph::new(lines), inner);
+}
+
+pub fn settings_area(viewport: Rect) -> Rect {
+    let height = if viewport.width < 62 || viewport.height < 21 {
+        14
+    } else {
+        21
+    };
+    centered_width(centered_height(viewport, height), 58)
+}
+
+pub fn settings_action_at(
+    viewport: Rect,
+    config: &crate::typing::TestConfig,
+    position: Position,
+) -> Option<SettingsAction> {
+    let area = settings_area(viewport);
+    if !area.contains(position) {
+        return None;
+    }
+    let compact = viewport.width < 62 || viewport.height < 21;
+    let inner = Rect::new(
+        area.x.saturating_add(2),
+        area.y.saturating_add(2),
+        area.width.saturating_sub(4),
+        area.height.saturating_sub(4),
+    );
+    let row = position.y.saturating_sub(inner.y);
+    let section = if compact {
+        usize::from(row)
+    } else {
+        match row {
+            0 => 0,
+            2 => 1,
+            3 => 2,
+            5 => 3,
+            6 => 4,
+            8 => 5,
+            9 => 6,
+            11 => 7,
+            12 => 8,
+            14 => 9,
+            _ => return None,
+        }
+    };
+    let choice = |labels: &[&str]| hit_chip(position.x, inner.x, labels);
+    match section {
+        1 if !matches!(config.mode, TestMode::Quote) => {
+            match choice(&["p pontuação", "n números"])? {
+                0 => Some(SettingsAction::TogglePunctuation),
+                _ => Some(SettingsAction::ToggleNumbers),
+            }
+        }
+        2 => match choice(&["m tempo", "m palavras", "m citação"])? {
+            0 => Some(SettingsAction::ModeTime),
+            1 => Some(SettingsAction::ModeWords),
+            _ => Some(SettingsAction::ModeQuote),
+        },
+        3 => choice(match config.mode {
+            TestMode::Time { .. } => &["v 15", "v 30", "v 60", "v 120"],
+            TestMode::Words { .. } => &["v 10", "v 25", "v 50", "v 100"],
+            TestMode::Quote => &["todas", "curta", "média", "longa"],
+        })
+        .map(SettingsAction::Value),
+        4 => match choice(&["d normal", "d especialista", "d mestre"])? {
+            0 => Some(SettingsAction::Difficulty(Difficulty::Normal)),
+            1 => Some(SettingsAction::Difficulty(Difficulty::Expert)),
+            _ => Some(SettingsAction::Difficulty(Difficulty::Master)),
+        },
+        5 => choice(&["a adaptativo"]).map(|_| SettingsAction::ToggleAdaptive),
+        6 => match choice(&["l português", "l inglês"])? {
+            0 => Some(SettingsAction::LanguagePortuguese),
+            _ => Some(SettingsAction::LanguageEnglish),
+        },
+        7 => match choice(&["k comum", "k 1k", "k 5k"])? {
+            0 => Some(SettingsAction::PackCommon),
+            1 => Some(SettingsAction::Pack1k),
+            _ => Some(SettingsAction::Pack5k),
+        },
+        8 => Some(SettingsAction::NextTheme),
+        9 if position.x < inner.x + inner.width / 2 => Some(SettingsAction::Close),
+        9 => Some(SettingsAction::Quit),
+        _ => None,
+    }
+}
+
+fn hit_chip(x: u16, start: u16, labels: &[&str]) -> Option<usize> {
+    let mut cursor = start;
+    for (index, label) in labels.iter().enumerate() {
+        let width = UnicodeWidthStr::width(*label) as u16 + 2;
+        if (cursor..cursor.saturating_add(width)).contains(&x) {
+            return Some(index);
+        }
+        cursor = cursor.saturating_add(width + 2);
+    }
+    None
+}
+
+fn render_focus_warning(frame: &mut Frame, area: Rect, theme: &Theme, icones: Icons) {
+    for y in area.y..area.bottom() {
+        for x in area.x..area.right() {
+            let style = frame.buffer_mut()[(x, y)].style();
+            frame.buffer_mut()[(x, y)].set_style(style.add_modifier(Modifier::DIM));
+        }
+    }
+    let warning = centered_width(centered_height(area, 1), 44);
+    frame.render_widget(Clear, warning);
+    frame.render_widget(
+        Paragraph::new(format!(
+            "{}  clique no terminal para continuar",
+            icones.mouse
+        ))
+        .alignment(Alignment::Center)
+        .style(Style::default().fg(theme_color(theme, &theme.text, 4.5))),
+        warning,
+    );
 }
 
 fn render_config_bar(
@@ -1666,7 +1825,7 @@ fn render_footer(
     engine: &TestEngine,
     theme: &Theme,
     persistence: PersistenceUiState,
-    _icones: Icons,
+    icones: Icons,
 ) {
     if matches!(
         engine.status(),
@@ -1701,20 +1860,79 @@ fn render_footer(
         )],
         TestStatus::Running { .. } => return,
         TestStatus::Completed { .. } | TestStatus::Failed { .. } if area.width < 60 => vec![
-            key_hints(&[("enter", "próximo"), ("r", "repetir")], theme),
-            key_hints(&[("s", "estatísticas"), ("q", "sair")], theme),
+            compact_action_line(
+                [
+                    (icones.proximo, "enter", "próximo"),
+                    (icones.repeticao, "r", "repetir"),
+                ],
+                theme,
+            ),
+            compact_action_line(
+                [
+                    (icones.estatisticas, "s", "dados"),
+                    (icones.sair, "q", "sair"),
+                ],
+                theme,
+            ),
         ],
-        TestStatus::Completed { .. } | TestStatus::Failed { .. } => vec![key_hints(
-            &[
-                ("enter", "próximo"),
-                ("r", "repetir"),
-                ("s", "estatísticas"),
-                ("q", "sair"),
-            ],
-            theme,
-        )],
+        TestStatus::Completed { .. } | TestStatus::Failed { .. } => vec![
+            result_action_icons(icones, theme),
+            key_hints(
+                &[
+                    ("enter", "próximo"),
+                    ("r", "repetir"),
+                    ("s", "estatísticas"),
+                    ("q", "sair"),
+                ],
+                theme,
+            ),
+        ],
     };
     frame.render_widget(Paragraph::new(lines).alignment(Alignment::Center), area);
+}
+
+fn result_action_icons(icones: Icons, theme: &Theme) -> Line<'static> {
+    let mut spans = Vec::new();
+    for (index, icon) in [
+        icones.proximo,
+        icones.repeticao,
+        icones.estatisticas,
+        icones.sair,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        if index > 0 {
+            spans.push(Span::raw("        "));
+        }
+        spans.push(Span::styled(
+            icon,
+            Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
+        ));
+    }
+    Line::from(spans)
+}
+
+fn compact_action_line(actions: [(&str, &str, &str); 2], theme: &Theme) -> Line<'static> {
+    let mut spans = Vec::new();
+    for (index, (icon, key, action)) in actions.into_iter().enumerate() {
+        if index > 0 {
+            spans.push(Span::raw("    "));
+        }
+        spans.push(Span::styled(
+            format!("{icon} "),
+            Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
+        ));
+        spans.push(Span::styled(
+            key.to_owned(),
+            Style::default().fg(theme_color(theme, &theme.text, 4.5)),
+        ));
+        spans.push(Span::styled(
+            format!(" {action}"),
+            Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
+        ));
+    }
+    Line::from(spans)
 }
 
 struct StyledWord {
@@ -2359,6 +2577,26 @@ mod tests {
         session_kind: SessionKind,
         persistence: PersistenceUiState,
     ) -> String {
+        render_engine_with_state(
+            width,
+            height,
+            engine,
+            settings_open,
+            session_kind,
+            persistence,
+            false,
+        )
+    }
+
+    fn render_engine_with_state(
+        width: u16,
+        height: u16,
+        engine: &TestEngine,
+        settings_open: bool,
+        session_kind: SessionKind,
+        persistence: PersistenceUiState,
+        focus_warning: bool,
+    ) -> String {
         let catalog = ContentCatalog::bundled().unwrap();
         let theme = catalog.theme("arch").unwrap();
         let backend = TestBackend::new(width, height);
@@ -2375,6 +2613,7 @@ mod tests {
                         session_kind,
                         persistence,
                         notice: None,
+                        focus_warning,
                         icones: ICONES_UNICODE,
                     },
                 )
@@ -2481,6 +2720,51 @@ mod tests {
             assert!(!rendered.contains("adaptativo"));
             insta::assert_snapshot!(format!("test_{width}x{height}"), rendered);
         }
+    }
+
+    #[test]
+    fn aviso_de_foco_substitui_o_texto_sem_mudar_a_geometria() {
+        let engine = TestEngine::new(
+            TestConfig::default(),
+            ["olá ".into(), "mundo ".into(), "prática ".into()],
+        );
+        let rendered = render_engine_with_state(
+            100,
+            28,
+            &engine,
+            false,
+            SessionKind::Practice,
+            PersistenceUiState::Saved,
+            true,
+        );
+
+        assert!(rendered.contains("clique no terminal para continuar"));
+        assert!(rendered.contains("configurações"));
+    }
+
+    #[test]
+    fn clique_na_configuracao_escolhe_a_opcao_exata() {
+        let viewport = Rect::new(0, 0, 100, 28);
+        let area = settings_area(viewport);
+        let inner = Position::new(area.x + 2, area.y + 2);
+        let config = TestConfig::default();
+
+        assert_eq!(
+            settings_action_at(
+                viewport,
+                &config,
+                Position::new(inner.x + 12, inner.y + 3),
+            ),
+            Some(SettingsAction::ModeWords)
+        );
+        assert_eq!(
+            settings_action_at(
+                viewport,
+                &config,
+                Position::new(inner.x + 1, inner.y + 6),
+            ),
+            Some(SettingsAction::Difficulty(Difficulty::Normal))
+        );
     }
 
     #[test]

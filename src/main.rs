@@ -172,6 +172,7 @@ struct App {
     session_kind: SessionKind,
     session_baseline: tuipe::persistence::PersonalBaselineProfile,
     startup_notice: Option<String>,
+    focus_lost_at: Option<Instant>,
 }
 
 struct PersistJob {
@@ -322,7 +323,13 @@ impl App {
             session_kind,
             session_baseline,
             startup_notice,
+            focus_lost_at: None,
         })
+    }
+
+    fn focus_warning_visible(&self) -> bool {
+        self.focus_lost_at
+            .is_some_and(|lost_at| lost_at.elapsed() >= Duration::from_secs(1))
     }
 
     fn persist_interrupted(&mut self, repository: &Repository, end: RawSessionEnd) -> Result<()> {
@@ -823,6 +830,7 @@ fn run(
     let mut last_drawn_second = 0;
     let mut last_size = terminal.size()?;
     let mut last_cursor_color = String::new();
+    let mut last_focus_warning = app.focus_warning_visible();
     loop {
         if let Some(result) = persistence.try_result()? {
             app.persistence_pending = false;
@@ -877,6 +885,7 @@ fn run(
                         session_kind: app.session_kind,
                         persistence: app.persistence_ui_state(),
                         notice: app.startup_notice.as_deref(),
+                        focus_warning: app.focus_warning_visible(),
                     },
                 );
                 if app.statistics_open {
@@ -919,18 +928,20 @@ fn run(
                 }
                 Event::Resize(_, _) => false,
                 Event::FocusGained => {
+                    app.focus_lost_at = None;
                     app.update(InputEvent::External {
                         event: ExternalEvent::Focus { gained: true },
                         at_ms: app.elapsed_ms(),
                     });
-                    false
+                    true
                 }
                 Event::FocusLost => {
+                    app.focus_lost_at = Some(Instant::now());
                     app.update(InputEvent::External {
                         event: ExternalEvent::Focus { gained: false },
                         at_ms: app.elapsed_ms(),
                     });
-                    false
+                    true
                 }
                 Event::Paste(text) => {
                     app.update(InputEvent::External {
@@ -952,6 +963,9 @@ fn run(
         needs_draw |= app.engine.status() != &previous_status
             || (matches!(app.engine.status(), TestStatus::Running { .. })
                 && current_second != last_drawn_second);
+        let focus_warning = app.focus_warning_visible();
+        needs_draw |= focus_warning != last_focus_warning;
+        last_focus_warning = focus_warning;
     }
     Ok(())
 }
@@ -977,13 +991,49 @@ fn handle_mouse(
     mouse: MouseEvent,
     terminal: ratatui::layout::Size,
 ) -> Result<bool> {
-    if mouse.kind != MouseEventKind::Down(MouseButton::Left)
-        || !matches!(app.engine.status(), TestStatus::Ready)
-    {
+    if mouse.kind != MouseEventKind::Down(MouseButton::Left) {
         return Ok(false);
     }
 
     let viewport = ratatui::layout::Rect::new(0, 0, terminal.width, terminal.height);
+    if app.statistics_open {
+        if mouse.row >= terminal.height.saturating_sub(2) {
+            app.statistics_open = false;
+            return Ok(true);
+        }
+        return Ok(false);
+    }
+    if app.settings_open {
+        let position = ratatui::layout::Position::new(mouse.column, mouse.row);
+        if !ui::settings_area(viewport).contains(position) {
+            app.settings_open = false;
+            return Ok(true);
+        }
+        let Some(action) = ui::settings_action_at(viewport, app.engine.config(), position) else {
+            return Ok(false);
+        };
+        return handle_settings_mouse_action(app, repository, action);
+    }
+    if matches!(
+        app.engine.status(),
+        TestStatus::Completed { .. } | TestStatus::Failed { .. }
+    ) && mouse.row >= terminal.height.saturating_sub(3)
+    {
+        let padding = (terminal.width / 20).max(2);
+        let content_width = terminal.width.saturating_sub(padding * 2).max(1);
+        let relative = mouse.column.saturating_sub(padding).min(content_width - 1);
+        let action = match (relative * 4 / content_width).min(3) {
+            0 => KeyCode::Enter,
+            1 => KeyCode::Char('r'),
+            2 => KeyCode::Char('s'),
+            _ => KeyCode::Char('q'),
+        };
+        return handle_key(app, repository, action, KeyModifiers::NONE);
+    }
+    if !matches!(app.engine.status(), TestStatus::Ready) {
+        return Ok(false);
+    }
+
     let config_bar = ui::config_bar_area(viewport);
     if mouse.row != config_bar.y + 1 {
         return Ok(false);
@@ -1039,6 +1089,95 @@ fn handle_mouse(
         return Ok(false);
     }
     Ok(true)
+}
+
+fn handle_settings_mouse_action(
+    app: &mut App,
+    repository: &Repository,
+    action: ui::SettingsAction,
+) -> Result<bool> {
+    use ui::SettingsAction;
+
+    match action {
+        SettingsAction::Close => app.settings_open = false,
+        SettingsAction::Quit => return Ok(true),
+        SettingsAction::NextTheme => {
+            return handle_settings_key(app, repository, KeyCode::Char('t'));
+        }
+        SettingsAction::TogglePunctuation => app.apply_preference(repository, |preferences| {
+            preferences.test.punctuation = !preferences.test.punctuation;
+        })?,
+        SettingsAction::ToggleNumbers => app.apply_preference(repository, |preferences| {
+            preferences.test.numbers = !preferences.test.numbers;
+        })?,
+        SettingsAction::ModeTime => app.apply_preference(repository, |preferences| {
+            let seconds = match preferences.test.mode {
+                TestMode::Time { seconds } => seconds,
+                _ => 30,
+            };
+            preferences.test.mode = TestMode::Time { seconds };
+        })?,
+        SettingsAction::ModeWords => app.apply_preference(repository, |preferences| {
+            let count = match preferences.test.mode {
+                TestMode::Words { count } => count,
+                _ => 25,
+            };
+            preferences.test.mode = TestMode::Words { count };
+        })?,
+        SettingsAction::ModeQuote => app.apply_preference(repository, |preferences| {
+            preferences.test.mode = TestMode::Quote;
+            preferences.test.punctuation = false;
+            preferences.test.numbers = false;
+        })?,
+        SettingsAction::Value(index) => app.apply_preference(repository, |preferences| {
+            preferences.test.mode = match preferences.test.mode {
+                TestMode::Time { .. } => TestMode::Time {
+                    seconds: [15, 30, 60, 120][index.min(3)],
+                },
+                TestMode::Words { .. } => TestMode::Words {
+                    count: [10, 25, 50, 100][index.min(3)],
+                },
+                TestMode::Quote => {
+                    preferences.test.quote_length = [
+                        QuoteLength::All,
+                        QuoteLength::Short,
+                        QuoteLength::Medium,
+                        QuoteLength::Long,
+                    ][index.min(3)];
+                    TestMode::Quote
+                }
+            };
+        })?,
+        SettingsAction::Difficulty(difficulty) => {
+            app.apply_preference(repository, |preferences| {
+                preferences.test.difficulty = difficulty;
+            })?
+        }
+        SettingsAction::ToggleAdaptive => app.apply_preference(repository, |preferences| {
+            preferences.test.adaptive = !preferences.test.adaptive;
+        })?,
+        SettingsAction::LanguagePortuguese | SettingsAction::LanguageEnglish => {
+            let language = if action == SettingsAction::LanguagePortuguese {
+                "portuguese"
+            } else {
+                "english"
+            };
+            app.apply_preference(repository, |preferences| {
+                preferences.test.language = language.into();
+            })?;
+        }
+        SettingsAction::PackCommon | SettingsAction::Pack1k | SettingsAction::Pack5k => {
+            let pack = match action {
+                SettingsAction::PackCommon => "common",
+                SettingsAction::Pack1k => "1k",
+                _ => "5k",
+            };
+            app.apply_preference(repository, |preferences| {
+                preferences.test.word_pack = pack.into();
+            })?;
+        }
+    }
+    Ok(false)
 }
 
 fn handle_key(
