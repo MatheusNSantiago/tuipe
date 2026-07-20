@@ -679,12 +679,14 @@ impl App {
             } else if next_kind == SessionKind::Practice && config.adaptive {
                 let (candidates, _) =
                     session_word_pool(configured_words, config, &self.adaptive, next_kind);
-                self.adaptive.estimated_session_chances(
-                    &config.language,
-                    &targets,
-                    &candidates,
-                    draws,
-                )
+                self.adaptive
+                    .estimated_session_chances_with_number_probability(
+                        &config.language,
+                        &targets,
+                        &candidates,
+                        draws,
+                        if config.numbers { 0.1 } else { 0.0 },
+                    )
             } else {
                 estimated_generator_chances(
                     &self.catalog,
@@ -2195,6 +2197,33 @@ mod tests {
         let values = [chances["casa"], chances["tempo"]];
         assert_eq!(values.iter().filter(|chance| **chance == 1.0).count(), 1);
         assert_eq!(values.iter().filter(|chance| **chance == 0.0).count(), 1);
+    }
+
+    #[test]
+    fn chance_adaptativa_considera_os_draws_substituidos_por_numeros() {
+        let catalog = ContentCatalog::bundled().unwrap();
+        let adaptive = AdaptiveSampler::default();
+        let config = tuipe::typing::TestConfig::default();
+        let targets = catalog
+            .word_pack(&config.language, &config.word_pack)
+            .unwrap()
+            .to_vec();
+        let plain_chances = adaptive.estimated_session_chances_with_number_probability(
+            &config.language,
+            &targets,
+            &targets,
+            30,
+            0.0,
+        );
+        let numbered_chances = adaptive.estimated_session_chances_with_number_probability(
+            &config.language,
+            &targets,
+            &targets,
+            30,
+            0.1,
+        );
+
+        assert!(numbered_chances.values().sum::<f64>() < plain_chances.values().sum::<f64>());
     }
 
     #[test]

@@ -525,28 +525,101 @@ impl AdaptiveSampler {
         candidates: &[String],
         draws: usize,
     ) -> HashMap<String, f64> {
+        self.estimated_session_chances_with_number_probability(
+            language, targets, candidates, draws, 0.0,
+        )
+    }
+
+    pub fn estimated_session_chances_with_number_probability(
+        &self,
+        language: &str,
+        targets: &[String],
+        candidates: &[String],
+        draws: usize,
+        number_probability: f64,
+    ) -> HashMap<String, f64> {
         if targets.is_empty() || candidates.is_empty() || draws == 0 {
             return HashMap::new();
         }
         const TRIALS: usize = 128;
+        let number_probability = number_probability.clamp(0.0, 1.0);
         let target_set = targets.iter().map(String::as_str).collect::<HashSet<_>>();
+        let targeted = candidates
+            .iter()
+            .map(|word| 1.0 + self.policy.maximum_boost * self.candidate_priority(language, word))
+            .collect::<Vec<_>>();
+        let exploration = candidates
+            .iter()
+            .map(|word| self.exploration_value(language, word))
+            .collect::<Vec<_>>();
+        let transfer_weights = self.transfer_weights(language);
+        let transfer = candidates
+            .iter()
+            .map(|word| {
+                1.0 + self.policy.maximum_boost * transfer_value(word, &transfer_weights).min(1.0)
+            })
+            .collect::<Vec<_>>();
+        let representative_distribution = WeightedIndex::new(vec![1.0; candidates.len()])
+            .expect("o corpus não vazio forma uma distribuição uniforme");
+        let targeted_distribution = WeightedIndex::new(&targeted)
+            .expect("as prioridades direcionadas são positivas e finitas");
+        let exploration_distribution = WeightedIndex::new(&exploration)
+            .expect("as prioridades de exploração são positivas e finitas");
+        let transfer_distribution = WeightedIndex::new(&transfer)
+            .expect("as prioridades de transferência são positivas e finitas");
+        let has_signal =
+            weights_vary(&targeted) || weights_vary(&exploration) || weights_vary(&transfer);
         let mut counts = HashMap::<String, usize>::new();
         let mut hasher = DefaultHasher::new();
         language.hash(&mut hasher);
         targets.hash(&mut hasher);
         candidates.len().hash(&mut hasher);
         draws.hash(&mut hasher);
+        number_probability.to_bits().hash(&mut hasher);
         let mut rng = SmallRng::seed_from_u64(hasher.finish());
         for _ in 0..TRIALS {
-            let mut previous = Vec::<String>::new();
+            let mut previous = Vec::<usize>::new();
             let mut seen = HashSet::<String>::new();
             for _ in 0..draws {
-                let guard = previous.iter().map(String::as_str).collect::<Vec<_>>();
-                let selected = self.sample_with_provenance(language, candidates, &guard, &mut rng);
-                if target_set.contains(selected.word) {
-                    seen.insert(selected.word.to_owned());
+                if number_probability > 0.0 && rng.random_bool(number_probability) {
+                    continue;
                 }
-                previous.insert(0, selected.word.to_owned());
+                let source = if !has_signal {
+                    SelectionSource::Representative
+                } else {
+                    let roll: f64 = rng.random();
+                    if roll < self.policy.representative_share {
+                        SelectionSource::Representative
+                    } else if roll < self.policy.representative_share + self.policy.targeted_share {
+                        SelectionSource::Targeted
+                    } else if roll
+                        < self.policy.representative_share
+                            + self.policy.targeted_share
+                            + self.policy.exploration_share
+                    {
+                        SelectionSource::Exploration
+                    } else {
+                        SelectionSource::Transfer
+                    }
+                };
+                let distribution = match source {
+                    SelectionSource::Representative => &representative_distribution,
+                    SelectionSource::Targeted => &targeted_distribution,
+                    SelectionSource::Exploration => &exploration_distribution,
+                    SelectionSource::Transfer => &transfer_distribution,
+                };
+                let exclude_previous = previous.len() < candidates.len();
+                let index = loop {
+                    let index = distribution.sample(&mut rng);
+                    if !exclude_previous || !previous.contains(&index) {
+                        break index;
+                    }
+                };
+                let selected = &candidates[index];
+                if target_set.contains(selected.as_str()) {
+                    seen.insert(selected.clone());
+                }
+                previous.insert(0, index);
                 previous.truncate(2);
             }
             for word in seen {
@@ -841,6 +914,14 @@ fn normalized_or_uniform(mut values: Vec<f64>, uniform: &[f64]) -> Vec<f64> {
         *value = if value.is_finite() { *value / sum } else { 0.0 };
     }
     values
+}
+
+fn weights_vary(values: &[f64]) -> bool {
+    values.first().is_some_and(|first| {
+        values
+            .iter()
+            .any(|value| (value - first).abs() > f64::EPSILON)
+    })
 }
 
 fn transfer_value(word: &str, weights: &HashMap<String, f64>) -> f64 {
