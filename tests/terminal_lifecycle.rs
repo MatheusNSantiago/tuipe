@@ -148,6 +148,30 @@ fn confirmar_protocolos_restaurados(saida: &[u8]) {
 }
 
 #[test]
+fn backup_em_instalacao_vazia_falha_sem_criar_banco() {
+    let home = tempfile::tempdir().expect("criar diretório temporário");
+    let destino = home.path().join("copia.db");
+    let output = Command::new(env!("CARGO_BIN_EXE_tuipe"))
+        .arg("backup")
+        .arg(&destino)
+        .env("HOME", home.path())
+        .env("XDG_CONFIG_HOME", home.path().join("config"))
+        .env("XDG_DATA_HOME", home.path().join("data"))
+        .env("XDG_STATE_HOME", home.path().join("state"))
+        .output()
+        .expect("executar backup");
+
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("o banco ainda não existe"),
+        "erro inesperado: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!home.path().join("data/tuipe/tuipe.db").exists());
+    assert!(!destino.exists());
+}
+
+#[test]
 fn inicia_com_deteccao_automatica_de_icones() {
     let home = tempfile::tempdir().expect("criar diretório temporário");
     let mut app = AplicativoNoTerminal::iniciar_com_perfil(home.path(), "256", None);

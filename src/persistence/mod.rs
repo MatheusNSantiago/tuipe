@@ -5,7 +5,7 @@ mod observations;
 mod raw_events;
 mod repository;
 
-pub use config::{Keymap, LoadedPreferences, Preferences, paths};
+pub use config::{Keymap, LoadedPreferences, Preferences, paths, state_dir};
 pub use observations::derive_word_observations;
 pub use raw_events::{RawEvent, RawEventCodec, RawEventKind, RawSessionEnd};
 pub use repository::{

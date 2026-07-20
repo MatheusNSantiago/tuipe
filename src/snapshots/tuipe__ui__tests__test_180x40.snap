@@ -1,10 +1,11 @@
 ---
 source: src/ui.rs
+assertion_line: 4800
 expression: rendered
 ---
 
 
-         ⌨ tuipe
+          ⌨ tuipe
 
 
                                                  ╭────────────────────────╮  ╭─────────────────────────────╮  ╭──────────────────╮
@@ -19,7 +20,7 @@ expression: rendered
 
                                                                             ◎ português · ★ especialista
 
-         olá mundo prática
+          olá mundo prática
 
 
 

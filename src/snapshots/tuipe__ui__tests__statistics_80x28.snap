@@ -1,0 +1,32 @@
+---
+source: src/ui.rs
+expression: "render_statistics_at(80, 28)"
+---
+    1 visão  2 progresso  3 histórico
+    estatísticas
+    42 testes totais  ·  12 testes iguais
+    84 wpm  ·  96% precisão  ·  melhor 112
+    12 testes iguais  ·  74 → 80 wpm típico
+
+    palavras prioritárias
+    › através  ·  ≈18% na próxima sessão  ·  falha 30%
+
+    padrões que pedem treino
+    mecânica acento agudo  ·  5 palavras  ·  falha 21%
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    ↑↓ selecionar   enter detalhes   R zerar modelo   esc voltar

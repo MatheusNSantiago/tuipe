@@ -1,8 +1,9 @@
 use std::{
     collections::{HashMap, HashSet},
     env,
+    fs::{self, OpenOptions},
     io::Write,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::mpsc::{self, Receiver, SyncSender, TryRecvError},
     sync::{
         Arc,
@@ -11,6 +12,9 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 
 use anyhow::{Context, Result};
 use crossterm::{
@@ -35,13 +39,23 @@ use tuipe::{
     persistence::{
         Preferences, RawEvent, RawEventCodec, RawSessionEnd, Repository, SessionDetail,
         SessionKind, SessionOutcome, SessionProvenance, StatisticsOverview, WordDetail,
-        WordObservationRecord, paths,
+        WordObservationRecord, paths, state_dir,
     },
     typing::{ExternalEvent, InputEvent, KeyAction, QuoteLength, TestEngine, TestMode, TestStatus},
     ui,
 };
 
 fn main() -> Result<()> {
+    let diagnostics = state_dir();
+    install_panic_reporter(diagnostics.clone());
+    if let Err(error) = run_main() {
+        let _ = write_diagnostic(&diagnostics, "erro fatal", &format!("{error:#}"));
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn run_main() -> Result<()> {
     if handle_cli()? {
         return Ok(());
     }
@@ -120,6 +134,66 @@ fn main() -> Result<()> {
     })
 }
 
+fn install_panic_reporter(directory: PathBuf) {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let message = info
+            .payload()
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| info.payload().downcast_ref::<String>().map(String::as_str))
+            .unwrap_or("panic sem mensagem");
+        let location = info.location().map_or_else(
+            || "local desconhecido".into(),
+            |location| {
+                format!(
+                    "{}:{}:{}",
+                    location.file(),
+                    location.line(),
+                    location.column()
+                )
+            },
+        );
+        let detail = format!(
+            "{message}\nlocal: {location}\n\nbacktrace:\n{}",
+            std::backtrace::Backtrace::force_capture()
+        );
+        let _ = write_diagnostic(&directory, "panic", &detail);
+        previous(info);
+    }));
+}
+
+fn write_diagnostic(directory: &Path, kind: &str, detail: &str) -> std::io::Result<PathBuf> {
+    fs::create_dir_all(directory)?;
+    #[cfg(unix)]
+    fs::set_permissions(
+        directory,
+        std::os::unix::fs::PermissionsExt::from_mode(0o700),
+    )?;
+    let path = directory.join(format!(
+        "falha-{}-{}.log",
+        chrono::Utc::now().format("%Y%m%d-%H%M%S%.3f"),
+        std::process::id()
+    ));
+    let mut options = OpenOptions::new();
+    options.create_new(true).write(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let mut file = options.open(&path)?;
+    writeln!(file, "tuipe {}", env!("CARGO_PKG_VERSION"))?;
+    writeln!(file, "instante UTC: {}", chrono::Utc::now().to_rfc3339())?;
+    writeln!(file, "tipo: {kind}")?;
+    writeln!(file, "terminal: {}", env::var("TERM").unwrap_or_default())?;
+    writeln!(
+        file,
+        "programa do terminal: {}",
+        env::var("TERM_PROGRAM").unwrap_or_default()
+    )?;
+    writeln!(file, "\n{detail}")?;
+    file.sync_all()?;
+    Ok(path)
+}
+
 fn shutdown_flag() -> Result<Arc<AtomicBool>> {
     let shutdown = Arc::new(AtomicBool::new(false));
     #[cfg(unix)]
@@ -167,6 +241,11 @@ fn handle_cli() -> Result<bool> {
                 "backup recebe no máximo um destino"
             );
             let (_, database_path) = paths();
+            anyhow::ensure!(
+                database_path.exists(),
+                "o banco ainda não existe: {}",
+                database_path.display()
+            );
             let repository = Repository::open(&database_path)
                 .with_context(|| format!("abrir banco em {}", database_path.display()))?;
             repository.backup(&destination)?;
@@ -987,20 +1066,89 @@ fn handle_mouse(
     mouse: MouseEvent,
     terminal: ratatui::layout::Size,
 ) -> Result<MouseOutcome> {
-    if mouse.kind != MouseEventKind::Down(MouseButton::Left) {
-        return Ok(MouseOutcome::Unchanged);
-    }
     if app.startup_notice.is_some() {
+        if mouse.kind != MouseEventKind::Down(MouseButton::Left) {
+            return Ok(MouseOutcome::Unchanged);
+        }
         app.startup_notice = None;
         return Ok(MouseOutcome::Changed);
     }
 
     let viewport = ratatui::layout::Rect::new(0, 0, terminal.width, terminal.height);
     if app.statistics_open {
-        if app.statistics_reset.is_some() {
+        if matches!(
+            mouse.kind,
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+        ) && app.statistics_reset.is_none()
+            && app.statistics_detail.is_none()
+            && app.statistics_session_detail.is_none()
+        {
+            let down = mouse.kind == MouseEventKind::ScrollDown;
+            match app.statistics_page {
+                ui::StatisticsPage::Overview => {
+                    app.statistics_selected_word = if down {
+                        (app.statistics_selected_word + 1)
+                            .min(app.statistics.priority_words.len().saturating_sub(1))
+                    } else {
+                        app.statistics_selected_word.saturating_sub(1)
+                    };
+                }
+                ui::StatisticsPage::History => {
+                    let count = app.filtered_history().count();
+                    app.statistics_selected_session = if down {
+                        (app.statistics_selected_session + 1).min(count.saturating_sub(1))
+                    } else {
+                        app.statistics_selected_session.saturating_sub(1)
+                    };
+                }
+                ui::StatisticsPage::Progress => return Ok(MouseOutcome::Unchanged),
+            }
+            return Ok(MouseOutcome::Changed);
+        }
+        if mouse.kind != MouseEventKind::Down(MouseButton::Left) {
             return Ok(MouseOutcome::Unchanged);
         }
         let position = ratatui::layout::Position::new(mouse.column, mouse.row);
+        if app.statistics_reset.is_some() {
+            match ui::reset_confirmation_action_at(viewport, position) {
+                Some(ui::StatisticsAction::ConfirmReset) => {
+                    let reset = app.statistics_reset.take().expect("confirmação aberta");
+                    match reset {
+                        StatisticsReset::Word { language, word } => {
+                            repository.reset_word_model(&language, &word)?;
+                        }
+                        StatisticsReset::Model => repository.reset_adaptive_model()?,
+                    }
+                    app.reload_adaptive(repository)?;
+                    app.load_statistics(repository)?;
+                }
+                Some(ui::StatisticsAction::CancelReset) => app.statistics_reset = None,
+                _ => return Ok(MouseOutcome::Unchanged),
+            }
+            return Ok(MouseOutcome::Changed);
+        }
+        if let Some(action) = ui::statistics_detail_action_at(
+            viewport,
+            app.statistics_detail.is_some(),
+            app.statistics_session_detail.is_some(),
+            position,
+        ) {
+            match action {
+                ui::StatisticsAction::ResetWord => {
+                    let detail = app.statistics_detail.as_ref().expect("detalhe disponível");
+                    app.statistics_reset = Some(StatisticsReset::Word {
+                        language: detail.priority.language.clone(),
+                        word: detail.priority.word.clone(),
+                    });
+                }
+                ui::StatisticsAction::Back => {
+                    app.statistics_detail = None;
+                    app.statistics_session_detail = None;
+                }
+                _ => unreachable!("ação incompatível com detalhe"),
+            }
+            return Ok(MouseOutcome::Changed);
+        }
         if app.statistics_detail.is_none()
             && app.statistics_session_detail.is_none()
             && let Some(action) = ui::statistics_action_at(
@@ -1018,6 +1166,23 @@ fn handle_mouse(
                     app.statistics_selected_session = index;
                     app.open_statistics_session(repository)?;
                 }
+                ui::StatisticsAction::FilterHistory => {
+                    app.statistics_history_filter = match app.statistics_history_filter {
+                        ui::HistoryFilter::All => ui::HistoryFilter::Completed,
+                        ui::HistoryFilter::Completed => ui::HistoryFilter::Failed,
+                        ui::HistoryFilter::Failed => ui::HistoryFilter::All,
+                    };
+                    app.statistics_selected_session = 0;
+                }
+                ui::StatisticsAction::ResetModel => {
+                    app.statistics_reset = Some(StatisticsReset::Model)
+                }
+                ui::StatisticsAction::Back => app.statistics_open = false,
+                ui::StatisticsAction::ResetWord
+                | ui::StatisticsAction::ConfirmReset
+                | ui::StatisticsAction::CancelReset => {
+                    unreachable!("ação incompatível com a visão de estatísticas")
+                }
             }
             return Ok(MouseOutcome::Changed);
         }
@@ -1032,16 +1197,6 @@ fn handle_mouse(
             )
         {
             app.open_statistics_word(repository, index)?;
-            return Ok(MouseOutcome::Changed);
-        }
-        if mouse.row >= terminal.height.saturating_sub(2) {
-            if app.statistics_detail.is_some() {
-                app.statistics_detail = None;
-            } else if app.statistics_session_detail.is_some() {
-                app.statistics_session_detail = None;
-            } else {
-                app.statistics_open = false;
-            }
             return Ok(MouseOutcome::Changed);
         }
         return Ok(MouseOutcome::Unchanged);
@@ -1108,6 +1263,11 @@ fn handle_mouse(
     }
 
     let Some(cards) = ui::config_card_areas(viewport, &app.engine.config().mode) else {
+        if !ui::config_compact_card_area(viewport)
+            .contains(ratatui::layout::Position::new(mouse.column, mouse.row))
+        {
+            return Ok(MouseOutcome::Unchanged);
+        }
         app.settings_open = true;
         app.settings_focus = initial_settings_focus(&app.engine.config().mode);
         return Ok(MouseOutcome::Changed);
@@ -1849,6 +2009,23 @@ fn without_last_commit(mut words: Vec<String>) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn diagnostico_de_falha_e_privado_e_acionavel() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = write_diagnostic(temporary.path(), "teste", "causa encadeada").unwrap();
+        let content = fs::read_to_string(&path).unwrap();
+        assert!(content.contains("tipo: teste"));
+        assert!(content.contains("causa encadeada"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+    }
 
     fn app_de_teste(config: tuipe::typing::TestConfig, words: &[&str]) -> App {
         let temporary = tempfile::tempdir().unwrap();

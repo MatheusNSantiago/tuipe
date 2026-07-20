@@ -6,11 +6,37 @@ escolhe automaticamente o próximo treino, sem exigir que o usuário entenda ou
 configure o modelo.
 
 O código está em **candidato a release 0.1.0**. Motor, persistência, recuperação,
-empacotamento e jornada principal já são validados automaticamente, inclusive
-dentro de um pseudo-terminal real. A publicação depende apenas das validações
-humanas e de acessibilidade registradas no `PLAN.md`.
+empacotamento e jornada principal são validados automaticamente, inclusive
+dentro de um pseudo-terminal real. Os gates ainda abertos para publicação estão
+registrados no `PLAN.md` e no registro de mudanças.
 
-## Instalação para desenvolvimento
+## Instalação
+
+### Binário Linux
+
+Baixe o pacote `tuipe-VERSÃO-x86_64-linux.tar.gz` e o arquivo `.sha256` de
+mesmo nome no release. Verifique, extraia e instale o binário no diretório do
+usuário:
+
+```sh
+sha256sum -c tuipe-VERSÃO-x86_64-linux.tar.gz.sha256
+tar -xzf tuipe-VERSÃO-x86_64-linux.tar.gz
+install -Dm755 tuipe-VERSÃO-x86_64-linux/tuipe-x86_64-linux ~/.local/bin/tuipe
+tuipe --version
+```
+
+O binário requer Linux x86-64 com glibc 2.29 ou mais recente. `~/.local/bin`
+precisa estar no `PATH`.
+
+### Cargo
+
+Depois da publicação no crates.io:
+
+```sh
+cargo install tuipe --locked
+```
+
+### Desenvolvimento
 
 Requisitos:
 
@@ -152,6 +178,11 @@ Se o SQLite confirmar corrupção estrutural, o banco também é preservado com 
 prefixo `tuipe-corrompido-`, um banco novo é criado e a interface explica a
 recuperação. Erros de permissão, disco cheio e bancos de versões futuras nunca
 são tratados como corrupção nem substituídos automaticamente.
+
+Falhas fatais e panics geram um relatório privado em
+`$XDG_STATE_HOME/tuipe/falha-*.log` (ou `~/.local/state/tuipe`). O relatório
+contém versão, terminal, causa e backtrace, mas não inclui o texto digitado nem
+outras variáveis do ambiente. Ele pode ser anexado ao pedir suporte.
 
 Para validar a configuração, a estrutura do banco, a integridade do SQLite e
 todos os eventos compactados sem alterar dados:

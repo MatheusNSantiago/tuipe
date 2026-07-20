@@ -323,7 +323,16 @@ pub enum ResultAction {
 pub enum StatisticsAction {
     Page(StatisticsPage),
     Session(usize),
+    FilterHistory,
+    ResetModel,
+    ResetWord,
+    Back,
+    ConfirmReset,
+    CancelReset,
 }
+
+const STATISTICS_WIDE_MIN_WIDTH: u16 = 86;
+const MAX_PAGE_CONTENT_WIDTH: u16 = 160;
 
 pub fn render(frame: &mut Frame, engine: &TestEngine, theme: &Theme, state: RenderState<'_>) {
     render_com_icones(
@@ -415,7 +424,7 @@ pub fn render_statistics(
             sections[1],
             statistics,
             state.selected_word,
-            viewport.width < 80 || viewport.height < 24,
+            content.width < STATISTICS_WIDE_MIN_WIDTH || viewport.height < 24,
             theme,
         ),
         StatisticsPage::Progress => {
@@ -478,7 +487,7 @@ fn render_statistics_navigation(
     active: StatisticsPage,
     theme: &Theme,
 ) {
-    let compact = area.width < 72;
+    let compact = area.width < STATISTICS_WIDE_MIN_WIDTH;
     let labels = if compact {
         ["1 visão", "2 progresso", "3 histórico"]
     } else {
@@ -1096,7 +1105,7 @@ pub fn statistics_word_at(
         content.width,
         content.height.saturating_sub(1),
     );
-    if viewport.width < 80 || viewport.height < 24 {
+    if content.width < STATISTICS_WIDE_MIN_WIDTH || viewport.height < 24 {
         let first_row = content.y.saturating_add(6);
         let visible = statistics
             .priority_words
@@ -1145,7 +1154,7 @@ pub fn statistics_action_at(
     }
     let content = page_content(viewport);
     if position.y == content.y {
-        let compact = content.width < 72;
+        let compact = content.width < STATISTICS_WIDE_MIN_WIDTH;
         let mut x = content.x.saturating_add(if compact {
             0
         } else {
@@ -1172,6 +1181,36 @@ pub fn statistics_action_at(
             x = right.saturating_add(2);
         }
     }
+    if position.y == content.bottom().saturating_sub(1) {
+        let line = match page {
+            StatisticsPage::Overview if content.width < 64 => {
+                "↑↓ mover  enter detalhes  R zerar  esc voltar"
+            }
+            StatisticsPage::Overview => {
+                "↑↓ selecionar   enter detalhes   R zerar modelo   esc voltar"
+            }
+            StatisticsPage::Progress if content.width < 80 || content.height < 20 => {
+                "tab navegar   esc voltar"
+            }
+            StatisticsPage::Progress => "tab ou 1–3 navegar   esc voltar",
+            StatisticsPage::History if content.width < 72 => {
+                "↑↓ mover  enter abrir  f filtro  esc voltar"
+            }
+            StatisticsPage::History => {
+                "↑↓ selecionar   enter detalhes   f filtrar   tab navegar   esc voltar"
+            }
+        };
+        let relative_x = usize::from(position.x.saturating_sub(content.x));
+        if label_hit(line, "esc voltar", relative_x) {
+            return Some(StatisticsAction::Back);
+        }
+        if page == StatisticsPage::Overview && label_hit(line, "R zerar", relative_x) {
+            return Some(StatisticsAction::ResetModel);
+        }
+        if page == StatisticsPage::History && label_hit(line, "f filtr", relative_x) {
+            return Some(StatisticsAction::FilterHistory);
+        }
+    }
     if page != StatisticsPage::History {
         return None;
     }
@@ -1192,6 +1231,62 @@ pub fn statistics_action_at(
     let index = offset + usize::from(position.y - first_row);
     (position.x >= body.x && position.x < body.right() && index < sessions.len())
         .then_some(StatisticsAction::Session(index))
+}
+
+pub fn statistics_detail_action_at(
+    viewport: Rect,
+    word_detail: bool,
+    session_detail: bool,
+    position: Position,
+) -> Option<StatisticsAction> {
+    let content = page_content(viewport);
+    if position.y != content.bottom().saturating_sub(1) {
+        return None;
+    }
+    let relative_x = usize::from(position.x.saturating_sub(content.x));
+    if word_detail {
+        let line = "r zerar palavra   enter ou esc voltar";
+        if label_hit(line, "r zerar palavra", relative_x) {
+            return Some(StatisticsAction::ResetWord);
+        }
+        if label_hit(line, "enter ou esc voltar", relative_x) {
+            return Some(StatisticsAction::Back);
+        }
+    } else if session_detail && label_hit("enter ou esc voltar", "enter ou esc voltar", relative_x)
+    {
+        return Some(StatisticsAction::Back);
+    }
+    None
+}
+
+pub fn reset_confirmation_action_at(
+    viewport: Rect,
+    position: Position,
+) -> Option<StatisticsAction> {
+    let area = centered_width(centered_height(viewport, 7), 58);
+    let controls = Rect::new(
+        area.x.saturating_add(1),
+        area.y.saturating_add(5),
+        area.width.saturating_sub(2),
+        1,
+    );
+    if position.y != controls.y || !controls.contains(position) {
+        return None;
+    }
+    centered_text_hit(
+        controls,
+        position.x,
+        &[
+            (StatisticsAction::ConfirmReset, "s confirmar".into()),
+            (StatisticsAction::CancelReset, "n cancelar".into()),
+        ],
+        4,
+    )
+}
+
+fn label_hit(line: &str, label: &str, x: usize) -> bool {
+    line.find(label)
+        .is_some_and(|start| (start..start + label.width()).contains(&x))
 }
 
 fn render_word_detail(frame: &mut Frame, area: Rect, detail: &WordDetail, theme: &Theme) {
@@ -2490,10 +2585,9 @@ fn render_config_bar(
     theme: &Theme,
     icones: Icons,
 ) {
-    let area = config_bar_area(viewport);
     let config = engine.config();
     let Some(cards) = config_card_areas(viewport, &config.mode) else {
-        let card = centered_width(area, 21.min(area.width));
+        let card = config_compact_card_area(viewport);
         render_card(
             frame,
             card,
@@ -2611,6 +2705,11 @@ pub fn config_card_areas(viewport: Rect, mode: &TestMode) -> Option<[Rect; 3]> {
     ])
     .split(row);
     Some([layout[0], layout[2], layout[4]])
+}
+
+pub fn config_compact_card_area(viewport: Rect) -> Rect {
+    let area = config_bar_area(viewport);
+    centered_width(area, 21.min(area.width))
 }
 
 fn render_card(frame: &mut Frame, area: Rect, line: Line<'static>, theme: &Theme) {
@@ -2934,26 +3033,31 @@ fn render_result_chart(
             ),
         ]);
     }
-    if area.width >= 60
-        && let Some(kind) = session_kind_descriptor(session_kind, icones)
-    {
-        title.push(Span::styled(
-            format!("   ·   {kind}"),
-            Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
-        ));
+    if let Some(kind) = session_kind_descriptor(session_kind, icones) {
+        let fragment = format!("   ·   {kind}");
+        if line_width(&title).saturating_add(fragment.width()) <= usize::from(area.width) {
+            title.push(Span::styled(
+                fragment,
+                Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
+            ));
+        }
     }
-    if area.width >= 60
-        && let Some(quote) = quote
-    {
+    if let Some(quote) = quote {
         let heart = if quote.favorite {
             icones.favorito
         } else {
             icones.nao_favorito
         };
-        title.push(Span::styled(
-            format!("   ·   {heart} {}", quote_source_label(quote.source, 30)),
-            Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
-        ));
+        let prefix = format!("   ·   {heart} ");
+        let remaining = usize::from(area.width)
+            .saturating_sub(line_width(&title))
+            .saturating_sub(prefix.width());
+        if remaining >= 4 {
+            title.push(Span::styled(
+                format!("{prefix}{}", truncate_to_width(quote.source, remaining)),
+                Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
+            ));
+        }
     }
     frame.render_widget(Paragraph::new(Line::from(title)), sections[0]);
 
@@ -3387,7 +3491,8 @@ fn render_footer(
         )],
         TestStatus::Running { .. } => return,
         TestStatus::Completed { .. } | TestStatus::Failed { .. }
-            if area.width < 60 && quote.is_some() =>
+            if result_actions_are_compact(area.width, keymap, quote.is_some())
+                && quote.is_some() =>
         {
             vec![
                 compact_action_line(
@@ -3407,22 +3512,26 @@ fn render_footer(
                 ),
             ]
         }
-        TestStatus::Completed { .. } | TestStatus::Failed { .. } if area.width < 60 => vec![
-            compact_action_line(
-                [
-                    (icones.proximo, &next, "próximo"),
-                    (icones.repeticao, &repeat, "repetir"),
-                ],
-                theme,
-            ),
-            compact_action_line(
-                [
-                    (icones.estatisticas, &statistics, "dados"),
-                    (icones.sair, &quit, "sair"),
-                ],
-                theme,
-            ),
-        ],
+        TestStatus::Completed { .. } | TestStatus::Failed { .. }
+            if result_actions_are_compact(area.width, keymap, false) =>
+        {
+            vec![
+                compact_action_line(
+                    [
+                        (icones.proximo, &next, "próximo"),
+                        (icones.repeticao, &repeat, "repetir"),
+                    ],
+                    theme,
+                ),
+                compact_action_line(
+                    [
+                        (icones.estatisticas, &statistics, "dados"),
+                        (icones.sair, &quit, "sair"),
+                    ],
+                    theme,
+                ),
+            ]
+        }
         TestStatus::Completed { .. } | TestStatus::Failed { .. } if quote.is_some() => vec![
             result_action_icons(icones, quote, theme),
             key_hints(
@@ -3509,7 +3618,7 @@ pub fn result_action_at(
         ResultAction::Quit,
     ];
     let icones = icones_do_terminal();
-    if viewport.width < 60 {
+    if result_actions_are_compact(content.width, keymap, has_quote) {
         let row_actions: &[(ResultAction, String)] = if position.y == viewport.bottom() - 2 {
             &[
                 (
@@ -3618,12 +3727,7 @@ pub fn result_action_at(
     None
 }
 
-fn centered_text_hit(
-    area: Rect,
-    x: u16,
-    actions: &[(ResultAction, String)],
-    gap: u16,
-) -> Option<ResultAction> {
+fn centered_text_hit<T: Copy>(area: Rect, x: u16, actions: &[(T, String)], gap: u16) -> Option<T> {
     let widths = actions
         .iter()
         .map(|(_, label)| UnicodeWidthStr::width(label.as_str()) as u16)
@@ -3842,6 +3946,70 @@ fn quote_source_label(source: &str, maximum: usize) -> String {
     }
 }
 
+fn line_width(spans: &[Span<'_>]) -> usize {
+    spans.iter().map(|span| span.content.width()).sum()
+}
+
+fn truncate_to_width(text: &str, maximum: usize) -> String {
+    if text.width() <= maximum {
+        return text.to_owned();
+    }
+    if maximum == 0 {
+        return String::new();
+    }
+    let target = maximum.saturating_sub(1);
+    let mut result = String::new();
+    let mut width = 0_usize;
+    for grapheme in text.graphemes(true) {
+        let grapheme_width = grapheme.width();
+        if width.saturating_add(grapheme_width) > target {
+            break;
+        }
+        result.push_str(grapheme);
+        width += grapheme_width;
+    }
+    result.push('…');
+    result
+}
+
+fn result_actions_are_compact(width: u16, keymap: &Keymap, has_quote: bool) -> bool {
+    let labels = result_action_labels(keymap, has_quote);
+    let required = labels
+        .iter()
+        .map(|(_, label)| label.width())
+        .sum::<usize>()
+        .saturating_add(4 * labels.len().saturating_sub(1));
+    required > usize::from(width)
+}
+
+fn result_action_labels(keymap: &Keymap, has_quote: bool) -> Vec<(ResultAction, String)> {
+    let mut labels = vec![
+        (
+            ResultAction::Next,
+            format!("{} próximo", Keymap::label(keymap.next)),
+        ),
+        (
+            ResultAction::Repeat,
+            format!("{} repetir", Keymap::label(keymap.repeat)),
+        ),
+        (
+            ResultAction::Statistics,
+            format!("{} estatísticas", Keymap::label(keymap.statistics)),
+        ),
+    ];
+    if has_quote {
+        labels.push((
+            ResultAction::Favorite,
+            format!("{} favoritar", Keymap::label(keymap.favorite)),
+        ));
+    }
+    labels.push((
+        ResultAction::Quit,
+        format!("{} sair", Keymap::label(keymap.quit)),
+    ));
+    labels
+}
+
 fn session_kind_descriptor(session_kind: SessionKind, icones: Icons) -> Option<String> {
     let descriptor = match session_kind {
         SessionKind::Practice => return None,
@@ -3973,11 +4141,14 @@ fn centered_width(area: Rect, maximum: u16) -> Rect {
 
 fn page_content(area: Rect) -> Rect {
     let padding = (area.width / 20).max(MIN_PAGE_PADDING);
-    Rect {
-        x: area.x + padding,
-        width: area.width.saturating_sub(padding * 2),
-        ..area
-    }
+    centered_width(
+        Rect {
+            x: area.x + padding,
+            width: area.width.saturating_sub(padding * 2),
+            ..area
+        },
+        MAX_PAGE_CONTENT_WIDTH,
+    )
 }
 
 fn centered_height(area: Rect, height: u16) -> Rect {
@@ -5141,6 +5312,75 @@ mod tests {
         insta::assert_snapshot!("statistics_progress_50x14", compact_progress);
         insta::assert_snapshot!("statistics_history_100x28", history);
         insta::assert_snapshot!("statistics_history_50x14", compact_history);
+    }
+
+    #[test]
+    fn estatisticas_preservam_layout_nos_breakpoints_intermediarios() {
+        insta::assert_snapshot!("statistics_80x28", render_statistics_at(80, 28));
+        insta::assert_snapshot!("statistics_88x28", render_statistics_at(88, 28));
+        insta::assert_snapshot!("statistics_95x28", render_statistics_at(95, 28));
+    }
+
+    #[test]
+    fn mouse_alcanca_todos_os_controles_visiveis_das_estatisticas() {
+        let statistics = statistics_fixture();
+        let viewport = Rect::new(0, 0, 100, 28);
+        let find = |expected| {
+            (0..viewport.height).any(|y| {
+                (0..viewport.width).any(|x| {
+                    statistics_action_at(
+                        viewport,
+                        &statistics,
+                        StatisticsPage::Overview,
+                        0,
+                        HistoryFilter::All,
+                        Position::new(x, y),
+                    ) == Some(expected)
+                })
+            })
+        };
+        assert!(find(StatisticsAction::ResetModel));
+        assert!(find(StatisticsAction::Back));
+        assert!((0..viewport.width).any(|x| {
+            statistics_action_at(
+                viewport,
+                &statistics,
+                StatisticsPage::History,
+                0,
+                HistoryFilter::All,
+                Position::new(x, viewport.bottom() - 1),
+            ) == Some(StatisticsAction::FilterHistory)
+        }));
+        assert!((0..viewport.width).any(|x| {
+            statistics_detail_action_at(
+                viewport,
+                true,
+                false,
+                Position::new(x, viewport.bottom() - 1),
+            ) == Some(StatisticsAction::ResetWord)
+        }));
+        assert!((0..viewport.height).any(|y| {
+            (0..viewport.width).any(|x| {
+                reset_confirmation_action_at(viewport, Position::new(x, y))
+                    == Some(StatisticsAction::ConfirmReset)
+            })
+        }));
+    }
+
+    #[test]
+    fn resultado_compacto_e_mouse_usam_o_mesmo_breakpoint() {
+        let viewport = Rect::new(0, 0, 65, 20);
+        let keymap = Keymap::default();
+        let content = page_content(viewport);
+        assert!(result_actions_are_compact(content.width, &keymap, true));
+        assert!((0..viewport.width).any(|x| {
+            result_action_at(
+                viewport,
+                &keymap,
+                true,
+                Position::new(x, viewport.bottom() - 1),
+            ) == Some(ResultAction::Favorite)
+        }));
     }
 
     #[test]

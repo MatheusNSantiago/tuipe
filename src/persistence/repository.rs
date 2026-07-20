@@ -2303,6 +2303,16 @@ fn backfill_session_selections(connection: &Connection) -> Result<()> {
         .collect::<rusqlite::Result<Vec<_>>>()?;
     for (session_id, stimuli_json) in sessions {
         let stimuli = serde_json::from_str::<Vec<String>>(&stimuli_json)?;
+        // Sessões anteriores à proveniência não registravam o estímulo. Elas
+        // continuam auditáveis e são ignoradas pelo rebuild, mas não há como
+        // inventar retroativamente a posição de cada seleção.
+        if stimuli.is_empty() {
+            connection.execute(
+                "UPDATE sessions SET selections_json = '[]' WHERE id = ?1",
+                [session_id],
+            )?;
+            continue;
+        }
         let mut observations = connection
             .prepare(
                 "SELECT word, selection_source, selection_propensity
@@ -2649,6 +2659,70 @@ mod tests {
             )
             .unwrap();
         assert_eq!(restored, ("targeted".into(), 0.125));
+    }
+
+    #[test]
+    fn migracao_preserva_sessao_legada_sem_estimulos() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("history.db");
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE schema_version (version INTEGER NOT NULL);
+                 INSERT INTO schema_version VALUES (1);
+                 CREATE TABLE sessions (
+                   id INTEGER PRIMARY KEY, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                   terminal_state TEXT NOT NULL, config_toml TEXT NOT NULL,
+                   elapsed_ms INTEGER NOT NULL, wpm REAL NOT NULL, raw_wpm REAL NOT NULL,
+                   accuracy REAL NOT NULL, correct_chars INTEGER NOT NULL,
+                   incorrect_chars INTEGER NOT NULL, extra_chars INTEGER NOT NULL,
+                   missed_chars INTEGER NOT NULL, metrics_version INTEGER NOT NULL,
+                   adaptive_version INTEGER NOT NULL, codec_version INTEGER NOT NULL
+                 );
+                 CREATE TABLE word_observations (
+                   id INTEGER PRIMARY KEY, session_id INTEGER NOT NULL REFERENCES sessions(id),
+                   language TEXT NOT NULL, word TEXT NOT NULL, confirmed_error INTEGER NOT NULL,
+                   corrections INTEGER NOT NULL, active_ms INTEGER NOT NULL, afk_ms INTEGER NOT NULL
+                 );
+                 INSERT INTO sessions (
+                   terminal_state, config_toml, elapsed_ms, wpm, raw_wpm, accuracy,
+                   correct_chars, incorrect_chars, extra_chars, missed_chars,
+                   metrics_version, adaptive_version, codec_version
+                 ) VALUES ('completed', '', 1000, 60, 60, 100, 5, 0, 0, 0, 1, 1, 1);
+                 INSERT INTO word_observations (
+                   session_id, language, word, confirmed_error, corrections, active_ms, afk_ms
+                 ) VALUES (1, 'portuguese', 'casa', 0, 0, 400, 0);",
+            )
+            .unwrap();
+        drop(connection);
+
+        let repository = Repository::open(&path).unwrap();
+        let (version, stimuli, selections) = repository
+            .connection
+            .query_row(
+                "SELECT (SELECT version FROM schema_version), stimuli_json, selections_json
+                 FROM sessions WHERE id = 1",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(version, CURRENT_SCHEMA_VERSION);
+        assert_eq!(stimuli, "[]");
+        assert_eq!(selections, "[]");
+        assert_eq!(
+            repository
+                .connection
+                .query_row("SELECT COUNT(*) FROM sessions", [], |row| row
+                    .get::<_, u64>(0))
+                .unwrap(),
+            1
+        );
     }
 
     #[test]

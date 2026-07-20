@@ -209,11 +209,18 @@ fn default_delete_word() -> Vec<KeyCombination> {
 }
 
 pub fn paths() -> (PathBuf, PathBuf) {
-    let base = BaseDirs::new().expect("tuipe requires a home directory");
+    let base = BaseDirs::new().expect("o tuipe precisa de um diretório pessoal");
     (
         base.config_dir().join("tuipe/config.toml"),
         base.data_dir().join("tuipe/tuipe.db"),
     )
+}
+
+pub fn state_dir() -> PathBuf {
+    let base = BaseDirs::new().expect("o tuipe precisa de um diretório pessoal");
+    base.state_dir()
+        .unwrap_or_else(|| base.data_local_dir())
+        .join("tuipe")
 }
 
 impl Preferences {
