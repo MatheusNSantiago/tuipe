@@ -61,7 +61,7 @@ eles não são escolhas adicionais.
 | `esc` | abrir ou fechar as configurações |
 | `r` | repetir o mesmo teste após o resultado |
 | `s` | abrir as estatísticas após o resultado |
-| `q` | sair quando nenhum teste estiver em andamento |
+| `q` | sair na tela de resultado ou nas configurações |
 
 Os atalhos `r`, `s` e `q` ficam bloqueados por 300 ms após o resultado para
 evitar uma ação acidental causada pela última tecla do teste.
@@ -78,6 +78,7 @@ Na janela aberta por `esc`, cada tecla percorre as opções do respectivo grupo:
 | `p` / `n` | pontuação / números |
 | `a` | currículo adaptativo |
 | `l` / `k` | idioma / pacote de palavras |
+| `q` | sair do tuipe |
 | `t` | tema |
 
 ## Dados e privacidade

@@ -13,6 +13,6 @@ expression: "render_engine_with_settings(50, 14, &engine, true)"
 │  l português    l inglês                       │
 │  k comum    k 1k    k 5k                       │
 │ t tema   arch                                  │
-│ esc fechar                                     │
+│ esc fechar    q sair                           │
 │                                                │
 ╰────────────────────────────────────────────────╯

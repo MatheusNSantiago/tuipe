@@ -665,7 +665,9 @@ fn render_com_icones(
 
     let compact = viewport.height < 18;
     let test_top = if compact {
-        viewport.y + 6
+        // O cartão compacto termina na linha 6. O teste começa depois dele,
+        // sem compartilhar a borda inferior com o descritor da sessão.
+        viewport.y + 7
     } else {
         viewport.y + viewport.height.saturating_mul(39) / 100
     };
@@ -774,13 +776,22 @@ fn render_settings(
             format!("{} configurações do teste", icones.configuracoes),
             Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
         ),
-        button_group(
-            &[
-                ("p pontuação", config.punctuation),
-                ("n números", config.numbers),
-            ],
-            theme,
-        ),
+        if matches!(config.mode, TestMode::Quote) {
+            Line::styled(
+                "pontuação e números indisponíveis em citações",
+                Style::default()
+                    .fg(theme_color(theme, &theme.sub, 2.0))
+                    .add_modifier(Modifier::DIM),
+            )
+        } else {
+            button_group(
+                &[
+                    ("p pontuação", config.punctuation),
+                    ("n números", config.numbers),
+                ],
+                theme,
+            )
+        },
         button_group(
             &[
                 ("m tempo", matches!(config.mode, TestMode::Time { .. })),
@@ -850,7 +861,7 @@ fn render_settings(
             chip(theme_name.to_owned(), true, theme),
         ]),
         Line::styled(
-            "esc fechar",
+            "esc fechar    q sair",
             Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
         ),
     ];
@@ -900,10 +911,25 @@ fn render_config_bar(
         .add_modifier(Modifier::BOLD);
     let idle = Style::default().fg(theme_color(theme, &theme.sub, 2.0));
 
+    let modifier_idle = if matches!(config.mode, TestMode::Quote) {
+        idle.add_modifier(Modifier::DIM)
+    } else {
+        idle
+    };
     let modifiers = Line::from(vec![
-        selector("@ pontuação", config.punctuation, active, idle),
+        selector(
+            "@ pontuação",
+            config.punctuation && !matches!(config.mode, TestMode::Quote),
+            active,
+            modifier_idle,
+        ),
         Span::raw(" "),
-        selector("# números", config.numbers, active, idle),
+        selector(
+            "# números",
+            config.numbers && !matches!(config.mode, TestMode::Quote),
+            active,
+            modifier_idle,
+        ),
     ]);
     render_card(frame, cards[0], modifiers, theme);
 
@@ -935,7 +961,7 @@ fn render_config_bar(
         TestMode::Time { seconds } => choices(&[15, 30, 60, 120], seconds, active, idle),
         TestMode::Words { count } => choices(&[10, 25, 50, 100], count, active, idle),
         TestMode::Quote => choice_names(
-            &["all", "short", "medium", "long"],
+            &["todas", "curta", "média", "longa"],
             match config.quote_length {
                 QuoteLength::All => 0,
                 QuoteLength::Short => 1,
@@ -1035,13 +1061,14 @@ fn render_test(
     let word_step = if area.height >= 7 { 2 } else { 1 };
     let first_word_y = area.y + 2;
 
-    frame.render_widget(
-        Paragraph::new(test_descriptor(engine, session_kind, icones))
-            .style(Style::default().fg(theme_color(theme, &theme.sub, 2.0)))
-            .alignment(Alignment::Center),
-        Rect::new(area.x, area.y, area.width, 1),
-    );
-    if matches!(engine.status(), TestStatus::Running { .. }) {
+    if matches!(engine.status(), TestStatus::Ready) {
+        frame.render_widget(
+            Paragraph::new(test_descriptor(engine, session_kind, icones))
+                .style(Style::default().fg(theme_color(theme, &theme.sub, 2.0)))
+                .alignment(Alignment::Center),
+            Rect::new(area.x, area.y, area.width, 1),
+        );
+    } else if matches!(engine.status(), TestStatus::Running { .. }) {
         frame.render_widget(
             Paragraph::new(mini_progress(engine)).style(Style::default().fg(theme_color(
                 theme,
@@ -1085,12 +1112,13 @@ fn render_result(
     icones: Icons,
 ) {
     let metrics = engine.metrics();
-    if area.height < 18 {
-        render_compact_result(frame, area, engine, &metrics, theme, icones);
-        return;
-    }
     let group_count = 7;
     let details_height = result_details_height(area.width, group_count);
+    let required_height = RESULT_CHART_HEIGHT + 1 + details_height;
+    if area.height < required_height {
+        render_compact_result(frame, area, engine, &metrics, theme, session_kind, icones);
+        return;
+    }
     let body = centered_height(
         area,
         (RESULT_CHART_HEIGHT + 1 + details_height).min(area.height),
@@ -1125,6 +1153,7 @@ fn render_compact_result(
     engine: &TestEngine,
     metrics: &Metrics,
     theme: &Theme,
+    session_kind: SessionKind,
     icones: Icons,
 ) {
     let stats = metrics.characters;
@@ -1192,16 +1221,30 @@ fn render_compact_result(
         Line::from(""),
     ];
     let descriptor_text = result_descriptor(engine, icones);
-    let descriptor = descriptor_text.lines().map(|line| {
+    let mut descriptor = descriptor_text
+        .lines()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    if let Some(kind) = session_kind_descriptor(session_kind, icones) {
+        descriptor.push(kind);
+    }
+    let descriptor = descriptor.into_iter().map(|line| {
         Line::styled(
-            line.to_owned(),
+            line,
             Style::default().fg(theme_color(theme, &theme.main, 3.0)),
         )
     });
     frame.render_widget(
         Paragraph::new(lines.into_iter().chain(descriptor).collect::<Vec<_>>())
             .alignment(Alignment::Center),
-        centered_height(area, 7),
+        centered_height(
+            area,
+            if session_kind == SessionKind::Practice {
+                7
+            } else {
+                8
+            },
+        ),
     );
 }
 
@@ -1526,11 +1569,7 @@ fn render_footer(
 ) {
     let lines = match engine.status() {
         TestStatus::Ready => vec![key_hints(
-            &[
-                ("enter", "reiniciar"),
-                ("esc", "configurações"),
-                ("q", "sair"),
-            ],
+            &[("comece", "a digitar"), ("esc", "configurações")],
             theme,
         )],
         TestStatus::Running { .. } => return,
@@ -2306,12 +2345,14 @@ mod tests {
         });
         engine.update(InputEvent::Tick { at_ms: 30_100 });
 
-        let rendered = render_engine_at(50, 14, &engine);
-        assert!(rendered.contains("wpm"));
-        assert!(rendered.contains("precisão"));
-        assert!(rendered.contains("caracteres"));
-        assert!(!rendered.contains("wpm ao longo do tempo"));
-        insta::assert_snapshot!("test_result_50x14", rendered);
+        for (width, height) in [(50, 14), (50, 18), (50, 20), (70, 20), (70, 22)] {
+            let rendered = render_engine_at(width, height, &engine);
+            assert!(rendered.contains("wpm"));
+            assert!(rendered.contains("precisão"));
+            assert!(rendered.contains("caracteres"));
+            assert!(!rendered.contains("wpm ao longo do tempo"));
+            insta::assert_snapshot!(format!("test_result_{width}x{height}"), rendered);
+        }
     }
 
     #[test]

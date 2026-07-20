@@ -43,11 +43,6 @@ fn main() -> Result<()> {
     let mut app = App::new(preferences, catalog, config_path, &repository)?;
 
     ratatui::run(|terminal| {
-        execute!(
-            std::io::stdout(),
-            EnableMouseCapture,
-            SetCursorStyle::BlinkingBar
-        )?;
         let _mouse_guard = scopeguard::guard((), |_| {
             let mut stdout = std::io::stdout();
             let _ = write!(
@@ -61,6 +56,11 @@ fn main() -> Result<()> {
                 SetCursorStyle::DefaultUserShape
             );
         });
+        execute!(
+            std::io::stdout(),
+            EnableMouseCapture,
+            SetCursorStyle::BlinkingBar
+        )?;
         run(terminal, &mut app, &repository)
     })
 }
@@ -741,6 +741,9 @@ fn handle_mouse(
     };
     let x = mouse.column;
     if (cards[0].x..cards[0].right()).contains(&x) {
+        if matches!(app.engine.config().mode, TestMode::Quote) {
+            return Ok(false);
+        }
         let punctuation = x < cards[0].x + cards[0].width / 2;
         app.apply_preference(repository, |preferences| {
             if punctuation {
@@ -809,7 +812,10 @@ fn handle_key(
     }
     let resultado_recente = app.bloqueia_atalhos_do_resultado();
     if matches!(code, KeyCode::Char('q'))
-        && !matches!(app.engine.status(), TestStatus::Running { .. })
+        && matches!(
+            app.engine.status(),
+            TestStatus::Completed { .. } | TestStatus::Failed { .. }
+        )
         && !resultado_recente
     {
         return Ok(true);
@@ -873,6 +879,7 @@ fn typing_action(code: KeyCode, modifiers: KeyModifiers) -> Option<KeyAction> {
 
 fn handle_settings_key(app: &mut App, repository: &Repository, code: KeyCode) -> Result<bool> {
     match code {
+        KeyCode::Char('q') => return Ok(true),
         KeyCode::Esc | KeyCode::Enter => app.settings_open = false,
         KeyCode::Char('m') => app.apply_preference(repository, |preferences| {
             preferences.test.mode = match preferences.test.mode {
@@ -907,12 +914,14 @@ fn handle_settings_key(app: &mut App, repository: &Repository, code: KeyCode) ->
                 tuipe::typing::Difficulty::Master => tuipe::typing::Difficulty::Normal,
             };
         })?,
-        KeyCode::Char('p') => app.apply_preference(repository, |preferences| {
-            preferences.test.punctuation = !preferences.test.punctuation;
-        })?,
-        KeyCode::Char('n') => app.apply_preference(repository, |preferences| {
-            preferences.test.numbers = !preferences.test.numbers;
-        })?,
+        KeyCode::Char('p') if !matches!(app.engine.config().mode, TestMode::Quote) => app
+            .apply_preference(repository, |preferences| {
+                preferences.test.punctuation = !preferences.test.punctuation;
+            })?,
+        KeyCode::Char('n') if !matches!(app.engine.config().mode, TestMode::Quote) => app
+            .apply_preference(repository, |preferences| {
+                preferences.test.numbers = !preferences.test.numbers;
+            })?,
         KeyCode::Char('a') => app.apply_preference(repository, |preferences| {
             preferences.test.adaptive = !preferences.test.adaptive;
         })?,
@@ -1116,6 +1125,25 @@ mod tests {
             typing_action(KeyCode::Char('h'), KeyModifiers::CONTROL),
             Some(KeyAction::DeleteWordBackward)
         );
+    }
+
+    #[test]
+    fn q_inicia_o_teste_em_vez_de_fechar_o_programa() {
+        let temporary = tempfile::tempdir().unwrap();
+        let repository = Repository::open(&temporary.path().join("history.db")).unwrap();
+        let mut app = app_de_teste(tuipe::typing::TestConfig::default(), &["que ", "tempo "]);
+
+        let deve_sair = handle_key(
+            &mut app,
+            &repository,
+            KeyCode::Char('q'),
+            KeyModifiers::NONE,
+        )
+        .unwrap();
+
+        assert!(!deve_sair);
+        assert!(matches!(app.engine.status(), TestStatus::Running { .. }));
+        assert_eq!(app.engine.attempts()[0].input, "q");
     }
 
     #[test]

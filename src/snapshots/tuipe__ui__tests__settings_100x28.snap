@@ -21,11 +21,11 @@ expression: "render_engine_with_settings(100, 28, &engine, true)"
                      │  k comum    k 1k    k 5k                               │
                      │ t tema   arch                                          │
                      │                                                        │
-                     │ esc fechar                                             │
+                     │ esc fechar    q sair                                   │
                      │                                                        │
                      │                                                        │
                      │                                                        │
                      ╰────────────────────────────────────────────────────────╯
 
 
-                           enter reiniciar    esc configurações    q sair
+                                comece a digitar    esc configurações
