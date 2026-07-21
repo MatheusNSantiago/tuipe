@@ -27,7 +27,7 @@ install -m 0755 "$alvo/release/tuipe" "$destino/tuipe-x86_64-linux"
 tar -czf "$destino/$pacote.tar.gz" \
   --transform "s,^,$pacote/," \
   -C "$destino" tuipe-x86_64-linux \
-  -C "$raiz" LICENSE NOTICE README.md CHANGELOG.md assets/manifest.json
+  -C "$raiz" LICENSE NOTICE README.md assets/manifest.json
 (cd "$destino" && sha256sum "$pacote.tar.gz") > "$destino/$pacote.tar.gz.sha256"
 
 echo "artefato: $destino/tuipe-x86_64-linux"

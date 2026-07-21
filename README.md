@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/assets/readme/digitacao.gif" alt="Uma sessão de digitação no tuipe" width="1200">
+  <img src="assets/readme/digitacao.gif" alt="Uma sessão de digitação no tuipe" width="1200">
 </p>
 
 O tuipe é um clone trimmed down do [Monkeytype](https://monkeytype.com/) feito
@@ -17,11 +17,6 @@ O resultado roda inteiramente no terminal, funciona offline e escolhe sozinho o
 que vale a pena praticar.
 
 ## O teste
-
-O comportamento de digitação segue o Monkeytype, não apenas sua aparência.
-Espaço confirma uma palavra, `backspace` volta naturalmente pelo texto e
-`ctrl+w` ou `ctrl+backspace` apaga a palavra atual. O cursor se move suavemente
-sem alterar a fonte nativa do terminal.
 
 Estão disponíveis testes por tempo, quantidade de palavras e citações, com:
 
@@ -66,7 +61,7 @@ mostrado é a chance extra de realmente começar a digitar aquela palavra, não 
 chance de ela ter sido escondida em algum ponto distante do texto.
 
 <p align="center">
-  <img src="docs/assets/readme/estatisticas.webp" alt="Visão geral das estatísticas do tuipe" width="1200">
+  <img src="assets/readme/estatisticas.webp" alt="Visão geral das estatísticas do tuipe" width="1200">
 </p>
 
 Cada palavra pode ser aberta para entender o diagnóstico. O tuipe mostra
@@ -74,7 +69,7 @@ falhas, correções, exposições, ritmo contra a sua base, tentativas recentes 
 padrões relacionados.
 
 <p align="center">
-  <img src="docs/assets/readme/detalhe-palavra.webp" alt="Diagnóstico de uma palavra no tuipe" width="1200">
+  <img src="assets/readme/detalhe-palavra.webp" alt="Diagnóstico de uma palavra no tuipe" width="1200">
 </p>
 
 O progresso também pode ser visto como distribuição de WPM e atividade diária.
@@ -82,11 +77,11 @@ Uma sessão individual preserva o texto praticado e aponta o que mais exigiu
 atenção.
 
 <p align="center">
-  <img src="docs/assets/readme/progresso.webp" alt="Distribuição de WPM e atividade diária" width="1200">
+  <img src="assets/readme/progresso.webp" alt="Distribuição de WPM e atividade diária" width="1200">
 </p>
 
 <p align="center">
-  <img src="docs/assets/readme/detalhe-sessao.webp" alt="Detalhe de uma sessão concluída" width="1200">
+  <img src="assets/readme/detalhe-sessao.webp" alt="Detalhe de uma sessão concluída" width="1200">
 </p>
 
 ## Configuração sem sair do fluxo
@@ -99,7 +94,7 @@ As alterações são salvas automaticamente. A mesma tela funciona com teclado e
 mouse e se reorganiza em terminais menores.
 
 <p align="center">
-  <img src="docs/assets/readme/configuracoes.webp" alt="Configurações do tuipe" width="1200">
+  <img src="assets/readme/configuracoes.webp" alt="Configurações do tuipe" width="1200">
 </p>
 
 ## Local de verdade
@@ -166,12 +161,7 @@ referência congelada para comportamento, métricas, conteúdo e decisões visua
 O tuipe traduz esse fluxo para Rust, Ratatui e uma grade de células sem tentar
 portar o restante do produto.
 
-Leitura adicional:
-
-- [modelo de treinamento](docs/modelo-de-treinamento.md);
-- [plano e estado da implementação](PLAN.md);
-- [persistência antes da primeira versão](docs/persistencia-pre-release.md);
-- [origem e licença dos conteúdos importados](NOTICE).
+A origem e a licença dos conteúdos importados estão registradas em [NOTICE](NOTICE).
 
 Validação local completa:
 
