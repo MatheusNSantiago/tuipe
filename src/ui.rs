@@ -603,7 +603,15 @@ fn render_statistics_navigation(
                 Block::default()
                     .borders(Borders::ALL)
                     .border_type(BorderType::Rounded)
-                    .border_style(Style::default().fg(theme_color(theme, &theme.sub_alt, 1.5)))
+                    .border_style(Style::default().fg(theme_color(
+                        theme,
+                        if selected {
+                            &theme.main
+                        } else {
+                            &theme.sub_alt
+                        },
+                        if selected { 3.0 } else { 1.5 },
+                    )))
                     .style(Style::default().bg(color(&theme.bg))),
             ),
             tab,
