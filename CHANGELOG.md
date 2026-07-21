@@ -24,6 +24,8 @@ os dados existentes.
   áreas clicáveis compatíveis com o desenho completo dos controles;
 - navegação de configurações com foco explícito, setas direcionais simétricas,
   estados booleanos legíveis e legenda permanente dos comandos;
+- painel mestre–detalhe para configurações largas, com resumo alinhado,
+  descrição contextual, edição isolada e áreas de clique equivalentes;
 - ações do resultado com ícone, tecla e descrição reunidos no mesmo controle;
 - navegação das estatísticas em abas delimitadas, responsivas, clicáveis e com
   estado ativo destacado por superfície, borda, cor e ícone;

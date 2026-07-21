@@ -7,19 +7,21 @@ expression: "render_engine_with_settings(100, 28, &engine, true)"
 
 
 
-
-
-              ╭──────────────────────────────────────────────────────────────────────╮
-              │ ⚙  configurações  ·  alterações salvas automaticamente               │
-              │ › pontuação      desligada    ligada                                 │
-              │   números        desligados    ligados                               │
-              │   modo           tempo    palavras    citação                        │
-              │   duração        15 s    30 s    60 s    120 s                       │
-              │   dificuldade    normal    especialista    mestre                    │
-              │   treino         padrão    adaptativo                                │
-              │   idioma         português    inglês                                 │
-              │   vocabulário    comum    1k    5k                                   │
-              │   tema           arch                                                │
-              │ ↑↓ navegar    ←→ alterar    enter alternar    esc fechar    q sair   │
-              │                                                                      │
-              ╰──────────────────────────────────────────────────────────────────────╯
+       ╭────────────────────────────────────────────────────────────────────────────────────╮
+       │ ⚙  configurações  ·  salvo automaticamente                                         │
+       │                                                                                    │
+       │ ╭ preferências ───────────────╮  ╭ pontuação ────────────────────────────────────╮ │
+       │ │› pontuação        desligada │  │ Inclui sinais de pontuação no conteúdo        │ │
+       │ │  números         desligados │  │ gerado.                                       │ │
+       │ │  modo                 tempo │  │                                               │ │
+       │ │  duração               30 s │  │                                               │ │
+       │ │  dificuldade   especialista │  │              desligada    ligada              │ │
+       │ │  treino          adaptativo │  │                                               │ │
+       │ │  idioma           português │  │                                               │ │
+       │ │  vocabulário          comum │  │                                               │ │
+       │ │  tema                  arch │  │                                               │ │
+       │ │                             │  │       ← ou → altera  ·  enter confirma        │ │
+       │ ╰─────────────────────────────╯  ╰───────────────────────────────────────────────╯ │
+       │                                                                                    │
+       │         ↑↓ navegar    ←→ alterar    enter confirmar    esc fechar    q sair        │
+       ╰────────────────────────────────────────────────────────────────────────────────────╯

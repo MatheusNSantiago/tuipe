@@ -314,6 +314,7 @@ pub enum ResetConfirmation<'a> {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SettingsAction {
+    Focus(usize),
     Punctuation(bool),
     Numbers(bool),
     ModeTime,
@@ -2416,14 +2417,18 @@ fn render_settings(
             .style(Style::default().bg(color(&theme.bg))),
         area,
     );
+    let config = engine.config();
+    if settings_are_wide(viewport) {
+        render_wide_settings(frame, area, config, theme, context);
+        return;
+    }
     let inner = Rect {
         x: area.x + 2,
         y: area.y + 1,
         width: area.width.saturating_sub(4),
         height: area.height.saturating_sub(2),
     };
-    let config = engine.config();
-    let compact = area.width < 72;
+    let compact = true;
     let row = |index: usize, label: &str, choices: Line<'static>| {
         let selected = focus == index;
         let mut spans = vec![Span::styled(
@@ -2671,6 +2676,343 @@ fn render_settings(
     frame.render_widget(Paragraph::new(sections), inner);
 }
 
+#[derive(Clone, Copy)]
+struct WideSettingsLayout {
+    header: Rect,
+    list: Rect,
+    detail: Rect,
+    footer: Rect,
+}
+
+fn wide_settings_layout(area: Rect) -> WideSettingsLayout {
+    let inner = Rect::new(
+        area.x.saturating_add(2),
+        area.y.saturating_add(1),
+        area.width.saturating_sub(4),
+        area.height.saturating_sub(2),
+    );
+    let body = Rect::new(
+        inner.x,
+        inner.y.saturating_add(2),
+        inner.width,
+        inner.height.saturating_sub(4),
+    );
+    let list_width = 31.min(body.width.saturating_sub(2));
+    WideSettingsLayout {
+        header: Rect::new(inner.x, inner.y, inner.width, 1),
+        list: Rect::new(body.x, body.y, list_width, body.height),
+        detail: Rect::new(
+            body.x.saturating_add(list_width).saturating_add(2),
+            body.y,
+            body.width.saturating_sub(list_width).saturating_sub(2),
+            body.height,
+        ),
+        footer: Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1),
+    }
+}
+
+fn render_wide_settings(
+    frame: &mut Frame,
+    area: Rect,
+    config: &crate::typing::TestConfig,
+    theme: &Theme,
+    context: SettingsContext<'_>,
+) {
+    let SettingsContext {
+        theme_name,
+        keymap,
+        focus,
+        icones,
+    } = context;
+    let layout = wide_settings_layout(area);
+    let header = Line::from(vec![
+        Span::styled(
+            format!("{}  configurações", icones.configuracoes),
+            Style::default()
+                .fg(theme_color(theme, &theme.text, 4.5))
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            "  ·  salvo automaticamente",
+            Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
+        ),
+    ]);
+    frame.render_widget(Paragraph::new(header), layout.header);
+
+    let labels = [
+        "pontuação",
+        "números",
+        "modo",
+        "duração",
+        "dificuldade",
+        "treino",
+        "idioma",
+        "vocabulário",
+        "tema",
+    ];
+    let values = settings_current_values(config, theme_name);
+    let list_block = Block::default()
+        .title(" preferências ")
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme_color(theme, &theme.sub_alt, 1.5)));
+    frame.render_widget(list_block, layout.list);
+    let list_inner = Rect::new(
+        layout.list.x.saturating_add(1),
+        layout.list.y.saturating_add(1),
+        layout.list.width.saturating_sub(2),
+        layout.list.height.saturating_sub(2),
+    );
+    for (index, (label, value)) in labels.iter().zip(values.iter()).enumerate() {
+        let Some(y) = list_inner.y.checked_add(index as u16) else {
+            continue;
+        };
+        if y >= list_inner.bottom() {
+            break;
+        }
+        let selected = focus == index;
+        let row_style = if selected {
+            Style::default()
+                .fg(theme_color(theme, &theme.text, 4.5))
+                .bg(color(&theme.sub_alt))
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme_color(theme, &theme.sub, 2.0))
+        };
+        let available = list_inner.width.saturating_sub(3) as usize;
+        let gap = available
+            .saturating_sub(UnicodeWidthStr::width(*label))
+            .saturating_sub(UnicodeWidthStr::width(value.as_str()))
+            .max(1);
+        let line = Line::from(vec![
+            Span::styled(if selected { "› " } else { "  " }, row_style),
+            Span::styled((*label).to_owned(), row_style),
+            Span::raw(" ".repeat(gap)),
+            Span::styled(
+                value.clone(),
+                if selected {
+                    row_style.fg(theme_color(theme, &theme.main, 3.0))
+                } else {
+                    row_style
+                },
+            ),
+            Span::raw(" "),
+        ]);
+        frame.render_widget(
+            Paragraph::new(line).style(row_style),
+            Rect::new(list_inner.x, y, list_inner.width, 1),
+        );
+    }
+
+    let detail_block = Block::default()
+        .title(format!(" {} ", labels[focus.min(labels.len() - 1)]))
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme_color(theme, &theme.main, 3.0)));
+    frame.render_widget(detail_block, layout.detail);
+    let detail_inner = Rect::new(
+        layout.detail.x.saturating_add(2),
+        layout.detail.y.saturating_add(1),
+        layout.detail.width.saturating_sub(4),
+        layout.detail.height.saturating_sub(2),
+    );
+    frame.render_widget(
+        Paragraph::new(settings_description(focus))
+            .style(Style::default().fg(theme_color(theme, &theme.sub, 2.0)))
+            .wrap(Wrap { trim: true }),
+        Rect::new(detail_inner.x, detail_inner.y, detail_inner.width, 2),
+    );
+    let choices = settings_choices(config, theme_name, focus);
+    if choices.is_empty() {
+        frame.render_widget(
+            Paragraph::new("indisponível no modo citação")
+                .alignment(Alignment::Center)
+                .style(
+                    Style::default()
+                        .fg(theme_color(theme, &theme.sub, 2.0))
+                        .add_modifier(Modifier::DIM),
+                ),
+            Rect::new(
+                detail_inner.x,
+                detail_inner.y.saturating_add(4),
+                detail_inner.width,
+                1,
+            ),
+        );
+    } else {
+        let buttons = choices
+            .iter()
+            .map(|(label, active)| (label.as_str(), *active))
+            .collect::<Vec<_>>();
+        frame.render_widget(
+            Paragraph::new(button_group(&buttons, theme)).alignment(Alignment::Center),
+            Rect::new(
+                detail_inner.x,
+                detail_inner.y.saturating_add(4),
+                detail_inner.width,
+                1,
+            ),
+        );
+    }
+    frame.render_widget(
+        Paragraph::new(if focus == 8 {
+            "← ou → percorre os temas instalados"
+        } else {
+            "← ou → altera  ·  enter confirma"
+        })
+        .alignment(Alignment::Center)
+        .style(Style::default().fg(theme_color(theme, &theme.sub, 2.0))),
+        Rect::new(
+            detail_inner.x,
+            detail_inner.bottom().saturating_sub(1),
+            detail_inner.width,
+            1,
+        ),
+    );
+
+    frame.render_widget(
+        Paragraph::new(key_hints(
+            &[
+                ("↑↓", "navegar"),
+                ("←→", "alterar"),
+                ("enter", "confirmar"),
+                (&Keymap::label(keymap.settings), "fechar"),
+                (&Keymap::label(keymap.quit), "sair"),
+            ],
+            theme,
+        ))
+        .alignment(Alignment::Center),
+        layout.footer,
+    );
+}
+
+fn settings_current_values(config: &crate::typing::TestConfig, theme_name: &str) -> Vec<String> {
+    vec![
+        if config.punctuation {
+            "ligada"
+        } else {
+            "desligada"
+        }
+        .into(),
+        if config.numbers {
+            "ligados"
+        } else {
+            "desligados"
+        }
+        .into(),
+        match config.mode {
+            TestMode::Time { .. } => "tempo".into(),
+            TestMode::Words { .. } => "palavras".into(),
+            TestMode::Quote => "citação".into(),
+        },
+        match config.mode {
+            TestMode::Time { seconds } => format!("{seconds} s"),
+            TestMode::Words { count } => format!("{count} palavras"),
+            TestMode::Quote => match config.quote_length {
+                QuoteLength::All => "todas".into(),
+                QuoteLength::Short => "curta".into(),
+                QuoteLength::Medium => "média".into(),
+                QuoteLength::Long => "longa".into(),
+            },
+        },
+        difficulty_name(config.difficulty).into(),
+        if config.adaptive {
+            "adaptativo"
+        } else {
+            "padrão"
+        }
+        .into(),
+        language_name(&config.language).into(),
+        if config.word_pack == "common" {
+            "comum".into()
+        } else {
+            config.word_pack.clone()
+        },
+        theme_name.into(),
+    ]
+}
+
+fn settings_description(focus: usize) -> &'static str {
+    [
+        "Inclui sinais de pontuação no conteúdo gerado.",
+        "Mistura números às palavras do teste.",
+        "Define como cada teste termina.",
+        "Ajusta a duração ou a quantidade do modo atual.",
+        "Controla quando um erro encerra o teste.",
+        "Personaliza automaticamente as próximas palavras.",
+        "Seleciona o idioma do conteúdo.",
+        "Escolhe o tamanho do vocabulário.",
+        "Muda as cores de toda a interface.",
+    ][focus.min(8)]
+}
+
+fn settings_choices(
+    config: &crate::typing::TestConfig,
+    theme_name: &str,
+    focus: usize,
+) -> Vec<(String, bool)> {
+    let choices: &[(&str, bool)] = match focus {
+        0 if !matches!(config.mode, TestMode::Quote) => &[
+            ("desligada", !config.punctuation),
+            ("ligada", config.punctuation),
+        ],
+        1 if !matches!(config.mode, TestMode::Quote) => {
+            &[("desligados", !config.numbers), ("ligados", config.numbers)]
+        }
+        2 => &[
+            ("tempo", matches!(config.mode, TestMode::Time { .. })),
+            ("palavras", matches!(config.mode, TestMode::Words { .. })),
+            ("citação", matches!(config.mode, TestMode::Quote)),
+        ],
+        3 => match config.mode {
+            TestMode::Time { seconds } => &[
+                ("15 s", seconds == 15),
+                ("30 s", seconds == 30),
+                ("60 s", seconds == 60),
+                ("120 s", seconds == 120),
+            ],
+            TestMode::Words { count } => &[
+                ("10", count == 10),
+                ("25", count == 25),
+                ("50", count == 50),
+                ("100", count == 100),
+            ],
+            TestMode::Quote => &[
+                ("todas", config.quote_length == QuoteLength::All),
+                ("curta", config.quote_length == QuoteLength::Short),
+                ("média", config.quote_length == QuoteLength::Medium),
+                ("longa", config.quote_length == QuoteLength::Long),
+            ],
+        },
+        4 => &[
+            ("normal", config.difficulty == Difficulty::Normal),
+            ("especialista", config.difficulty == Difficulty::Expert),
+            ("mestre", config.difficulty == Difficulty::Master),
+        ],
+        5 => &[
+            ("padrão", !config.adaptive),
+            ("adaptativo", config.adaptive),
+        ],
+        6 => &[
+            ("português", config.language == "portuguese"),
+            ("inglês", config.language == "english"),
+        ],
+        7 => &[
+            ("comum", config.word_pack == "common"),
+            ("1k", config.word_pack == "1k"),
+            ("5k", config.word_pack == "5k"),
+        ],
+        _ => &[],
+    };
+    if focus == 8 {
+        return vec![(format!("‹  {theme_name}  ›"), true)];
+    }
+    choices
+        .iter()
+        .map(|(label, active)| ((*label).into(), *active))
+        .collect()
+}
+
 fn setting_toggle(
     enabled: bool,
     disabled: bool,
@@ -2713,7 +3055,15 @@ fn compact_setting_value(value: impl Into<String>, theme: &Theme) -> Line<'stati
 }
 
 pub fn settings_area(viewport: Rect) -> Rect {
-    centered_width(centered_height(viewport, 14), 72)
+    if settings_are_wide(viewport) {
+        centered_width(centered_height(viewport, 18), 86)
+    } else {
+        centered_width(centered_height(viewport, 14), 72)
+    }
+}
+
+fn settings_are_wide(viewport: Rect) -> bool {
+    viewport.width >= 90 && viewport.height >= 22
 }
 
 pub fn settings_action_at(
@@ -2721,11 +3071,15 @@ pub fn settings_action_at(
     config: &crate::typing::TestConfig,
     theme_name: &str,
     keymap: &Keymap,
+    focus: usize,
     position: Position,
 ) -> Option<SettingsAction> {
     let area = settings_area(viewport);
     if !area.contains(position) {
         return None;
+    }
+    if settings_are_wide(viewport) {
+        return wide_settings_action_at(area, config, theme_name, keymap, focus, position);
     }
     let inner = Rect::new(
         area.x.saturating_add(2),
@@ -2841,6 +3195,113 @@ pub fn settings_action_at(
                 _ => None,
             }
         }
+        _ => None,
+    }
+}
+
+fn wide_settings_action_at(
+    area: Rect,
+    config: &crate::typing::TestConfig,
+    theme_name: &str,
+    keymap: &Keymap,
+    focus: usize,
+    position: Position,
+) -> Option<SettingsAction> {
+    let layout = wide_settings_layout(area);
+    let list_inner = Rect::new(
+        layout.list.x.saturating_add(1),
+        layout.list.y.saturating_add(1),
+        layout.list.width.saturating_sub(2),
+        layout.list.height.saturating_sub(2),
+    );
+    if list_inner.contains(position) {
+        let index = usize::from(position.y.saturating_sub(list_inner.y));
+        return (index < 9).then_some(SettingsAction::Focus(index));
+    }
+
+    let detail_inner = Rect::new(
+        layout.detail.x.saturating_add(2),
+        layout.detail.y.saturating_add(1),
+        layout.detail.width.saturating_sub(4),
+        layout.detail.height.saturating_sub(2),
+    );
+    let choices = settings_choices(config, theme_name, focus);
+    let choices_y = detail_inner.y.saturating_add(4);
+    if position.y == choices_y && !choices.is_empty() {
+        let labels = choices
+            .iter()
+            .map(|(label, _)| label.as_str())
+            .collect::<Vec<_>>();
+        let width = labels.iter().fold(0_u16, |total, label| {
+            total.saturating_add(UnicodeWidthStr::width(*label) as u16 + 2)
+        });
+        let gaps = 2_u16.saturating_mul(labels.len().saturating_sub(1) as u16);
+        let start = detail_inner
+            .x
+            .saturating_add(detail_inner.width.saturating_sub(width + gaps) / 2);
+        if let Some(index) = hit_chip(position.x, start, &labels) {
+            return settings_action_for_choice(config, focus, index);
+        }
+    }
+
+    if layout.footer.contains(position) {
+        let close = format!("{} fechar", Keymap::label(keymap.settings));
+        let quit = format!("{} sair", Keymap::label(keymap.quit));
+        let labels = ["↑↓ navegar", "←→ alterar", "enter confirmar", &close, &quit];
+        let total_width = labels
+            .iter()
+            .map(|label| UnicodeWidthStr::width(*label) as u16)
+            .sum::<u16>()
+            .saturating_add(4 * (labels.len().saturating_sub(1) as u16));
+        let start = layout
+            .footer
+            .x
+            .saturating_add(layout.footer.width.saturating_sub(total_width) / 2);
+        return match hit_text(position.x, start, &labels, 4)? {
+            3 => Some(SettingsAction::Close),
+            4 => Some(SettingsAction::Quit),
+            _ => None,
+        };
+    }
+    None
+}
+
+fn settings_action_for_choice(
+    config: &crate::typing::TestConfig,
+    focus: usize,
+    index: usize,
+) -> Option<SettingsAction> {
+    match focus {
+        0 if !matches!(config.mode, TestMode::Quote) => {
+            Some(SettingsAction::Punctuation(index == 1))
+        }
+        1 if !matches!(config.mode, TestMode::Quote) => Some(SettingsAction::Numbers(index == 1)),
+        2 => Some(match index {
+            0 => SettingsAction::ModeTime,
+            1 => SettingsAction::ModeWords,
+            2 => SettingsAction::ModeQuote,
+            _ => return None,
+        }),
+        3 if index < 4 => Some(SettingsAction::Value(index)),
+        4 => Some(SettingsAction::Difficulty(match index {
+            0 => Difficulty::Normal,
+            1 => Difficulty::Expert,
+            2 => Difficulty::Master,
+            _ => return None,
+        })),
+        5 if index < 2 => Some(SettingsAction::Adaptive(index == 1)),
+        6 => match index {
+            0 => Some(SettingsAction::LanguagePortuguese),
+            1 => Some(SettingsAction::LanguageEnglish),
+            _ => None,
+        },
+        7 => match index {
+            0 => Some(SettingsAction::PackCommon),
+            1 => Some(SettingsAction::Pack1k),
+            2 => Some(SettingsAction::Pack5k),
+            _ => None,
+        },
+        8 if index == 0 => Some(SettingsAction::NextTheme),
         _ => None,
     }
 }
@@ -5224,7 +5685,14 @@ mod tests {
     fn clique_na_configuracao_escolhe_a_opcao_exata() {
         let viewport = Rect::new(0, 0, 100, 28);
         let area = settings_area(viewport);
-        let inner = Position::new(area.x + 2, area.y + 1);
+        let layout = wide_settings_layout(area);
+        let list = Position::new(layout.list.x + 2, layout.list.y + 1);
+        let detail = Rect::new(
+            layout.detail.x + 2,
+            layout.detail.y + 1,
+            layout.detail.width - 4,
+            layout.detail.height - 2,
+        );
         let config = TestConfig::default();
 
         assert_eq!(
@@ -5233,7 +5701,19 @@ mod tests {
                 &config,
                 "arch",
                 &Keymap::default(),
-                Position::new(inner.x + 26, inner.y + 3),
+                0,
+                Position::new(list.x, list.y + 2),
+            ),
+            Some(SettingsAction::Focus(2))
+        );
+        assert_eq!(
+            settings_action_at(
+                viewport,
+                &config,
+                "arch",
+                &Keymap::default(),
+                2,
+                Position::new(detail.x + detail.width / 2, detail.y + 4),
             ),
             Some(SettingsAction::ModeWords)
         );
@@ -5243,47 +5723,29 @@ mod tests {
                 &config,
                 "arch",
                 &Keymap::default(),
-                Position::new(inner.x + 17, inner.y + 5),
-            ),
-            Some(SettingsAction::Difficulty(Difficulty::Normal))
-        );
-        assert_eq!(
-            settings_action_at(
-                viewport,
-                &config,
-                "arch",
-                &Keymap::default(),
-                Position::new(inner.x + 17, inner.y + 9),
+                8,
+                Position::new(detail.x + detail.width / 2, detail.y + 4),
             ),
             Some(SettingsAction::NextTheme)
         );
+        assert!((layout.footer.x..layout.footer.right()).any(|x| {
+            settings_action_at(
+                viewport,
+                &config,
+                "arch",
+                &Keymap::default(),
+                0,
+                Position::new(x, layout.footer.y),
+            ) == Some(SettingsAction::Quit)
+        }));
         assert_eq!(
             settings_action_at(
                 viewport,
                 &config,
                 "arch",
                 &Keymap::default(),
-                Position::new(inner.x + 30, inner.y + 9),
-            ),
-            None
-        );
-        assert_eq!(
-            settings_action_at(
-                viewport,
-                &config,
-                "arch",
-                &Keymap::default(),
-                Position::new(inner.x + 60, inner.y + 10),
-            ),
-            Some(SettingsAction::Quit)
-        );
-        assert_eq!(
-            settings_action_at(
-                viewport,
-                &config,
-                "arch",
-                &Keymap::default(),
-                Position::new(inner.x + 40, inner.y + 14),
+                0,
+                Position::new(area.x + 1, area.y + 1),
             ),
             None
         );

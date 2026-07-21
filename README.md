@@ -105,6 +105,11 @@ eles não são escolhas adicionais nem ocupam a tela principal.
 Os atalhos `r`, `s`, `f` e `q` ficam bloqueados por 300 ms após o resultado para
 evitar uma ação acidental causada pela última tecla do teste.
 
+Em terminais largos, as configurações usam um painel mestre–detalhe: `↑` e `↓`
+percorrem a lista alinhada de preferências, enquanto `←`, `→` e `enter` atuam
+somente sobre a preferência destacada. Em terminais compactos, a mesma
+navegação aparece em uma lista de coluna única.
+
 Os atalhos de aplicação podem ser alterados em `config.toml`. O tuipe usa a
 notação da crate Crokey e aceita uma tecla com modificadores por ação:
 

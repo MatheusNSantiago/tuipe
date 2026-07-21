@@ -1313,6 +1313,7 @@ fn handle_mouse(
             app.engine.config(),
             &app.preferences.theme,
             &app.preferences.keymap,
+            app.settings_focus,
             position,
         ) else {
             return Ok(MouseOutcome::Unchanged);
@@ -1429,6 +1430,7 @@ fn handle_settings_mouse_action(
     use ui::SettingsAction;
 
     app.settings_focus = match action {
+        SettingsAction::Focus(index) => index.min(8),
         SettingsAction::Punctuation(_) => 0,
         SettingsAction::Numbers(_) => 1,
         SettingsAction::ModeTime | SettingsAction::ModeWords | SettingsAction::ModeQuote => 2,
@@ -1442,6 +1444,7 @@ fn handle_settings_mouse_action(
     };
 
     match action {
+        SettingsAction::Focus(_) => {}
         SettingsAction::Close => app.settings_open = false,
         SettingsAction::Quit => return Ok(true),
         SettingsAction::NextTheme => {
