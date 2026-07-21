@@ -40,9 +40,9 @@ use tuipe::{
     adaptive::{AdaptivePolicy, AdaptiveSampler, CURRENT_POLICY_VERSION, Observation},
     content::{ContentCatalog, Quote, WordGenerator},
     persistence::{
-        Preferences, RawEvent, RawEventCodec, RawSessionEnd, Repository, SessionDetail,
-        SessionKind, SessionOutcome, SessionProvenance, StatisticsOverview, WordDetail,
-        WordObservationRecord, paths, state_dir,
+        Preferences, PriorityWord, RawEvent, RawEventCodec, RawSessionEnd, Repository,
+        SessionDetail, SessionKind, SessionOutcome, SessionProvenance, StatisticsOverview,
+        WordDetail, WordObservationRecord, paths, state_dir,
     },
     typing::{ExternalEvent, InputEvent, KeyAction, QuoteLength, TestEngine, TestMode, TestStatus},
     ui,
@@ -881,6 +881,7 @@ impl App {
                 word.estimated_session_chance = chances.get(&word.word).copied().unwrap_or(0.0);
             }
         }
+        sort_priority_words_by_uplift(&mut statistics.priority_words);
         self.statistics = statistics;
         self.statistics_selected_word = self
             .statistics_selected_word
@@ -956,6 +957,22 @@ impl App {
             .flatten();
         Ok(())
     }
+}
+
+fn sort_priority_words_by_uplift(words: &mut [PriorityWord]) {
+    let uplift = |word: &PriorityWord| {
+        if word.estimated_session_chance.is_finite() {
+            word.estimated_session_chance
+        } else {
+            0.0
+        }
+    };
+    words.sort_by(|left, right| {
+        uplift(right)
+            .total_cmp(&uplift(left))
+            .then_with(|| right.difficulty.total_cmp(&left.difficulty))
+            .then_with(|| left.word.cmp(&right.word))
+    });
 }
 
 fn run(
@@ -2534,6 +2551,37 @@ mod tests {
         assert_eq!(quote.settings_focus, 2);
         handle_settings_key(&mut quote, &repository, KeyCode::Up, KeyModifiers::NONE).unwrap();
         assert_eq!(quote.settings_focus, 8);
+    }
+
+    #[test]
+    fn palavras_prioritarias_seguem_o_aumento_mostrado_na_tela() {
+        let priority = |word: &str, uplift: f64, difficulty: f64| PriorityWord {
+            language: "portuguese".into(),
+            word: word.into(),
+            difficulty,
+            confirmed_errors: 0.0,
+            corrections: 0.0,
+            observations: 3,
+            effective_exposures: 3.0,
+            uncorrected_error_rate: 0.0,
+            corrected_error_rate: 0.0,
+            estimated_session_chance: uplift,
+        };
+        let mut words = vec![
+            priority("por", 0.0, 0.9),
+            priority("estar", 0.03, 0.5),
+            priority("fazer", 0.09, 0.2),
+        ];
+
+        sort_priority_words_by_uplift(&mut words);
+
+        assert_eq!(
+            words
+                .iter()
+                .map(|word| word.word.as_str())
+                .collect::<Vec<_>>(),
+            ["fazer", "estar", "por"]
+        );
     }
 
     #[test]
