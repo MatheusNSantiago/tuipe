@@ -48,6 +48,7 @@ const RESULT_WIDE_WIDTH: u16 = 90;
 const RESULT_MEDIUM_WIDTH: u16 = 54;
 const RESULT_GROUP_HEIGHT: u16 = 4;
 const RESULT_CHART_HEIGHT: u16 = 12;
+const RESULT_STATUS_HEIGHT: u16 = 4;
 const RESULT_AXIS_LABEL_WIDTH: u16 = 4;
 const RESULT_ERROR_AXIS_LABEL_WIDTH: u16 = 3;
 const CURVE_SAMPLES_PER_INTERVAL: u16 = 16;
@@ -88,6 +89,9 @@ struct Icons {
     mouse: &'static str,
     favorito: &'static str,
     nao_favorito: &'static str,
+    sucesso: &'static str,
+    recorde: &'static str,
+    falha: &'static str,
 }
 
 const ICONES_UNICODE: Icons = Icons {
@@ -108,6 +112,9 @@ const ICONES_UNICODE: Icons = Icons {
     mouse: "↖",
     favorito: "♥",
     nao_favorito: "♡",
+    sucesso: "✓",
+    recorde: "★",
+    falha: "×",
 };
 
 const ICONES_NERD: Icons = Icons {
@@ -128,6 +135,9 @@ const ICONES_NERD: Icons = Icons {
     mouse: "",
     favorito: "",
     nao_favorito: "",
+    sucesso: "",
+    recorde: "",
+    falha: "",
 };
 
 fn icones_do_terminal() -> Icons {
@@ -234,6 +244,11 @@ pub enum PersistenceUiState {
     Failed,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PersonalBest {
+    pub previous_wpm: Option<f64>,
+}
+
 #[derive(Clone, Copy)]
 struct RenderContext<'a> {
     settings_open: bool,
@@ -246,6 +261,8 @@ struct RenderContext<'a> {
     quote: Option<QuoteRenderState<'a>>,
     keymap: &'a Keymap,
     icones: Icons,
+    personal_best: Option<PersonalBest>,
+    result_animation_ms: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -254,6 +271,15 @@ struct FooterContext<'a> {
     quote: Option<QuoteRenderState<'a>>,
     keymap: &'a Keymap,
     icones: Icons,
+}
+
+#[derive(Clone, Copy)]
+struct ResultContext<'a> {
+    session_kind: SessionKind,
+    quote: Option<QuoteRenderState<'a>>,
+    icones: Icons,
+    personal_best: Option<PersonalBest>,
+    animation_ms: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -281,6 +307,8 @@ pub struct RenderState<'a> {
     pub focus_warning: bool,
     pub quote: Option<QuoteRenderState<'a>>,
     pub keymap: &'a Keymap,
+    pub personal_best: Option<PersonalBest>,
+    pub result_animation_ms: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -376,6 +404,8 @@ pub fn render(frame: &mut Frame, engine: &TestEngine, theme: &Theme, state: Rend
             quote: state.quote,
             keymap: state.keymap,
             icones: icones_do_terminal(),
+            personal_best: state.personal_best,
+            result_animation_ms: state.result_animation_ms,
         },
     );
 }
@@ -2294,6 +2324,8 @@ fn render_com_icones(
         quote,
         keymap,
         icones,
+        personal_best,
+        result_animation_ms,
     } = context;
     let viewport = frame.area();
     frame.render_widget(
@@ -2307,15 +2339,10 @@ fn render_com_icones(
 
     let content = page_content(viewport);
     let ready = matches!(engine.status(), TestStatus::Ready);
-    let result = matches!(
-        engine.status(),
-        TestStatus::Completed { .. } | TestStatus::Failed { .. }
-    );
-
     // O Monkeytype mantém a geometria da página enquanto o chrome desaparece
     // ao ganhar foco. Reservar as linhas impede que as palavras saltem quando
     // o primeiro caractere inicia o teste.
-    if ready || result && viewport.height >= 18 {
+    if ready {
         render_header(
             frame,
             Rect::new(content.x, viewport.y + 2, content.width, 2),
@@ -2358,9 +2385,13 @@ fn render_com_icones(
             result_area,
             engine,
             theme,
-            session_kind,
-            quote,
-            icones,
+            ResultContext {
+                session_kind,
+                quote,
+                icones,
+                personal_best,
+                animation_ms: result_animation_ms,
+            },
         ),
         TestStatus::Ready | TestStatus::Running { .. } => {
             render_test(frame, test_area, engine, theme, session_kind, icones)
@@ -3717,29 +3748,34 @@ fn render_result(
     area: Rect,
     engine: &TestEngine,
     theme: &Theme,
-    session_kind: SessionKind,
-    quote: Option<QuoteRenderState<'_>>,
-    icones: Icons,
+    context: ResultContext<'_>,
 ) {
     let metrics = engine.metrics();
     let group_count = 7;
     let details_height = result_details_height(area.width, group_count);
-    let required_height = RESULT_CHART_HEIGHT + 1 + details_height;
+    let required_height = RESULT_STATUS_HEIGHT + RESULT_CHART_HEIGHT + 2 + details_height;
     if area.height < required_height {
-        render_compact_result(frame, area, engine, theme, session_kind, quote, icones);
+        render_compact_result(frame, area, engine, theme, context);
         return;
     }
-    let body = centered_height(
-        area,
-        (RESULT_CHART_HEIGHT + 1 + details_height).min(area.height),
+    let body = centered_height(area, required_height.min(area.height));
+    let status = Rect::new(body.x, body.y, body.width, RESULT_STATUS_HEIGHT);
+    render_result_status(frame, status, engine, theme, context);
+    let top = Rect::new(
+        body.x,
+        status.bottom().saturating_add(1),
+        body.width,
+        RESULT_CHART_HEIGHT,
     );
-    let top_height = body
-        .height
-        .saturating_sub(details_height.saturating_add(1))
-        .max(5)
-        .min(body.height);
-    let top = Rect::new(body.x, body.y, body.width, top_height);
-    render_result_chart(frame, top, &metrics, theme, session_kind, quote, icones);
+    render_result_chart(
+        frame,
+        top,
+        &metrics,
+        theme,
+        context.session_kind,
+        context.quote,
+        context.icones,
+    );
 
     let details_top = top.bottom().saturating_add(1);
     render_result_details(
@@ -3753,7 +3789,7 @@ fn render_result(
         engine,
         &metrics,
         theme,
-        icones,
+        context.icones,
     );
 }
 
@@ -3762,13 +3798,20 @@ fn render_compact_result(
     area: Rect,
     engine: &TestEngine,
     theme: &Theme,
-    _session_kind: SessionKind,
-    quote: Option<QuoteRenderState<'_>>,
-    icones: Icons,
+    context: ResultContext<'_>,
 ) {
     let metrics = engine.metrics();
     let stats = metrics.characters;
-    let lines = vec![
+    let mut lines = vec![
+        compact_result_status_line(
+            engine.status(),
+            metrics.wpm,
+            context.personal_best,
+            context.animation_ms,
+            theme,
+            context.icones,
+        ),
+        Line::from(""),
         Line::from(vec![
             Span::styled(
                 "wpm ",
@@ -3829,18 +3872,17 @@ fn render_compact_result(
                 Style::default().fg(theme_color(theme, &theme.main, 3.0)),
             ),
         ]),
-        Line::from(""),
     ];
-    let descriptor_text = result_descriptor(engine, icones);
+    let descriptor_text = result_descriptor(engine, context.icones);
     let mut descriptor = descriptor_text
         .lines()
         .map(str::to_owned)
         .collect::<Vec<_>>();
-    if let Some(quote) = quote {
+    if let Some(quote) = context.quote {
         let heart = if quote.favorite {
-            icones.favorito
+            context.icones.favorito
         } else {
-            icones.nao_favorito
+            context.icones.nao_favorito
         };
         descriptor.push(format!(
             "{heart} f favoritar · {}",
@@ -3853,11 +3895,155 @@ fn render_compact_result(
             Style::default().fg(theme_color(theme, &theme.main, 3.0)),
         )
     });
+    lines.extend(descriptor);
+    let line_count = lines.len() as u16;
     frame.render_widget(
-        Paragraph::new(lines.into_iter().chain(descriptor).collect::<Vec<_>>())
-            .alignment(Alignment::Center),
-        centered_height(area, if quote.is_some() { 9 } else { 7 }),
+        Paragraph::new(lines).alignment(Alignment::Center),
+        centered_height(area, line_count),
     );
+}
+
+fn render_result_status(
+    frame: &mut Frame,
+    area: Rect,
+    engine: &TestEngine,
+    theme: &Theme,
+    context: ResultContext<'_>,
+) {
+    let status = engine.status();
+    let wpm = engine.metrics().wpm;
+    let personal_best = context.personal_best;
+    let animation_ms = context.animation_ms;
+    let personal_best = personal_best.filter(|_| matches!(status, TestStatus::Completed { .. }));
+    let pulso_claro = animation_ms < 1_200 && (animation_ms / 120).is_multiple_of(2);
+    let accent = if matches!(status, TestStatus::Failed { .. }) {
+        theme_color(theme, &theme.error, 3.0)
+    } else if pulso_claro {
+        theme_color(theme, &theme.text, 4.5)
+    } else {
+        theme_color(theme, &theme.main, 3.0)
+    };
+
+    if personal_best.is_some() && animation_ms < 2_400 && area.width > 12 {
+        render_record_particles(frame, area, animation_ms, theme);
+    }
+
+    let card = Rect::new(
+        area.x,
+        area.y.saturating_add(1),
+        area.width,
+        area.height.saturating_sub(1).min(3),
+    );
+    let card = centered_width(card, 58.min(area.width));
+    frame.render_widget(
+        Paragraph::new(result_status_line(
+            status,
+            wpm,
+            personal_best,
+            theme,
+            context.icones,
+        ))
+        .alignment(Alignment::Center)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(accent))
+                .style(Style::default().bg(color(&theme.bg))),
+        ),
+        card,
+    );
+}
+
+fn render_record_particles(frame: &mut Frame, area: Rect, animation_ms: u64, theme: &Theme) {
+    let phase = (animation_ms / 80) as u16;
+    let width = area.width.saturating_sub(2).max(1);
+    let particles = [(3, 1), (11, 3), (23, 5), (37, 7), (49, 9), (61, 11)];
+    for (index, (seed, speed)) in particles.into_iter().enumerate() {
+        let x = area.x + 1 + (seed + phase.saturating_mul(speed)) % width;
+        let symbol = if (usize::from(phase) + index).is_multiple_of(3) {
+            "✦"
+        } else {
+            "·"
+        };
+        let role = if index.is_multiple_of(2) {
+            &theme.main
+        } else {
+            &theme.text
+        };
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                symbol,
+                Style::default().fg(theme_color(theme, role, 3.0)),
+            )),
+            Rect::new(x, area.y, 1, 1),
+        );
+    }
+}
+
+fn compact_result_status_line(
+    status: &TestStatus,
+    wpm: f64,
+    personal_best: Option<PersonalBest>,
+    animation_ms: u64,
+    theme: &Theme,
+    icones: Icons,
+) -> Line<'static> {
+    let mut line = result_status_line(status, wpm, personal_best, theme, icones);
+    if personal_best.is_some() && animation_ms < 2_400 {
+        line.spans.insert(
+            0,
+            Span::styled(
+                "✦  ",
+                Style::default().fg(theme_color(theme, &theme.text, 4.5)),
+            ),
+        );
+        line.spans.push(Span::styled(
+            "  ✦",
+            Style::default().fg(theme_color(theme, &theme.text, 4.5)),
+        ));
+    }
+    line
+}
+
+fn result_status_line(
+    status: &TestStatus,
+    wpm: f64,
+    personal_best: Option<PersonalBest>,
+    theme: &Theme,
+    icones: Icons,
+) -> Line<'static> {
+    let (text, role) = match status {
+        TestStatus::Completed { .. } => match personal_best {
+            Some(PersonalBest {
+                previous_wpm: Some(previous),
+            }) => (
+                format!(
+                    "{}  NOVO RECORDE  ·  {:.0} wpm  ·  +{:.0}",
+                    icones.recorde,
+                    wpm,
+                    (wpm - previous).max(0.0)
+                ),
+                &theme.main,
+            ),
+            Some(PersonalBest { previous_wpm: None }) => (
+                format!("{}  PRIMEIRO RECORDE  ·  {:.0} wpm", icones.recorde, wpm),
+                &theme.main,
+            ),
+            None => (format!("{}  TESTE CONCLUÍDO", icones.sucesso), &theme.main),
+        },
+        TestStatus::Failed { .. } => (
+            format!("{}  TESTE NÃO CONCLUÍDO", icones.falha),
+            &theme.error,
+        ),
+        TestStatus::Ready | TestStatus::Running { .. } => (String::new(), &theme.sub),
+    };
+    Line::styled(
+        text,
+        Style::default()
+            .fg(theme_color(theme, role, 3.0))
+            .add_modifier(Modifier::BOLD),
+    )
 }
 
 fn render_result_chart(
@@ -5360,6 +5546,8 @@ mod tests {
                         quote: None,
                         keymap: &keymap,
                         icones,
+                        personal_best: None,
+                        result_animation_ms: 0,
                     },
                 )
             })
@@ -5395,6 +5583,8 @@ mod tests {
                 session_kind,
                 persistence,
                 focus_warning: false,
+                personal_best: None,
+                result_animation_ms: 0,
             },
         )
     }
@@ -5406,6 +5596,8 @@ mod tests {
         session_kind: SessionKind,
         persistence: PersistenceUiState,
         focus_warning: bool,
+        personal_best: Option<PersonalBest>,
+        result_animation_ms: u64,
     }
 
     fn render_engine_with_state(
@@ -5420,6 +5612,8 @@ mod tests {
             session_kind,
             persistence,
             focus_warning,
+            personal_best,
+            result_animation_ms,
         } = options;
         let catalog = ContentCatalog::bundled().unwrap();
         let theme = catalog.theme("arch").unwrap();
@@ -5443,6 +5637,8 @@ mod tests {
                         quote: None,
                         keymap: &keymap,
                         icones: ICONES_UNICODE,
+                        personal_best,
+                        result_animation_ms,
                     },
                 )
             })
@@ -5495,6 +5691,8 @@ mod tests {
                         }),
                         keymap: &keymap,
                         icones: ICONES_UNICODE,
+                        personal_best: None,
+                        result_animation_ms: 0,
                     },
                 );
             })
@@ -5843,6 +6041,8 @@ mod tests {
                 session_kind: SessionKind::Practice,
                 persistence: PersistenceUiState::Saved,
                 focus_warning: true,
+                personal_best: None,
+                result_animation_ms: 0,
             },
         );
 
@@ -6072,6 +6272,45 @@ mod tests {
     }
 
     #[test]
+    fn recorde_pessoal_recebe_celebracao_propria() {
+        let mut engine = TestEngine::new(
+            TestConfig {
+                mode: TestMode::Words { count: 1 },
+                ..TestConfig::default()
+            },
+            ["velocidade".into()],
+        );
+        engine.update(InputEvent::Key {
+            action: KeyAction::Text("v".into()),
+            at_ms: 100,
+        });
+        engine.update(InputEvent::Key {
+            action: KeyAction::Text("elocidade".into()),
+            at_ms: 10_000,
+        });
+        let rendered = render_engine_with_state(
+            100,
+            28,
+            &engine,
+            TestRenderOptions {
+                settings_open: false,
+                settings_focus: 0,
+                session_kind: SessionKind::Practice,
+                persistence: PersistenceUiState::Saved,
+                focus_warning: false,
+                personal_best: Some(PersonalBest {
+                    previous_wpm: Some(8.0),
+                }),
+                result_animation_ms: 320,
+            },
+        );
+
+        assert!(rendered.contains("NOVO RECORDE"));
+        assert!(rendered.contains("+"));
+        insta::assert_snapshot!("test_personal_best_100x28", rendered);
+    }
+
+    #[test]
     fn failed_result_stays_centered_and_preserves_the_result_hierarchy() {
         let config = TestConfig {
             mode: TestMode::Words { count: 4 },
@@ -6092,7 +6331,9 @@ mod tests {
             engine.status(),
             TestStatus::Failed { word_index: 2, .. }
         ));
-        insta::assert_snapshot!("test_failed_100x28", render_engine_at(100, 28, &engine));
+        let rendered = render_engine_at(100, 28, &engine);
+        assert!(rendered.contains("TESTE NÃO CONCLUÍDO"));
+        insta::assert_snapshot!("test_failed_100x28", rendered);
         insta::assert_snapshot!("test_failed_70x50", render_engine_at(70, 50, &engine));
         insta::assert_snapshot!("test_failed_180x40", render_engine_at(180, 40, &engine));
     }
@@ -6123,6 +6364,8 @@ mod tests {
                     session_kind: SessionKind::Practice,
                     persistence: PersistenceUiState::Saved,
                     focus_warning: false,
+                    personal_best: None,
+                    result_animation_ms: 0,
                 },
             )
         );

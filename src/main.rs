@@ -361,6 +361,8 @@ struct App {
     focus_lost_at: Option<Instant>,
     current_quote: Option<Quote>,
     quote_favorite: bool,
+    personal_best: Option<ui::PersonalBest>,
+    result_animation_started: Option<Instant>,
 }
 
 enum StatisticsReset {
@@ -378,7 +380,10 @@ struct PersistJob {
 }
 
 enum PersistResult {
-    Saved(Vec<WordObservationRecord>),
+    Saved {
+        observations: Vec<WordObservationRecord>,
+        personal_best: Option<ui::PersonalBest>,
+    },
     Failed(String),
 }
 
@@ -413,16 +418,30 @@ impl PersistenceWorker {
                     }
                 };
                 for job in jobs_rx {
-                    let result = repository.save_session_with_provenance(
-                        &job.config,
-                        &job.status,
-                        job.metrics,
-                        &job.observations,
-                        &job.raw_events,
-                        &job.provenance,
-                    );
+                    let result = (|| -> Result<PersistResult> {
+                        let previous_wpm = matches!(&job.status, TestStatus::Completed { .. })
+                            .then(|| repository.best_wpm_for(&job.config))
+                            .transpose()?
+                            .flatten();
+                        let wpm = job.metrics.wpm;
+                        repository.save_session_with_provenance(
+                            &job.config,
+                            &job.status,
+                            job.metrics,
+                            &job.observations,
+                            &job.raw_events,
+                            &job.provenance,
+                        )?;
+                        let personal_best = matches!(&job.status, TestStatus::Completed { .. })
+                            && previous_wpm.is_none_or(|best| wpm > best);
+                        Ok(PersistResult::Saved {
+                            observations: job.observations,
+                            personal_best: personal_best
+                                .then_some(ui::PersonalBest { previous_wpm }),
+                        })
+                    })();
                     let response = match result {
-                        Ok(_) => PersistResult::Saved(job.observations),
+                        Ok(result) => result,
                         Err(error) => PersistResult::Failed(error.to_string()),
                     };
                     if results_tx.send(response).is_err() {
@@ -556,6 +575,8 @@ impl App {
             focus_lost_at: None,
             current_quote,
             quote_favorite,
+            personal_best: None,
+            result_animation_started: None,
         })
     }
 
@@ -640,6 +661,8 @@ impl App {
         self.persistence_error = None;
         self.repeated_test = false;
         self.session_kind = session_kind;
+        self.personal_best = None;
+        self.result_animation_started = None;
         Ok(())
     }
 
@@ -672,6 +695,8 @@ impl App {
         self.persistence_error = None;
         self.repeated_test = true;
         self.session_kind = SessionKind::Repeat;
+        self.personal_best = None;
+        self.result_animation_started = None;
         Ok(())
     }
 
@@ -691,6 +716,22 @@ impl App {
             .as_millis()
             .try_into()
             .unwrap_or(u64::MAX)
+    }
+
+    fn result_animation_ms(&self) -> u64 {
+        self.result_animation_started.map_or(0, |started| {
+            started.elapsed().as_millis().try_into().unwrap_or(u64::MAX)
+        })
+    }
+
+    fn result_animation_active(&self) -> bool {
+        let duration = if self.personal_best.is_some() {
+            2_400
+        } else {
+            1_000
+        };
+        self.result_animation_started
+            .is_some_and(|_| self.result_animation_ms() < duration)
     }
 
     fn toggle_quote_favorite(&mut self, repository: &Repository) -> Result<()> {
@@ -764,7 +805,19 @@ impl App {
     }
 
     fn update(&mut self, event: InputEvent) {
+        let was_terminal = matches!(
+            self.engine.status(),
+            TestStatus::Completed { .. } | TestStatus::Failed { .. }
+        );
         self.engine.update(event);
+        let is_terminal = matches!(
+            self.engine.status(),
+            TestStatus::Completed { .. } | TestStatus::Failed { .. }
+        );
+        if !was_terminal && is_terminal {
+            self.personal_best = None;
+            self.result_animation_started = Some(Instant::now());
+        }
         if matches!(self.engine.status(), TestStatus::Running { .. }) {
             self.startup_notice = None;
         }
@@ -1047,10 +1100,17 @@ fn run(
         if let Some(result) = persistence.try_result()? {
             app.persistence_pending = false;
             match result {
-                PersistResult::Saved(observations) => {
+                PersistResult::Saved {
+                    observations,
+                    personal_best,
+                } => {
                     app.apply_observations(&observations);
                     app.persisted = true;
                     app.persistence_error = None;
+                    if personal_best.is_some() {
+                        app.personal_best = personal_best;
+                        app.result_animation_started = Some(Instant::now());
+                    }
                 }
                 PersistResult::Failed(error) => app.persistence_error = Some(error),
             }
@@ -1107,6 +1167,8 @@ fn run(
                                 favorite: app.quote_favorite,
                             }),
                         keymap: &app.preferences.keymap,
+                        personal_best: app.personal_best,
+                        result_animation_ms: app.result_animation_ms(),
                     },
                 );
                 if app.statistics_open {
@@ -1212,6 +1274,7 @@ fn run(
         needs_draw |= app.engine.status() != &previous_status
             || (matches!(app.engine.status(), TestStatus::Running { .. })
                 && current_second != last_drawn_second);
+        needs_draw |= app.result_animation_active();
         let focus_warning = app.focus_warning_visible();
         needs_draw |= focus_warning != last_focus_warning;
         last_focus_warning = focus_warning;
@@ -2789,15 +2852,53 @@ mod tests {
             })
             .unwrap();
 
+        let first = worker
+            .receiver
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap();
+        assert!(matches!(
+            first,
+            PersistResult::Saved {
+                personal_best: Some(ui::PersonalBest { previous_wpm: None }),
+                ..
+            }
+        ));
+
+        let failed_metrics = tuipe::typing::Metrics {
+            wpm: 999.0,
+            ..tuipe::typing::Metrics::default()
+        };
+        worker
+            .save(PersistJob {
+                config: tuipe::typing::TestConfig::default(),
+                status: TestStatus::Failed {
+                    ended_at_ms: 2,
+                    word_index: 0,
+                },
+                metrics: failed_metrics,
+                observations: Vec::new(),
+                raw_events: Vec::new(),
+                provenance: SessionProvenance::default(),
+            })
+            .unwrap();
         assert!(matches!(
             worker
                 .receiver
                 .recv_timeout(Duration::from_secs(2))
                 .unwrap(),
-            PersistResult::Saved(_)
+            PersistResult::Saved {
+                personal_best: None,
+                ..
+            }
         ));
         let repository = Repository::open(&path).unwrap();
         assert_eq!(repository.statistics_overview().unwrap().completed_tests, 1);
+        assert_eq!(
+            repository
+                .best_wpm_for(&tuipe::typing::TestConfig::default())
+                .unwrap(),
+            Some(0.0)
+        );
     }
 
     #[test]

@@ -136,6 +136,8 @@ Copiar as formulas e a hierarquia do resultado do Monkeytype:
 - WPM ao longo do tempo com erros marcados;
 - tipo do teste e modificadores;
 - acoes: proximo teste, repetir mesmo teste e abrir estatisticas.
+- estado visual inequivoco para conclusao e falha;
+- celebracao animada quando o WPM supera o recorde anterior da mesma configuracao.
 
 Tentativas que falham automaticamente sao persistidas e alimentam o adaptativo, mas nao entram em recordes nem medias de testes concluidos. Restart, saida ou troca manual de configuracao nao atualizam o modelo adaptativo.
 

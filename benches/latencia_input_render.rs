@@ -38,6 +38,8 @@ fn main() {
         focus_warning: false,
         quote: None,
         keymap: &keymap,
+        personal_best: None,
+        result_animation_ms: 0,
     };
 
     for sample in 0..AQUECIMENTO {

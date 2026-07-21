@@ -538,6 +538,20 @@ impl Repository {
         self.save_session_with_observations(config, status, metrics, &[])
     }
 
+    /// Retorna a melhor velocidade já concluída com exatamente a mesma
+    /// configuração. Falhas e sessões interrompidas nunca formam recordes.
+    pub fn best_wpm_for(&self, config: &TestConfig) -> Result<Option<f64>> {
+        let config_toml = toml::to_string(config)?;
+        self.connection
+            .query_row(
+                "SELECT MAX(wpm) FROM sessions
+                 WHERE terminal_state = 'completed' AND config_toml = ?1",
+                [config_toml],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
+    }
+
     pub fn adaptive_policy_state(&self) -> Result<AdaptivePolicyState> {
         self.connection
             .query_row(

@@ -468,6 +468,11 @@ adaptativa não deve ser apresentado como melhora global.
 - origem/composição do teste;
 - marcação de resultado de prática, âncora ou transferência.
 
+A interface separa conclusão e falha antes de qualquer interpretação das
+métricas. Recordes pessoais usam somente conclusões com configuração idêntica e
+são celebrados no resultado; uma falha pode alimentar o diagnóstico adaptativo,
+mas nunca entra nessa comparação.
+
 ### Progresso
 
 - WPM sustentável em avaliações-âncora numa faixa de precisão alta;

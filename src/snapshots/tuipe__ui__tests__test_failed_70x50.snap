@@ -4,13 +4,15 @@ expression: "render_engine_at(70, 50, &engine)"
 ---
 
 
-   ⌨ tuipe
 
 
 
 
 
 
+      ╭────────────────────────────────────────────────────────╮
+      │                 ×  TESTE NÃO CONCLUÍDO                 │
+      ╰────────────────────────────────────────────────────────╯
 
    wpm ao longo do tempo   bruto   × erros
     120│⠉⠉⠒⠒⠒⠢⠤⠤⠤⣀⣀⣀⡀    ⢀⣀⣀⣀⣀⣀                                ×  1
@@ -37,8 +39,6 @@ expression: "render_engine_at(70, 50, &engine)"
 
    tempo
    1.7s
-
-
 
 
 

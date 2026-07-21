@@ -105,6 +105,13 @@ eles não são escolhas adicionais nem ocupam a tela principal.
 Os atalhos `r`, `s`, `f` e `q` ficam bloqueados por 300 ms após o resultado para
 evitar uma ação acidental causada pela última tecla do teste.
 
+Ao terminar, a tela identifica sem ambiguidade um teste concluído ou uma falha.
+Um WPM superior ao histórico de testes concluídos com a mesma configuração
+ativa uma celebração animada de recorde pessoal. A comparação inclui modo e
+valor, idioma, vocabulário, pontuação, números, dificuldade e treino; falhas
+nunca criam recordes. O primeiro teste concluído de uma configuração estabelece
+sua primeira marca.
+
 Em terminais largos, as configurações usam um painel mestre–detalhe: `↑` e `↓`
 percorrem a lista alinhada de preferências, enquanto `←`, `→` e `enter` atuam
 somente sobre a preferência destacada. Em terminais compactos, a mesma

@@ -1,10 +1,12 @@
 ---
 source: src/ui.rs
-expression: "render_engine_at(100, 28, &engine)"
+expression: rendered
 ---
 
 
-     ⌨ tuipe
+                     ╭────────────────────────────────────────────────────────╮
+                     │                 ×  TESTE NÃO CONCLUÍDO                 │
+                     ╰────────────────────────────────────────────────────────╯
 
      wpm ao longo do tempo   bruto   × erros
       120│⠉⠉⠉⠒⠒⠒⠒⠒⠶⠶⠦⠤⠤⣀⣀⣀⣀⣀⡀ ⠠⠤⠤⢄⣀⣀⣀⣀⣀⣀⣀                                                  ×  1
@@ -23,8 +25,6 @@ expression: "render_engine_at(100, 28, &engine)"
      Aa 4 palavras     71        92%          92        10/1/0/1       46%             1.7s
      🌐  português
      ★ especialista
-
-
 
 
 

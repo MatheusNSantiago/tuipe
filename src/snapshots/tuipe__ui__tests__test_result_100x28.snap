@@ -4,7 +4,9 @@ expression: "render_engine_at(100, 28, &engine)"
 ---
 
 
-     ⌨ tuipe
+                     ╭────────────────────────────────────────────────────────╮
+                     │                   ✓  TESTE CONCLUÍDO                   │
+                     ╰────────────────────────────────────────────────────────╯
 
      wpm ao longo do tempo
        40│
@@ -23,8 +25,6 @@ expression: "render_engine_at(100, 28, &engine)"
      ◷ 30 segundos     7         100%         7         18/0/0/0       0%              30.0s
      🌐  português
      ★ especialista
-
-
 
 
 
