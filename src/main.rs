@@ -37,7 +37,10 @@ use termina::{
     style::RgbColor,
 };
 use tuipe::{
-    adaptive::{AdaptivePolicy, AdaptiveSampler, CURRENT_POLICY_VERSION, Observation},
+    adaptive::{
+        AdaptivePolicy, AdaptiveSampler, CURRENT_POLICY_VERSION, Observation, lexical_ngrams,
+        mechanics_for_token,
+    },
     content::{ContentCatalog, Quote, WordGenerator},
     persistence::{
         Preferences, PriorityWord, RawEvent, RawEventCodec, RawSessionEnd, Repository,
@@ -879,6 +882,50 @@ impl App {
             };
             for word in &mut statistics.priority_words {
                 word.estimated_session_chance = chances.get(&word.word).copied().unwrap_or(0.0);
+            }
+
+            if config.adaptive && self.policy_version == CURRENT_POLICY_VERSION {
+                let (candidates, _) = session_word_pool(
+                    configured_words,
+                    config,
+                    &self.adaptive,
+                    SessionKind::Practice,
+                );
+                let groups = statistics
+                    .priority_patterns
+                    .iter()
+                    .map(|pattern| {
+                        candidates
+                            .iter()
+                            .filter(|word| {
+                                if pattern.kind == "mecânica" {
+                                    mechanics_for_token(word).contains(&pattern.model_pattern)
+                                } else {
+                                    lexical_ngrams(word).contains(&pattern.model_pattern)
+                                }
+                            })
+                            .cloned()
+                            .collect::<Vec<_>>()
+                    })
+                    .collect::<Vec<_>>();
+                let uplifts = self
+                    .adaptive
+                    .estimated_session_group_uplifts_with_number_probability(
+                        &config.language,
+                        &groups,
+                        &candidates,
+                        draws,
+                        if config.numbers { 0.1 } else { 0.0 },
+                    );
+                for (pattern, uplift) in statistics.priority_patterns.iter_mut().zip(uplifts) {
+                    pattern.estimated_session_chance = uplift;
+                }
+                statistics.priority_patterns.sort_by(|left, right| {
+                    right
+                        .estimated_session_chance
+                        .total_cmp(&left.estimated_session_chance)
+                        .then_with(|| right.difficulty.total_cmp(&left.difficulty))
+                });
             }
         }
         sort_priority_words_by_uplift(&mut statistics.priority_words);

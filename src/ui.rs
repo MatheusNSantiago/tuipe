@@ -488,17 +488,18 @@ fn render_statistics_overview(
         return;
     }
     let sections = Layout::vertical([
-        Constraint::Length(11.min(content.height.saturating_sub(9))),
+        Constraint::Length(11.min(content.height.saturating_sub(12))),
+        Constraint::Length(1),
         Constraint::Length(3),
         Constraint::Min(7),
-        Constraint::Length(2),
+        Constraint::Length(3),
     ])
     .split(content);
     render_statistics_chart(frame, sections[0], &statistics.trend_tests, theme);
-    render_statistics_summary(frame, sections[1], statistics, theme);
+    render_statistics_summary(frame, sections[2], statistics, theme);
     let details = Layout::horizontal([Constraint::Percentage(58), Constraint::Percentage(42)])
         .spacing(1)
-        .split(sections[2]);
+        .split(sections[3]);
     render_priority_words(
         frame,
         details[0],
@@ -509,7 +510,7 @@ fn render_statistics_overview(
     render_priority_patterns(frame, details[1], &statistics.priority_patterns, theme);
     render_statistics_controls(
         frame,
-        sections[3],
+        sections[4],
         "↑↓ selecionar   enter detalhes   R zerar modelo   esc voltar",
         theme,
     );
@@ -657,7 +658,7 @@ fn render_statistics_progress(
             Constraint::Length(3),
             Constraint::Length(5),
             Constraint::Min(3),
-            Constraint::Length(2),
+            Constraint::Length(3),
         ])
         .split(area);
         render_statistics_summary_compact(frame, sections[0], statistics, theme);
@@ -669,22 +670,29 @@ fn render_statistics_progress(
     let chart_height = if area.height >= 24 { 10 } else { 8 };
     let sections = Layout::vertical([
         Constraint::Length(chart_height),
+        Constraint::Length(1),
         Constraint::Length(3),
         Constraint::Min(7),
-        Constraint::Length(2),
+        Constraint::Length(3),
     ])
     .split(area);
     render_statistics_chart(frame, sections[0], &statistics.trend_tests, theme);
-    render_statistics_summary(frame, sections[1], statistics, theme);
+    render_statistics_summary(frame, sections[2], statistics, theme);
     let lower = Layout::horizontal([Constraint::Percentage(48), Constraint::Percentage(52)])
         .spacing(4)
-        .split(sections[2]);
+        .split(sections[3]);
     render_wpm_distribution(frame, lower[0], &statistics.distribution, theme);
     render_daily_activity(frame, lower[1], &statistics.daily_activity, theme);
-    render_statistics_controls(frame, sections[3], "tab ou 1–3 navegar   esc voltar", theme);
+    render_statistics_controls(frame, sections[4], "tab ou 1–3 navegar   esc voltar", theme);
 }
 
 fn render_statistics_controls(frame: &mut Frame, area: Rect, controls: &str, theme: &Theme) {
+    let separated = Rect::new(
+        area.x,
+        area.y.saturating_add(1),
+        area.width,
+        area.height.saturating_sub(1),
+    );
     frame.render_widget(
         Paragraph::new(controls)
             .style(Style::default().fg(theme_color(theme, &theme.sub, 2.0)))
@@ -693,7 +701,7 @@ fn render_statistics_controls(frame: &mut Frame, area: Rect, controls: &str, the
                     .borders(Borders::TOP)
                     .border_style(Style::default().fg(theme_color(theme, &theme.sub_alt, 1.5))),
             ),
-        area,
+        separated,
     );
 }
 
@@ -903,7 +911,7 @@ fn render_statistics_history(
     let sections = Layout::vertical([
         Constraint::Length(2),
         Constraint::Min(1),
-        Constraint::Length(2),
+        Constraint::Length(3),
     ])
     .split(area);
     frame.render_widget(
@@ -1131,7 +1139,7 @@ fn render_session_detail(frame: &mut Frame, area: Rect, detail: &SessionDetail, 
             Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
         ));
     }
-    let body_height = area.height.saturating_sub(2);
+    let body_height = area.height.saturating_sub(3);
     while lines.len() < body_height as usize {
         lines.push(Line::from(""));
     }
@@ -1142,7 +1150,7 @@ fn render_session_detail(frame: &mut Frame, area: Rect, detail: &SessionDetail, 
     );
     render_statistics_controls(
         frame,
-        Rect::new(area.x, area.bottom().saturating_sub(2), area.width, 2),
+        Rect::new(area.x, area.bottom().saturating_sub(3), area.width, 3),
         "enter ou esc voltar",
         theme,
     );
@@ -1282,17 +1290,18 @@ pub fn statistics_word_at(
         .then_some(index);
     }
     let sections = Layout::vertical([
-        Constraint::Length(11.min(content.height.saturating_sub(9))),
+        Constraint::Length(11.min(content.height.saturating_sub(12))),
+        Constraint::Length(1),
         Constraint::Length(3),
         Constraint::Min(7),
-        Constraint::Length(1),
+        Constraint::Length(3),
     ])
     .split(content);
     let details = Layout::horizontal([Constraint::Percentage(58), Constraint::Percentage(42)])
         .spacing(1)
-        .split(sections[2]);
-    let first_row = details[0].y.saturating_add(2);
-    let visible = details[0].height.saturating_sub(2) as usize;
+        .split(sections[3]);
+    let first_row = details[0].y.saturating_add(3);
+    let visible = details[0].height.saturating_sub(3) as usize;
     let offset = selected_word.saturating_sub(visible.saturating_sub(1));
     let index = offset + usize::from(position.y.saturating_sub(first_row));
     (position.y >= first_row
@@ -1496,7 +1505,7 @@ fn render_word_detail(frame: &mut Frame, area: Rect, detail: &WordDetail, theme:
                 .take(area.height.saturating_sub(10) as usize)
                 .map(|attempt| word_attempt_line(attempt, theme)),
         );
-        let body_height = area.height.saturating_sub(2);
+        let body_height = area.height.saturating_sub(3);
         while lines.len() < body_height as usize {
             lines.push(Line::from(""));
         }
@@ -1507,7 +1516,7 @@ fn render_word_detail(frame: &mut Frame, area: Rect, detail: &WordDetail, theme:
         );
         render_statistics_controls(
             frame,
-            Rect::new(area.x, area.bottom().saturating_sub(2), area.width, 2),
+            Rect::new(area.x, area.bottom().saturating_sub(3), area.width, 3),
             "r zerar palavra   enter ou esc voltar",
             theme,
         );
@@ -1520,7 +1529,7 @@ fn render_word_detail(frame: &mut Frame, area: Rect, detail: &WordDetail, theme:
         Constraint::Length(3),
         Constraint::Length(1),
         Constraint::Min(8),
-        Constraint::Length(2),
+        Constraint::Length(3),
     ])
     .split(area);
     frame.render_widget(
@@ -1893,9 +1902,17 @@ fn render_statistics_compact(
                         )
                     };
                     let contexts = if area.width < 60 {
-                        format!("  {} palavras  ", pattern.distinct_words)
+                        format!(
+                            "  aumento {}  ·  {} palavras  ",
+                            estimated_chance_label(pattern.estimated_session_chance),
+                            pattern.distinct_words
+                        )
                     } else {
-                        format!("  ·  {} palavras  ·  ", pattern.distinct_words)
+                        format!(
+                            "  ·  aumento {}  ·  {} palavras  ·  ",
+                            estimated_chance_label(pattern.estimated_session_chance),
+                            pattern.distinct_words
+                        )
                     };
                     Line::from(vec![
                         Span::styled(
@@ -1915,7 +1932,7 @@ fn render_statistics_compact(
         );
     }
 
-    let body_height = area.height.saturating_sub(2);
+    let body_height = area.height.saturating_sub(3);
     while lines.len() < body_height as usize {
         lines.push(Line::from(""));
     }
@@ -1926,7 +1943,7 @@ fn render_statistics_compact(
     );
     render_statistics_controls(
         frame,
-        Rect::new(area.x, area.bottom().saturating_sub(2), area.width, 2),
+        Rect::new(area.x, area.bottom().saturating_sub(3), area.width, 3),
         if area.width < 64 {
             "↑↓ mover  enter detalhes  R zerar  esc voltar"
         } else {
@@ -2147,6 +2164,7 @@ fn render_priority_words(
         "palavras prioritárias",
         Style::default().fg(theme_color(theme, &theme.text, 4.5)),
     )];
+    lines.push(Line::from(""));
     if words.is_empty() {
         lines.push(Line::styled(
             "sem evidência suficiente",
@@ -2157,7 +2175,7 @@ fn render_priority_words(
             "palavra      aumento  falha  correção  exposições",
             Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
         ));
-        let visible = area.height.saturating_sub(2) as usize;
+        let visible = area.height.saturating_sub(3) as usize;
         let offset = selected_word.saturating_sub(visible.saturating_sub(1));
         lines.extend(
             words
@@ -2211,6 +2229,7 @@ fn render_priority_patterns(
         "padrões que pedem treino",
         Style::default().fg(theme_color(theme, &theme.text, 4.5)),
     )];
+    lines.push(Line::from(""));
     if patterns.is_empty() {
         lines.push(Line::styled(
             "sem evidência em palavras distintas",
@@ -2218,22 +2237,29 @@ fn render_priority_patterns(
         ));
     } else {
         lines.push(Line::styled(
-            "tipo/padrão       falha  palavras",
+            "padrão        aumento falha palavras",
             Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
         ));
         lines.extend(
             patterns
                 .iter()
-                .take(area.height.saturating_sub(2) as usize)
+                .take(area.height.saturating_sub(3) as usize)
                 .map(|pattern| {
                     let label = if pattern.kind == "mecânica" {
-                        quote_source_label(&format!("técnica {}", pattern.pattern), 16)
+                        quote_source_label(&format!("técnica {}", pattern.pattern), 12)
                     } else {
-                        quote_source_label(&pattern.pattern, 16)
+                        quote_source_label(&pattern.pattern, 12)
                     };
                     Line::from(vec![
                         Span::styled(
-                            format!("{label:<18}"),
+                            format!("{label:<14}"),
+                            Style::default().fg(theme_color(theme, &theme.main, 3.0)),
+                        ),
+                        Span::styled(
+                            format!(
+                                "{:>6} ",
+                                estimated_chance_label(pattern.estimated_session_chance)
+                            ),
                             Style::default().fg(theme_color(theme, &theme.main, 3.0)),
                         ),
                         Span::styled(
@@ -5593,8 +5619,10 @@ mod tests {
             priority_patterns: vec![PriorityPattern {
                 language: "portuguese".into(),
                 pattern: "acento agudo".into(),
+                model_pattern: "acute_accent".into(),
                 kind: "mecânica",
                 difficulty: 0.3,
+                estimated_session_chance: 0.12,
                 effective_exposures: 14.0,
                 uncorrected_error_rate: 0.21,
                 corrected_error_rate: 0.14,

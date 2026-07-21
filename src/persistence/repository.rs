@@ -228,8 +228,10 @@ pub struct WordDetail {
 pub struct PriorityPattern {
     pub language: String,
     pub pattern: String,
+    pub model_pattern: String,
     pub kind: &'static str,
     pub difficulty: f64,
+    pub estimated_session_chance: f64,
     pub effective_exposures: f64,
     pub uncorrected_error_rate: f64,
     pub corrected_error_rate: f64,
@@ -1904,6 +1906,7 @@ impl Repository {
             if difficulty > 0.0 {
                 patterns.push(pattern_diagnostic(
                     language,
+                    pattern.clone(),
                     pattern,
                     "sequência",
                     difficulty,
@@ -1923,6 +1926,7 @@ impl Repository {
                 patterns.push(pattern_diagnostic(
                     language,
                     mechanic_label(&pattern),
+                    pattern,
                     "mecânica",
                     difficulty,
                     PatternEvidence {
@@ -2201,6 +2205,7 @@ fn session_history_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Session
 fn pattern_diagnostic(
     language: String,
     pattern: String,
+    model_pattern: String,
     kind: &'static str,
     difficulty: f64,
     evidence: PatternEvidence,
@@ -2214,8 +2219,10 @@ fn pattern_diagnostic(
     PriorityPattern {
         language,
         pattern,
+        model_pattern,
         kind,
         difficulty,
+        estimated_session_chance: 0.0,
         effective_exposures: exposures,
         uncorrected_error_rate: if exposures > 0.0 {
             uncorrected / exposures

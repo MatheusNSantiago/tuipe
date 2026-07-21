@@ -568,12 +568,37 @@ impl AdaptiveSampler {
         draws: usize,
         number_probability: f64,
     ) -> HashMap<String, f64> {
-        if targets.is_empty() || candidates.is_empty() || draws == 0 {
-            return HashMap::new();
+        let groups = targets
+            .iter()
+            .map(|target| vec![target.clone()])
+            .collect::<Vec<_>>();
+        let chances = self.estimated_session_group_chances_with_number_probability(
+            language,
+            &groups,
+            candidates,
+            draws,
+            number_probability,
+        );
+        targets.iter().cloned().zip(chances).collect()
+    }
+
+    fn estimated_session_group_chances_with_number_probability(
+        &self,
+        language: &str,
+        target_groups: &[Vec<String>],
+        candidates: &[String],
+        draws: usize,
+        number_probability: f64,
+    ) -> Vec<f64> {
+        if target_groups.is_empty() || candidates.is_empty() || draws == 0 {
+            return vec![0.0; target_groups.len()];
         }
         const TRIALS: usize = 128;
         let number_probability = number_probability.clamp(0.0, 1.0);
-        let target_set = targets.iter().map(String::as_str).collect::<HashSet<_>>();
+        let target_sets = target_groups
+            .iter()
+            .map(|group| group.iter().map(String::as_str).collect::<HashSet<_>>())
+            .collect::<Vec<_>>();
         let targeted = candidates
             .iter()
             .map(|word| 1.0 + self.policy.maximum_boost * self.candidate_priority(language, word))
@@ -599,17 +624,17 @@ impl AdaptiveSampler {
             .expect("as prioridades de transferência são positivas e finitas");
         let has_signal =
             weights_vary(&targeted) || weights_vary(&exploration) || weights_vary(&transfer);
-        let mut counts = HashMap::<String, usize>::new();
+        let mut counts = vec![0_usize; target_groups.len()];
         let mut hasher = DefaultHasher::new();
         language.hash(&mut hasher);
-        targets.hash(&mut hasher);
+        target_groups.hash(&mut hasher);
         candidates.len().hash(&mut hasher);
         draws.hash(&mut hasher);
         number_probability.to_bits().hash(&mut hasher);
         let mut rng = SmallRng::seed_from_u64(hasher.finish());
         for _ in 0..TRIALS {
             let mut previous = Vec::<usize>::new();
-            let mut seen = HashSet::<String>::new();
+            let mut seen = vec![false; target_groups.len()];
             for _ in 0..draws {
                 if number_probability > 0.0 && rng.random_bool(number_probability) {
                     continue;
@@ -646,24 +671,19 @@ impl AdaptiveSampler {
                     }
                 };
                 let selected = &candidates[index];
-                if target_set.contains(selected.as_str()) {
-                    seen.insert(selected.clone());
+                for (group_index, target_set) in target_sets.iter().enumerate() {
+                    seen[group_index] |= target_set.contains(selected.as_str());
                 }
                 previous.insert(0, index);
                 previous.truncate(2);
             }
-            for word in seen {
-                *counts.entry(word).or_default() += 1;
+            for (count, seen) in counts.iter_mut().zip(seen) {
+                *count += usize::from(seen);
             }
         }
-        targets
-            .iter()
-            .map(|word| {
-                (
-                    word.clone(),
-                    counts.get(word).copied().unwrap_or(0) as f64 / TRIALS as f64,
-                )
-            })
+        counts
+            .into_iter()
+            .map(|count| count as f64 / TRIALS as f64)
             .collect()
     }
 
@@ -700,6 +720,38 @@ impl AdaptiveSampler {
                 let representative = representative.get(word).copied().unwrap_or(0.0);
                 (word.clone(), (adaptive - representative).max(0.0))
             })
+            .collect()
+    }
+
+    /// Estima o aumento da chance de ao menos um item de cada grupo aparecer
+    /// na sessão, sempre contra o mesmo sorteio representativo usado na tela.
+    pub fn estimated_session_group_uplifts_with_number_probability(
+        &self,
+        language: &str,
+        target_groups: &[Vec<String>],
+        candidates: &[String],
+        draws: usize,
+        number_probability: f64,
+    ) -> Vec<f64> {
+        let adaptive = self.estimated_session_group_chances_with_number_probability(
+            language,
+            target_groups,
+            candidates,
+            draws,
+            number_probability,
+        );
+        let representative = Self::new(self.policy)
+            .estimated_session_group_chances_with_number_probability(
+                language,
+                target_groups,
+                candidates,
+                draws,
+                number_probability,
+            );
+        adaptive
+            .into_iter()
+            .zip(representative)
+            .map(|(adaptive, representative)| (adaptive - representative).max(0.0))
             .collect()
     }
 
@@ -1233,6 +1285,55 @@ mod tests {
         let sampler = AdaptiveSampler::default();
         let chance = sampler.estimated_session_chance("english", "a", &words, 2);
         assert!((0.0..=1.0).contains(&chance));
+    }
+
+    #[test]
+    fn aumento_do_padrao_mede_a_chance_do_grupo_na_sessao() {
+        let observation = Observation::regular(true, false, false);
+        let mut skill = NgramSkill::default();
+        for word in ["primeiro", "principal", "privado"] {
+            for _ in 0..8 {
+                skill.observe(word, observation);
+            }
+        }
+        let mut sampler = AdaptiveSampler::default();
+        sampler.set_ngram_skills(vec![("portuguese".into(), "ri".into(), skill)]);
+        let candidates = [
+            "primeiro",
+            "principal",
+            "privado",
+            "casa",
+            "tempo",
+            "mundo",
+            "fazer",
+            "estar",
+            "coisa",
+            "parte",
+            "agora",
+            "outro",
+            "mesmo",
+            "depois",
+            "grande",
+            "poder",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+        let groups = vec![vec![
+            "primeiro".into(),
+            "principal".into(),
+            "privado".into(),
+        ]];
+
+        let uplift = sampler.estimated_session_group_uplifts_with_number_probability(
+            "portuguese",
+            &groups,
+            &candidates,
+            4,
+            0.0,
+        );
+
+        assert!(uplift[0] > 0.0);
     }
 
     #[test]
