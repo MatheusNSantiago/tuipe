@@ -1,4 +1,4 @@
-//! Configuração XDG e um pequeno repositório SQLite com migrações.
+//! Configuração XDG, schema SQLite atual e persistência dos eventos brutos.
 
 mod config;
 mod observations;

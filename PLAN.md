@@ -152,14 +152,13 @@ src/
   typing/                 motor puro de digitacao e metricas
   content/                word packs, quotes, punctuation e numbers
   adaptive/               observacoes, modelo, policy e sampler
-  persistence/            SQLite, migrations e codec de eventos
+  persistence/            SQLite, schema atual e codec de eventos
   ui/                     telas, widgets, layout e temas
   gamification/           XP, levels e streak
 assets/
   languages/
   quotes/
   themes/
-migrations/
 tests/
 ```
 
@@ -197,7 +196,9 @@ Seguir a [XDG Base Directory Specification](https://specifications.freedesktop.o
 - banco: `$XDG_DATA_HOME/tuipe/tuipe.db`, fallback `~/.local/share/tuipe/tuipe.db`;
 - logs descartaveis: `$XDG_STATE_HOME/tuipe/`.
 
-Gravar `config.toml` de forma atomica (`temp file -> fsync -> rename`). Migracoes SQLite sao incrementais e transacionais.
+Gravar `config.toml` de forma atomica (`temp file -> fsync -> rename`). Antes da
+primeira versão pública, o SQLite aceita apenas o schema atual e não executa
+migrações.
 
 ### Schema minimo
 
@@ -223,7 +224,7 @@ Nao armazenar JSON por tecla. Para cada sessao:
 4. persistir o blob uma vez ao finalizar, falhar, reiniciar ou sair;
 5. manter observacoes por palavra em colunas consultaveis.
 
-Nao impor limite de retencao. Incluir ferramenta interna de verificacao e migracao do codec. O loop de digitacao apenas acumula eventos em memoria; persistencia ocorre fora do caminho critico.
+Nao impor limite de retencao. Incluir ferramenta interna de verificacao do codec. O loop de digitacao apenas acumula eventos em memoria; persistencia ocorre fora do caminho critico.
 
 Usar SQLite em WAL mode e transacoes curtas. A documentacao oficial explica concorrencia e checkpointing: [SQLite WAL](https://www.sqlite.org/wal.html). Nao permitir que checkpoint ou recomputacao adaptativa bloqueiem input/render.
 
@@ -401,12 +402,12 @@ Streak:
 
 ### Fase 4 — persistencia e historico
 
-- [x] Criar migrations e repositories SQLite.
+- [x] Criar o schema atual e repositories SQLite.
 - [x] Implementar WAL, transacoes curtas e worker de persistencia.
 - [x] Implementar codec Postcard + Zstandard versionado.
 - [x] Persistir sessoes concluidas, falhas e restarts com classificacao correta.
 - [x] Implementar rebuild de metricas/materialized skills a partir dos eventos.
-- [x] Testar recovery de crash, migracao e blob corrompido.
+- [x] Testar recovery de crash, rejeicao de schema incompatível e blob corrompido.
 
 **Pronto quando:** nenhuma escrita entra no caminho critico e todo estado derivado pode ser reconstruido.
 
@@ -459,10 +460,11 @@ recebem aumento artificial; AFK nao altera dificuldade.
   contraste e informação que não dependa somente de cor.
 - [ ] Validar teclado, mouse, resize, colagem, IME, layouts não US e leitores de
   tela nos terminais suportados.
-- [x] Projetar recuperação acionável para banco corrompido, migration interrompida
-  e configuração inválida, sem exigir que o usuário encontre arquivos internos.
-- [ ] Definir canal de feedback, notas de versão, compatibilidade de dados e
-  estratégia de atualização antes da primeira release pública.
+- [x] Projetar recuperação acionável para banco corrompido e configuração
+  inválida, sem exigir que o usuário encontre arquivos internos.
+- [ ] Definir canal de feedback, notas de versão e estratégia de atualização
+  antes da primeira release pública; o contrato de compatibilidade começa na
+  primeira versão publicada.
 
 **Pronto quando:** o teste permanece responsivo sob carga, o terminal sempre e restaurado e a checklist de paridade esta fechada.
 
@@ -497,7 +499,8 @@ Executar Monte Carlo com seeds fixas e intervalos de tolerancia, nao asserts em 
 - `ratatui::backend::TestBackend` + `insta` para snapshots.
 - PTY/integration tests para raw mode, resize, mouse e restauracao apos panic.
 - Golden tests de assets importados.
-- Banco temporario por teste e migrations desde cada versao suportada.
+- Banco temporario por teste, inicializacao do schema atual e rejeicao de
+  qualquer outra versao durante o desenvolvimento pre-release.
 
 Referencias: [Ratatui testing recipes](https://ratatui.rs/recipes/testing/), [Proptest](https://proptest-rs.github.io/proptest/proptest/index.html) e [Insta](https://insta.rs/).
 

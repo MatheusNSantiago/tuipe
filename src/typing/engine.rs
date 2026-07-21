@@ -51,26 +51,8 @@ pub struct RecordedInputEvent {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RecordedInputKind {
-    /// Formato legado do codec 2. Mantido apenas para ler históricos antigos.
-    Insert {
-        grapheme: String,
-        expected: Option<String>,
-        input_before: String,
-        input_after: String,
-        correct: bool,
-    },
-    Delete {
-        deleted: String,
-        input_before: String,
-        input_after: String,
-        corrected_graphemes: u16,
-        whole_word: bool,
-    },
     Focus {
         gained: bool,
-    },
-    Paste {
-        text: String,
     },
     InsertDelta {
         grapheme: String,
@@ -721,7 +703,6 @@ mod tests {
             at_ms: 4_010,
         });
         assert_eq!(engine.attempts()[0].active_ms, 4_000);
-        assert_eq!(engine.attempts()[0].afk_ms, 0);
     }
 
     #[test]

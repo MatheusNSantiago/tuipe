@@ -31,21 +31,6 @@ pub enum RawSessionEnd {
 
 pub struct RawEventCodec;
 
-#[derive(Debug, Serialize, Deserialize)]
-struct RawEventV1 {
-    delta_ms: u32,
-    kind: RawEventKindV1,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-enum RawEventKindV1 {
-    Insert { text: String, correct: bool },
-    Backspace,
-    Restart,
-    Finish,
-    Fail,
-}
-
 impl RawEventCodec {
     pub const VERSION: u16 = 3;
     pub const MAX_UNCOMPRESSED_SIZE: usize = 8 * 1024 * 1024;
@@ -105,7 +90,7 @@ impl RawEventCodec {
         compressed: &[u8],
     ) -> Result<Vec<RawEvent>> {
         anyhow::ensure!(
-            (1..=Self::VERSION).contains(&version),
+            version == Self::VERSION,
             "versão não suportada do codec de eventos brutos: {version}"
         );
         anyhow::ensure!(
@@ -121,13 +106,8 @@ impl RawEventCodec {
             decoded.len() == uncompressed_size,
             "o tamanho dos eventos brutos não corresponde ao cabeçalho"
         );
-        let events: Vec<RawEvent> = if version == 1 {
-            let legacy: Vec<RawEventV1> =
-                postcard::from_bytes(&decoded).context("decodificar eventos brutos v1")?;
-            legacy.into_iter().map(RawEvent::from).collect()
-        } else {
-            postcard::from_bytes(&decoded).context("decodificar eventos brutos")?
-        };
+        let events: Vec<RawEvent> =
+            postcard::from_bytes(&decoded).context("decodificar eventos brutos")?;
         Self::validate(&events)?;
         Ok(events)
     }
@@ -146,28 +126,6 @@ impl RawEventCodec {
             match &event.kind {
                 RawEventKind::Terminal(_) => terminal = true,
                 RawEventKind::Input { word_index, event } => match event {
-                    RecordedInputKind::Insert {
-                        input_before,
-                        input_after,
-                        ..
-                    }
-                    | RecordedInputKind::Delete {
-                        input_before,
-                        input_after,
-                        ..
-                    } => {
-                        anyhow::ensure!(
-                            input_before.len() <= Self::MAX_EVENT_TEXT
-                                && input_after.len() <= Self::MAX_EVENT_TEXT,
-                            "snapshot legado excede o limite por evento"
-                        );
-                        let current = inputs.entry(*word_index).or_default();
-                        anyhow::ensure!(
-                            current == input_before,
-                            "o caminho de edição não continua da entrada anterior"
-                        );
-                        current.clone_from(input_after);
-                    }
                     RecordedInputKind::InsertDelta { grapheme, .. } => {
                         anyhow::ensure!(
                             !grapheme.is_empty() && grapheme.len() <= Self::MAX_EVENT_TEXT,
@@ -190,44 +148,12 @@ impl RawEventCodec {
                         );
                         remove_last_graphemes(current, *deleted_graphemes);
                     }
-                    RecordedInputKind::Focus { .. }
-                    | RecordedInputKind::Paste { .. }
-                    | RecordedInputKind::PasteRedacted { .. } => {}
+                    RecordedInputKind::Focus { .. } | RecordedInputKind::PasteRedacted { .. } => {}
                 },
             }
         }
         anyhow::ensure!(terminal, "a sessão bruta não possui causa terminal");
         Ok(())
-    }
-}
-
-impl From<RawEventV1> for RawEvent {
-    fn from(event: RawEventV1) -> Self {
-        let kind = match event.kind {
-            RawEventKindV1::Insert { text, correct } => RawEventKind::Input {
-                word_index: 0,
-                event: RecordedInputKind::InsertDelta {
-                    grapheme: text,
-                    expected: None,
-                    correct,
-                },
-            },
-            RawEventKindV1::Backspace => RawEventKind::Input {
-                word_index: 0,
-                event: RecordedInputKind::DeleteDelta {
-                    deleted_graphemes: 1,
-                    corrected_graphemes: 0,
-                    whole_word: false,
-                },
-            },
-            RawEventKindV1::Restart => RawEventKind::Terminal(RawSessionEnd::Restarted),
-            RawEventKindV1::Finish => RawEventKind::Terminal(RawSessionEnd::Completed),
-            RawEventKindV1::Fail => RawEventKind::Terminal(RawSessionEnd::Failed),
-        };
-        Self {
-            delta_ms: event.delta_ms,
-            kind,
-        }
     }
 }
 
@@ -251,11 +177,9 @@ mod tests {
         let recorded = vec![RecordedInputEvent {
             at_ms: 17,
             word_index: 3,
-            kind: RecordedInputKind::Insert {
+            kind: RecordedInputKind::InsertDelta {
                 grapheme: "á".into(),
                 expected: Some("a".into()),
-                input_before: String::new(),
-                input_after: "á".into(),
                 correct: false,
             },
         }];
@@ -268,39 +192,6 @@ mod tests {
             events
         );
         assert!(RawEventCodec::decode(1, size, &blob).is_err());
-    }
-
-    #[test]
-    fn codec_v1_historico_continua_legivel() {
-        let legacy = vec![
-            RawEventV1 {
-                delta_ms: 5,
-                kind: RawEventKindV1::Insert {
-                    text: "á".into(),
-                    correct: true,
-                },
-            },
-            RawEventV1 {
-                delta_ms: 7,
-                kind: RawEventKindV1::Finish,
-            },
-        ];
-        let bytes = postcard::to_allocvec(&legacy).unwrap();
-        let blob = zstd::stream::encode_all(bytes.as_slice(), 3).unwrap();
-
-        let decoded = RawEventCodec::decode(1, bytes.len(), &blob).unwrap();
-
-        assert!(matches!(
-            decoded[0].kind,
-            RawEventKind::Input {
-                event: RecordedInputKind::InsertDelta { .. },
-                ..
-            }
-        ));
-        assert_eq!(
-            decoded.last().map(|event| &event.kind),
-            Some(&RawEventKind::Terminal(RawSessionEnd::Completed))
-        );
     }
 
     #[test]
@@ -318,12 +209,10 @@ mod tests {
                 delta_ms: 1,
                 kind: RawEventKind::Input {
                     word_index: 0,
-                    event: RecordedInputKind::Insert {
-                        grapheme: "a".into(),
-                        expected: Some("a".into()),
-                        input_before: "estado inexistente".into(),
-                        input_after: "a".into(),
-                        correct: true,
+                    event: RecordedInputKind::DeleteDelta {
+                        deleted_graphemes: 1,
+                        corrected_graphemes: 0,
+                        whole_word: false,
                     },
                 },
             },

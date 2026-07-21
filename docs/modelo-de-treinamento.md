@@ -586,8 +586,9 @@ O modelo ativo já possui:
 
 Limitações ainda abertas:
 
-- sessões legadas anteriores à proveniência de estímulos não podem ter suas
-  observações rematerializadas; elas permanecem preservadas e auditáveis;
+- bancos de desenvolvimento com schema diferente do atual são recusados; antes
+  da primeira versão pública, não há migrações nem formatos históricos
+  suportados;
 - ativação e primeira visibilidade do token não são eventos do motor, portanto o
   planejamento anterior à primeira palavra não é observável;
 - repeat/IME/key-up dependem do que o terminal entrega e ainda não possuem flags
@@ -623,7 +624,7 @@ Limitações ainda abertas:
 - [ ] Criar perfis de ambiente sem exigir configuração manual do usuário.
 - [x] Materializar posterior de palavra, n-grama e mecânica.
 - [ ] Separar aquecimento/fadiga da habilidade longitudinal.
-- [x] Preservar dados v1 sem atribuir evidência fictícia ao modelo v2.
+- [x] Rejeitar qualquer estado serializado que não pertença ao modelo atual.
 - [ ] Validar calibração e valor preditivo prospectivamente.
 
 ### Fase 4 — avaliação e estatísticas
@@ -644,9 +645,9 @@ Limitações ainda abertas:
 - [x] Manter rollback operacional e reversível por versão.
 - [ ] Calibrar parâmetros por ganho retido e transferido com dados prospectivos.
 
-Dados históricos do adaptativo v1 podem continuar visíveis, mas não possuem
-informação suficiente para reconstruir a posterior completa. Não devem ganhar
-precisão fictícia numa migração.
+Até a primeira versão pública, somente o modelo atual é aceito. Alterações de
+formato invalidam o banco de desenvolvimento em vez de inferir ou fabricar
+evidência ausente.
 
 ## Decisões rejeitadas
 

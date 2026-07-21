@@ -12,7 +12,6 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use anyhow::{Context, Result};
 use chrono::{Datelike, Duration, Local, NaiveDate};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
-use unicode_segmentation::UnicodeSegmentation;
 
 use crate::adaptive::{
     CURRENT_POLICY_VERSION, MechanicSkill, NgramSkill, Observation, PersonalBaseline,
@@ -359,8 +358,8 @@ impl PersonalBaselineProfile {
 }
 
 impl Repository {
-    /// Valida estrutura, versão, integridade do SQLite e blobs brutos sem
-    /// executar migrações nem alterar o banco.
+    /// Valida a estrutura atual, a integridade do SQLite e os blobs brutos sem
+    /// alterar o banco.
     pub fn doctor(path: &Path) -> Result<()> {
         let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
         validate_schema_version(&connection)?;
@@ -392,44 +391,27 @@ impl Repository {
         drop(statement);
         let _: XpState = load_state_from(&connection, "xp_state")?;
         let _: StreakState = load_state_from(&connection, "streak_state")?;
-        if table_has_column(&connection, "sessions", "stimuli_json")?
-            && table_has_column(&connection, "sessions", "selections_json")?
-        {
-            let has_shadow = table_has_column(&connection, "sessions", "shadow_stimuli_json")?
-                && table_has_column(&connection, "sessions", "shadow_selections_json")?
-                && table_has_column(&connection, "sessions", "shadow_policy_version")?;
-            let sql = if has_shadow {
-                "SELECT id, stimuli_json, selections_json, shadow_stimuli_json,
-                        shadow_selections_json, shadow_policy_version
-                 FROM sessions ORDER BY id"
-            } else {
-                "SELECT id, stimuli_json, selections_json, '[]', '[]', NULL
-                 FROM sessions ORDER BY id"
-            };
-            let mut statement = connection.prepare(sql)?;
-            let mut rows = statement.query([])?;
-            while let Some(row) = rows.next()? {
-                let session_id = row.get::<_, i64>(0)?;
-                let stimuli = serde_json::from_str::<Vec<String>>(&row.get::<_, String>(1)?)?;
-                let selections =
-                    serde_json::from_str::<Vec<Option<WordSelection>>>(&row.get::<_, String>(2)?)?;
-                let shadow_stimuli =
-                    serde_json::from_str::<Vec<String>>(&row.get::<_, String>(3)?)?;
-                let shadow_selections =
-                    serde_json::from_str::<Vec<Option<WordSelection>>>(&row.get::<_, String>(4)?)?;
-                let shadow_version = row.get::<_, Option<u16>>(5)?;
-                validate_selection_trace(session_id, "ativa", &stimuli, &selections)?;
-                validate_selection_trace(
-                    session_id,
-                    "shadow",
-                    &shadow_stimuli,
-                    &shadow_selections,
-                )?;
-                anyhow::ensure!(
-                    shadow_version.is_some() == !shadow_stimuli.is_empty(),
-                    "sessão #{session_id}: versão e estímulos shadow divergem"
-                );
-            }
+        let mut statement = connection.prepare(
+            "SELECT id, stimuli_json, selections_json, shadow_stimuli_json,
+                    shadow_selections_json, shadow_policy_version
+             FROM sessions ORDER BY id",
+        )?;
+        let mut rows = statement.query([])?;
+        while let Some(row) = rows.next()? {
+            let session_id = row.get::<_, i64>(0)?;
+            let stimuli = serde_json::from_str::<Vec<String>>(&row.get::<_, String>(1)?)?;
+            let selections =
+                serde_json::from_str::<Vec<Option<WordSelection>>>(&row.get::<_, String>(2)?)?;
+            let shadow_stimuli = serde_json::from_str::<Vec<String>>(&row.get::<_, String>(3)?)?;
+            let shadow_selections =
+                serde_json::from_str::<Vec<Option<WordSelection>>>(&row.get::<_, String>(4)?)?;
+            let shadow_version = row.get::<_, Option<u16>>(5)?;
+            validate_selection_trace(session_id, "ativa", &stimuli, &selections)?;
+            validate_selection_trace(session_id, "shadow", &shadow_stimuli, &shadow_selections)?;
+            anyhow::ensure!(
+                shadow_version.is_some() == !shadow_stimuli.is_empty(),
+                "sessão #{session_id}: versão e estímulos shadow divergem"
+            );
         }
         Ok(())
     }
@@ -498,19 +480,23 @@ impl Repository {
         if quick_check != "ok" {
             return Err(CorruptDatabase(quick_check).into());
         }
-        validate_schema_version(&connection)?;
+        if !new_database {
+            validate_schema_version(&connection)?;
+        }
         if !new_database {
             restrict_file(path)?;
         }
         connection.busy_timeout(std::time::Duration::from_secs(5))?;
         connection.pragma_update(None, "journal_mode", "WAL")?;
         connection.pragma_update(None, "foreign_keys", "ON")?;
-        migrate(&connection)?;
+        if new_database {
+            initialize_schema(&connection)?;
+        }
         Ok(Self { connection })
     }
 
     /// Preserva um banco comprovadamente corrompido e reabre com armazenamento
-    /// vazio. Erros de permissão, disco e versão futura continuam sendo
+    /// vazio. Erros de permissão, disco e schema incompatível continuam sendo
     /// devolvidos, pois substituir o arquivo nesses casos esconderia a causa.
     pub fn open_recovering(path: &Path) -> Result<OpenedRepository> {
         match Self::open(path) {
@@ -2160,23 +2146,12 @@ fn replay_session(
                     "o índice do evento não corresponde à palavra ativa"
                 );
                 match event {
-                    RecordedInputKind::Insert { grapheme, .. }
-                    | RecordedInputKind::InsertDelta { grapheme, .. } => {
+                    RecordedInputKind::InsertDelta { grapheme, .. } => {
                         engine.update(InputEvent::Key {
                             action: KeyAction::Text(grapheme.clone()),
                             at_ms,
                         });
                     }
-                    RecordedInputKind::Delete {
-                        deleted,
-                        whole_word,
-                        ..
-                    } => replay_delete(
-                        &mut engine,
-                        deleted.graphemes(true).count(),
-                        *whole_word,
-                        at_ms,
-                    ),
                     RecordedInputKind::DeleteDelta {
                         deleted_graphemes,
                         whole_word,
@@ -2193,7 +2168,7 @@ fn replay_session(
                             at_ms,
                         });
                     }
-                    RecordedInputKind::Paste { .. } | RecordedInputKind::PasteRedacted { .. } => {}
+                    RecordedInputKind::PasteRedacted { .. } => {}
                 }
             }
             RawEventKind::Terminal(end) => {
@@ -2464,17 +2439,15 @@ fn word_reset_scope(language: &str, word: &str) -> String {
     format!("palavra\0{language}\0{word}")
 }
 
-const CURRENT_SCHEMA_VERSION: i64 = 9;
+const CURRENT_SCHEMA_VERSION: i64 = 10;
 
-fn validate_schema_version(connection: &Connection) -> Result<Option<i64>> {
+fn validate_schema_version(connection: &Connection) -> Result<()> {
     let exists = connection.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_version')",
         [],
         |row| row.get::<_, bool>(0),
     )?;
-    if !exists {
-        return Ok(None);
-    }
+    anyhow::ensure!(exists, "o banco não possui o schema atual do tuipe");
     let versions = connection
         .prepare("SELECT version FROM schema_version")?
         .query_map([], |row| row.get::<_, i64>(0))?
@@ -2484,20 +2457,22 @@ fn validate_schema_version(connection: &Connection) -> Result<Option<i64>> {
         "a versão do banco deve possuir exatamente um registro"
     );
     let version = versions[0];
-    anyhow::ensure!(version >= 1, "versão inválida do banco: {version}");
     anyhow::ensure!(
-        version <= CURRENT_SCHEMA_VERSION,
-        "o banco foi criado por uma versão mais nova do tuipe ({version}); esta versão suporta até {CURRENT_SCHEMA_VERSION}"
+        version == CURRENT_SCHEMA_VERSION,
+        "schema incompatível: banco {version}, aplicativo {CURRENT_SCHEMA_VERSION}; apague o banco de desenvolvimento para recriá-lo"
     );
-    Ok(Some(version))
+    Ok(())
 }
 
-fn migrate(connection: &Connection) -> Result<()> {
+fn initialize_schema(connection: &Connection) -> Result<()> {
     let transaction = connection.unchecked_transaction()?;
+    transaction.execute_batch("CREATE TABLE schema_version (version INTEGER NOT NULL);")?;
+    transaction.execute(
+        "INSERT INTO schema_version (version) VALUES (?1)",
+        [CURRENT_SCHEMA_VERSION],
+    )?;
     transaction.execute_batch(
-        "CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL);
-         INSERT INTO schema_version (version) SELECT 1 WHERE NOT EXISTS (SELECT 1 FROM schema_version);
-         CREATE TABLE IF NOT EXISTS sessions (
+        "CREATE TABLE sessions (
            id INTEGER PRIMARY KEY, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
            terminal_state TEXT NOT NULL, config_toml TEXT NOT NULL, elapsed_ms INTEGER NOT NULL,
            wpm REAL NOT NULL, raw_wpm REAL NOT NULL, accuracy REAL NOT NULL,
@@ -2513,7 +2488,7 @@ fn migrate(connection: &Connection) -> Result<()> {
            shadow_selections_json TEXT NOT NULL DEFAULT '[]',
            shadow_policy_version INTEGER
          );
-         CREATE TABLE IF NOT EXISTS word_observations (
+         CREATE TABLE word_observations (
            id INTEGER PRIMARY KEY, session_id INTEGER NOT NULL REFERENCES sessions(id),
            language TEXT NOT NULL, word TEXT NOT NULL, confirmed_error INTEGER NOT NULL,
            corrections INTEGER NOT NULL, active_ms INTEGER NOT NULL, afk_ms INTEGER NOT NULL,
@@ -2529,20 +2504,20 @@ fn migrate(connection: &Connection) -> Result<()> {
            corrective_events INTEGER NOT NULL DEFAULT 0,
            censored INTEGER NOT NULL DEFAULT 0
          );
-         CREATE TABLE IF NOT EXISTS word_skill (language TEXT NOT NULL, word TEXT NOT NULL, state BLOB NOT NULL, PRIMARY KEY(language, word));
-         CREATE TABLE IF NOT EXISTS ngram_skill (language TEXT NOT NULL, ngram TEXT NOT NULL, state BLOB NOT NULL, PRIMARY KEY(language, ngram));
-         CREATE TABLE IF NOT EXISTS mechanic_skill (language TEXT NOT NULL, mechanic TEXT NOT NULL, state BLOB NOT NULL, PRIMARY KEY(language, mechanic));
-         CREATE TABLE IF NOT EXISTS skill_review (
+         CREATE TABLE word_skill (language TEXT NOT NULL, word TEXT NOT NULL, state BLOB NOT NULL, PRIMARY KEY(language, word));
+         CREATE TABLE ngram_skill (language TEXT NOT NULL, ngram TEXT NOT NULL, state BLOB NOT NULL, PRIMARY KEY(language, ngram));
+         CREATE TABLE mechanic_skill (language TEXT NOT NULL, mechanic TEXT NOT NULL, state BLOB NOT NULL, PRIMARY KEY(language, mechanic));
+         CREATE TABLE skill_review (
            language TEXT NOT NULL, word TEXT NOT NULL, last_seen_unix_s INTEGER NOT NULL,
            last_session_id INTEGER NOT NULL REFERENCES sessions(id),
            consecutive_clean_sessions INTEGER NOT NULL,
            PRIMARY KEY(language, word)
          );
-         CREATE TABLE IF NOT EXISTS favorite_quotes (quote_id INTEGER PRIMARY KEY);
-         CREATE TABLE IF NOT EXISTS xp_state (id INTEGER PRIMARY KEY CHECK(id = 1), state BLOB NOT NULL);
-         CREATE TABLE IF NOT EXISTS streak_state (id INTEGER PRIMARY KEY CHECK(id = 1), state BLOB NOT NULL);
-         CREATE TABLE IF NOT EXISTS adaptive_resets (scope TEXT PRIMARY KEY, session_id INTEGER NOT NULL);
-         CREATE TABLE IF NOT EXISTS adaptive_policy_state (
+         CREATE TABLE favorite_quotes (quote_id INTEGER PRIMARY KEY);
+         CREATE TABLE xp_state (id INTEGER PRIMARY KEY CHECK(id = 1), state BLOB NOT NULL);
+         CREATE TABLE streak_state (id INTEGER PRIMARY KEY CHECK(id = 1), state BLOB NOT NULL);
+         CREATE TABLE adaptive_resets (scope TEXT PRIMARY KEY, session_id INTEGER NOT NULL);
+         CREATE TABLE adaptive_policy_state (
            id INTEGER PRIMARY KEY CHECK(id = 1),
            active_version INTEGER NOT NULL,
            fallback_version INTEGER NOT NULL,
@@ -2550,197 +2525,16 @@ fn migrate(connection: &Connection) -> Result<()> {
            changed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
          );
          INSERT INTO adaptive_policy_state (id, active_version, fallback_version)
-           VALUES (1, 3, 0) ON CONFLICT(id) DO NOTHING;
-         CREATE TABLE IF NOT EXISTS raw_events (session_id INTEGER PRIMARY KEY REFERENCES sessions(id), codec_version INTEGER NOT NULL, uncompressed_size INTEGER NOT NULL, blob BLOB NOT NULL);",
+           VALUES (1, 3, 0);
+         CREATE TABLE raw_events (session_id INTEGER PRIMARY KEY REFERENCES sessions(id), codec_version INTEGER NOT NULL, uncompressed_size INTEGER NOT NULL, blob BLOB NOT NULL);",
     )?;
-    if !table_has_column(&transaction, "word_observations", "fast_success")? {
-        transaction.execute(
-            "ALTER TABLE word_observations ADD COLUMN fast_success INTEGER NOT NULL DEFAULT 0",
-            [],
-        )?;
-    }
-    if !table_has_column(&transaction, "adaptive_policy_state", "shadow_version")? {
-        transaction.execute(
-            "ALTER TABLE adaptive_policy_state ADD COLUMN shadow_version INTEGER",
-            [],
-        )?;
-    }
-    transaction.execute(
-        "UPDATE adaptive_policy_state
-         SET active_version = CASE WHEN active_version = 2 THEN 3 ELSE active_version END,
-             fallback_version = CASE WHEN fallback_version = 2 THEN 3 ELSE fallback_version END,
-             shadow_version = CASE WHEN shadow_version = 2 THEN 3 ELSE shadow_version END",
-        [],
-    )?;
-    if !table_has_column(&transaction, "word_observations", "grapheme_count")? {
-        transaction.execute(
-            "ALTER TABLE word_observations ADD COLUMN grapheme_count INTEGER NOT NULL DEFAULT 0",
-            [],
-        )?;
-    }
-    if !table_has_column(&transaction, "word_observations", "slow")? {
-        transaction.execute(
-            "ALTER TABLE word_observations ADD COLUMN slow INTEGER NOT NULL DEFAULT 0",
-            [],
-        )?;
-    }
-    if !table_has_column(&transaction, "word_observations", "latency_ratio")? {
-        transaction.execute(
-            "ALTER TABLE word_observations ADD COLUMN latency_ratio REAL",
-            [],
-        )?;
-    }
-    if !table_has_column(&transaction, "sessions", "session_kind")? {
-        transaction.execute(
-            "ALTER TABLE sessions ADD COLUMN session_kind TEXT NOT NULL DEFAULT 'practice'",
-            [],
-        )?;
-    }
-    if !table_has_column(&transaction, "word_observations", "evidence_weight")? {
-        transaction.execute(
-            "ALTER TABLE word_observations ADD COLUMN evidence_weight REAL NOT NULL DEFAULT 1",
-            [],
-        )?;
-    }
-    if !table_has_column(&transaction, "word_observations", "selection_source")? {
-        transaction.execute(
-            "ALTER TABLE word_observations ADD COLUMN selection_source TEXT",
-            [],
-        )?;
-    }
-    if !table_has_column(&transaction, "word_observations", "selection_propensity")? {
-        transaction.execute(
-            "ALTER TABLE word_observations ADD COLUMN selection_propensity REAL",
-            [],
-        )?;
-    }
-    if !table_has_column(&transaction, "word_observations", "mechanics_json")? {
-        transaction.execute(
-            "ALTER TABLE word_observations ADD COLUMN mechanics_json TEXT NOT NULL DEFAULT '[]'",
-            [],
-        )?;
-    }
-    let selections_json_was_missing =
-        !table_has_column(&transaction, "sessions", "selections_json")?;
-    for (column, definition) in [
-        ("seed_hex", "TEXT NOT NULL DEFAULT '0000000000000000'"),
-        ("stimuli_json", "TEXT NOT NULL DEFAULT '[]'"),
-        ("selections_json", "TEXT NOT NULL DEFAULT '[]'"),
-        ("policy_version", "INTEGER NOT NULL DEFAULT 0"),
-        ("shadow_stimuli_json", "TEXT NOT NULL DEFAULT '[]'"),
-        ("shadow_selections_json", "TEXT NOT NULL DEFAULT '[]'"),
-        ("shadow_policy_version", "INTEGER"),
-    ] {
-        if !table_has_column(&transaction, "sessions", column)? {
-            transaction.execute(
-                &format!("ALTER TABLE sessions ADD COLUMN {column} {definition}"),
-                [],
-            )?;
-        }
-    }
-    if selections_json_was_missing {
-        backfill_session_selections(&transaction)?;
-    }
-    for (column, definition) in [
-        ("planning_ms", "INTEGER NOT NULL DEFAULT 0"),
-        ("fluent_ms", "INTEGER NOT NULL DEFAULT 0"),
-        ("correction_ms", "INTEGER NOT NULL DEFAULT 0"),
-        ("input_events", "INTEGER NOT NULL DEFAULT 0"),
-        ("corrective_events", "INTEGER NOT NULL DEFAULT 0"),
-        ("censored", "INTEGER NOT NULL DEFAULT 0"),
-    ] {
-        if !table_has_column(&transaction, "word_observations", column)? {
-            transaction.execute(
-                &format!("ALTER TABLE word_observations ADD COLUMN {column} {definition}"),
-                [],
-            )?;
-        }
-    }
     transaction.execute_batch(
-        "CREATE INDEX IF NOT EXISTS idx_word_observations_session ON word_observations(session_id);
-         CREATE INDEX IF NOT EXISTS idx_word_observations_baseline ON word_observations(language, active_ms, grapheme_count);
-         CREATE INDEX IF NOT EXISTS idx_sessions_history ON sessions(terminal_state, session_kind, id DESC);
-         CREATE INDEX IF NOT EXISTS idx_sessions_comparable ON sessions(config_toml, terminal_state, session_kind, id DESC);",
-    )?;
-    transaction.execute(
-        "UPDATE schema_version SET version = ?1",
-        [CURRENT_SCHEMA_VERSION],
+        "CREATE INDEX idx_word_observations_session ON word_observations(session_id);
+         CREATE INDEX idx_word_observations_baseline ON word_observations(language, active_ms, grapheme_count);
+         CREATE INDEX idx_sessions_history ON sessions(terminal_state, session_kind, id DESC);
+         CREATE INDEX idx_sessions_comparable ON sessions(config_toml, terminal_state, session_kind, id DESC);",
     )?;
     transaction.commit()?;
-    Ok(())
-}
-
-fn backfill_session_selections(connection: &Connection) -> Result<()> {
-    let sessions = connection
-        .prepare("SELECT id, stimuli_json FROM sessions ORDER BY id")?
-        .query_map([], |row| {
-            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    for (session_id, stimuli_json) in sessions {
-        let stimuli = serde_json::from_str::<Vec<String>>(&stimuli_json)?;
-        // Sessões anteriores à proveniência não registravam o estímulo. Elas
-        // continuam auditáveis e são ignoradas pelo rebuild, mas não há como
-        // inventar retroativamente a posição de cada seleção.
-        if stimuli.is_empty() {
-            connection.execute(
-                "UPDATE sessions SET selections_json = '[]' WHERE id = ?1",
-                [session_id],
-            )?;
-            continue;
-        }
-        let mut observations = connection
-            .prepare(
-                "SELECT word, selection_source, selection_propensity
-                 FROM word_observations
-                 WHERE session_id = ?1
-                 ORDER BY id",
-            )?
-            .query_map([session_id], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, Option<String>>(1)?,
-                    row.get::<_, Option<f64>>(2)?,
-                ))
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?
-            .into_iter()
-            .peekable();
-        let mut selections = vec![None; stimuli.len()];
-        for (index, stimulus) in stimuli.iter().enumerate() {
-            let Some(expected) = lexical_stimulus(stimulus) else {
-                continue;
-            };
-            let Some((observed, _, _)) = observations.peek() else {
-                break;
-            };
-            if observed != &expected {
-                anyhow::bail!(
-                    "observação {observed:?} não corresponde ao estímulo {expected:?} na sessão #{session_id}"
-                );
-            }
-            let (word, source, propensity) = observations
-                .next()
-                .expect("a observação acabou de ser verificada");
-            selections[index] = match (source, propensity) {
-                (Some(source), Some(propensity)) => Some(WordSelection {
-                    word,
-                    source: selection_source_from_db(&source)?,
-                    propensity,
-                }),
-                _ => None,
-            };
-        }
-        if let Some((word, _, _)) = observations.next() {
-            anyhow::bail!(
-                "observação {word:?} não possui estímulo correspondente na sessão #{session_id}"
-            );
-        }
-        connection.execute(
-            "UPDATE sessions SET selections_json = ?2 WHERE id = ?1",
-            params![session_id, serde_json::to_string(&selections)?],
-        )?;
-    }
     Ok(())
 }
 
@@ -2781,16 +2575,6 @@ fn validate_selection_trace(
         );
     }
     Ok(())
-}
-
-fn selection_source_from_db(value: &str) -> Result<SelectionSource> {
-    match value {
-        "representative" => Ok(SelectionSource::Representative),
-        "targeted" => Ok(SelectionSource::Targeted),
-        "exploration" => Ok(SelectionSource::Exploration),
-        "transfer" => Ok(SelectionSource::Transfer),
-        _ => anyhow::bail!("fonte de seleção desconhecida: {value}"),
-    }
 }
 
 fn is_database_corruption(error: &anyhow::Error) -> bool {
@@ -2873,15 +2657,6 @@ fn session_kind_from_db(value: &str) -> SessionKind {
     }
 }
 
-fn table_has_column(connection: &Connection, table: &str, column: &str) -> Result<bool> {
-    let mut statement = connection.prepare(&format!("PRAGMA table_info({table})"))?;
-    Ok(statement
-        .query_map([], |row| row.get::<_, String>(1))?
-        .collect::<rusqlite::Result<Vec<_>>>()?
-        .iter()
-        .any(|name| name == column))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2932,7 +2707,7 @@ mod tests {
     }
 
     #[test]
-    fn migrations_create_a_session_repository() {
+    fn inicializacao_cria_o_repositorio_atual() {
         let temporary = tempfile::tempdir().unwrap();
         let repository = Repository::open(&temporary.path().join("history.db")).unwrap();
         let id = repository
@@ -3078,209 +2853,6 @@ mod tests {
     }
 
     #[test]
-    fn migracao_v7_preserva_sessao_e_adiciona_proveniencia_de_selecao() {
-        let temporary = tempfile::tempdir().unwrap();
-        let path = temporary.path().join("history.db");
-        let connection = Connection::open(&path).unwrap();
-        connection
-            .execute_batch(
-                "CREATE TABLE schema_version (version INTEGER NOT NULL);
-                 INSERT INTO schema_version VALUES (7);
-                 CREATE TABLE sessions (
-                   id INTEGER PRIMARY KEY, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                   terminal_state TEXT NOT NULL, config_toml TEXT NOT NULL,
-                   elapsed_ms INTEGER NOT NULL, wpm REAL NOT NULL, raw_wpm REAL NOT NULL,
-                   accuracy REAL NOT NULL, correct_chars INTEGER NOT NULL,
-                   incorrect_chars INTEGER NOT NULL, extra_chars INTEGER NOT NULL,
-                   missed_chars INTEGER NOT NULL, metrics_version INTEGER NOT NULL,
-                   adaptive_version INTEGER NOT NULL, codec_version INTEGER NOT NULL,
-                   session_kind TEXT NOT NULL DEFAULT 'practice',
-                   seed_hex TEXT NOT NULL DEFAULT '0000000000000000',
-                   stimuli_json TEXT NOT NULL DEFAULT '[]', policy_version INTEGER NOT NULL DEFAULT 0
-                 );
-                 CREATE TABLE word_observations (
-                   id INTEGER PRIMARY KEY, session_id INTEGER NOT NULL REFERENCES sessions(id),
-                   language TEXT NOT NULL, word TEXT NOT NULL, confirmed_error INTEGER NOT NULL,
-                   corrections INTEGER NOT NULL, active_ms INTEGER NOT NULL, afk_ms INTEGER NOT NULL,
-                   fast_success INTEGER NOT NULL DEFAULT 0, grapheme_count INTEGER NOT NULL DEFAULT 0,
-                   slow INTEGER NOT NULL DEFAULT 0, latency_ratio REAL,
-                   evidence_weight REAL NOT NULL DEFAULT 1,
-                   selection_source TEXT, selection_propensity REAL,
-                   mechanics_json TEXT NOT NULL DEFAULT '[]'
-                 );
-                 INSERT INTO sessions (
-                   terminal_state, config_toml, elapsed_ms, wpm, raw_wpm, accuracy,
-                   correct_chars, incorrect_chars, extra_chars, missed_chars,
-                   metrics_version, adaptive_version, codec_version, stimuli_json
-                 ) VALUES ('completed', '', 1, 1, 1, 100, 1, 0, 0, 0, 1, 1, 1, '[\"123\",\"casa\"]');
-                 INSERT INTO word_observations (
-                   session_id, language, word, confirmed_error, corrections,
-                   active_ms, afk_ms, grapheme_count, selection_source, selection_propensity
-                 ) VALUES (1, 'portuguese', 'casa', 0, 0, 400, 0, 4, 'targeted', 0.125);",
-            )
-            .unwrap();
-        drop(connection);
-
-        let repository = Repository::open(&path).unwrap();
-
-        assert_eq!(
-            repository
-                .connection
-                .query_row("SELECT version FROM schema_version", [], |row| row
-                    .get::<_, i64>(0))
-                .unwrap(),
-            CURRENT_SCHEMA_VERSION
-        );
-        let selections = repository
-            .connection
-            .query_row("SELECT selections_json FROM sessions", [], |row| {
-                row.get::<_, String>(0)
-            })
-            .unwrap();
-        assert_eq!(
-            serde_json::from_str::<Vec<Option<WordSelection>>>(&selections).unwrap(),
-            vec![
-                None,
-                Some(WordSelection {
-                    word: "casa".into(),
-                    source: SelectionSource::Targeted,
-                    propensity: 0.125,
-                })
-            ]
-        );
-    }
-
-    #[test]
-    fn migracao_v7_preserva_a_selecao_ao_reconstruir() {
-        let temporary = tempfile::tempdir().unwrap();
-        let path = temporary.path().join("history.db");
-        let repository = Repository::open(&path).unwrap();
-        let config = TestConfig {
-            mode: TestMode::Words { count: 1 },
-            ..TestConfig::default()
-        };
-        let selection = WordSelection {
-            word: "casa".into(),
-            source: SelectionSource::Targeted,
-            propensity: 0.125,
-        };
-        let mut engine = TestEngine::new(config.clone(), ["casa".into()]);
-        engine.update(InputEvent::Key {
-            action: KeyAction::Text("casa".into()),
-            at_ms: 400,
-        });
-        let observations = derive_word_observations(
-            &engine,
-            &PersonalBaselineProfile::default(),
-            false,
-            false,
-            &[Some(selection)],
-        );
-        let raw =
-            RawEventCodec::materialize(engine.recorded_events(), 400, RawSessionEnd::Completed);
-        let id = repository
-            .save_session_with_provenance(
-                &config,
-                engine.status(),
-                engine.metrics(),
-                &observations,
-                &raw,
-                &SessionProvenance {
-                    stimuli: vec!["casa".into()],
-                    ..SessionProvenance::default()
-                },
-            )
-            .unwrap();
-        drop(repository);
-        let connection = Connection::open(&path).unwrap();
-        connection
-            .execute_batch(
-                "DROP INDEX IF EXISTS idx_sessions_comparable;
-                 ALTER TABLE sessions DROP COLUMN selections_json;
-                 UPDATE schema_version SET version = 7;",
-            )
-            .unwrap();
-        drop(connection);
-
-        let repository = Repository::open(&path).unwrap();
-        repository.rebuild_derived_data().unwrap();
-        let restored = repository
-            .connection
-            .query_row(
-                "SELECT selection_source, selection_propensity
-                 FROM word_observations WHERE session_id = ?1",
-                [id],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?)),
-            )
-            .unwrap();
-        assert_eq!(restored, ("targeted".into(), 0.125));
-    }
-
-    #[test]
-    fn migracao_preserva_sessao_legada_sem_estimulos() {
-        let temporary = tempfile::tempdir().unwrap();
-        let path = temporary.path().join("history.db");
-        let connection = Connection::open(&path).unwrap();
-        connection
-            .execute_batch(
-                "CREATE TABLE schema_version (version INTEGER NOT NULL);
-                 INSERT INTO schema_version VALUES (1);
-                 CREATE TABLE sessions (
-                   id INTEGER PRIMARY KEY, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                   terminal_state TEXT NOT NULL, config_toml TEXT NOT NULL,
-                   elapsed_ms INTEGER NOT NULL, wpm REAL NOT NULL, raw_wpm REAL NOT NULL,
-                   accuracy REAL NOT NULL, correct_chars INTEGER NOT NULL,
-                   incorrect_chars INTEGER NOT NULL, extra_chars INTEGER NOT NULL,
-                   missed_chars INTEGER NOT NULL, metrics_version INTEGER NOT NULL,
-                   adaptive_version INTEGER NOT NULL, codec_version INTEGER NOT NULL
-                 );
-                 CREATE TABLE word_observations (
-                   id INTEGER PRIMARY KEY, session_id INTEGER NOT NULL REFERENCES sessions(id),
-                   language TEXT NOT NULL, word TEXT NOT NULL, confirmed_error INTEGER NOT NULL,
-                   corrections INTEGER NOT NULL, active_ms INTEGER NOT NULL, afk_ms INTEGER NOT NULL
-                 );
-                 INSERT INTO sessions (
-                   terminal_state, config_toml, elapsed_ms, wpm, raw_wpm, accuracy,
-                   correct_chars, incorrect_chars, extra_chars, missed_chars,
-                   metrics_version, adaptive_version, codec_version
-                 ) VALUES ('completed', '', 1000, 60, 60, 100, 5, 0, 0, 0, 1, 1, 1);
-                 INSERT INTO word_observations (
-                   session_id, language, word, confirmed_error, corrections, active_ms, afk_ms
-                 ) VALUES (1, 'portuguese', 'casa', 0, 0, 400, 0);",
-            )
-            .unwrap();
-        drop(connection);
-
-        let repository = Repository::open(&path).unwrap();
-        let (version, stimuli, selections) = repository
-            .connection
-            .query_row(
-                "SELECT (SELECT version FROM schema_version), stimuli_json, selections_json
-                 FROM sessions WHERE id = 1",
-                [],
-                |row| {
-                    Ok((
-                        row.get::<_, i64>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                    ))
-                },
-            )
-            .unwrap();
-        assert_eq!(version, CURRENT_SCHEMA_VERSION);
-        assert_eq!(stimuli, "[]");
-        assert_eq!(selections, "[]");
-        assert_eq!(
-            repository
-                .connection
-                .query_row("SELECT COUNT(*) FROM sessions", [], |row| row
-                    .get::<_, u64>(0))
-                .unwrap(),
-            1
-        );
-    }
-
-    #[test]
     fn favorito_de_citacao_alterna_sem_duplicar() {
         let temporary = tempfile::tempdir().unwrap();
         let repository = Repository::open(&temporary.path().join("history.db")).unwrap();
@@ -3293,7 +2865,7 @@ mod tests {
     }
 
     #[test]
-    fn banco_de_versao_futura_e_rejeitado_sem_downgrade() {
+    fn schema_diferente_e_rejeitado_sem_alterar_o_arquivo() {
         let temporary = tempfile::tempdir().unwrap();
         let path = temporary.path().join("future.db");
         let connection = Connection::open(&path).unwrap();
@@ -3307,7 +2879,7 @@ mod tests {
 
         let error = Repository::open(&path).err().unwrap().to_string();
 
-        assert!(error.contains("versão mais nova"));
+        assert!(error.contains("schema incompatível"));
         let connection = Connection::open(&path).unwrap();
         assert_eq!(
             connection
@@ -3346,33 +2918,6 @@ mod tests {
                 .statistics_overview()
                 .unwrap()
                 .completed_tests,
-            0
-        );
-    }
-
-    #[test]
-    fn versao_futura_nao_e_confundida_com_corrupcao() {
-        let temporary = tempfile::tempdir().unwrap();
-        let path = temporary.path().join("history.db");
-        let connection = Connection::open(&path).unwrap();
-        connection
-            .execute_batch(
-                "CREATE TABLE schema_version (version INTEGER NOT NULL);
-                 INSERT INTO schema_version VALUES (999);",
-            )
-            .unwrap();
-        drop(connection);
-
-        let error = Repository::open_recovering(&path).err().unwrap();
-
-        assert!(error.to_string().contains("versão mais nova"));
-        assert!(path.exists());
-        assert_eq!(
-            fs::read_dir(temporary.path())
-                .unwrap()
-                .filter_map(Result::ok)
-                .filter(|entry| entry.file_name().to_string_lossy().contains("corrompido"))
-                .count(),
             0
         );
     }
@@ -3460,36 +3005,6 @@ mod tests {
     }
 
     #[test]
-    fn doctor_novo_valida_banco_schema_oito_sem_migra_lo() {
-        let temporary = tempfile::tempdir().unwrap();
-        let path = temporary.path().join("schema-8.db");
-        let repository = Repository::open(&path).unwrap();
-        drop(repository);
-        let connection = Connection::open(&path).unwrap();
-        connection
-            .execute_batch(
-                "ALTER TABLE sessions DROP COLUMN shadow_stimuli_json;
-                 ALTER TABLE sessions DROP COLUMN shadow_selections_json;
-                 ALTER TABLE sessions DROP COLUMN shadow_policy_version;
-                 ALTER TABLE adaptive_policy_state DROP COLUMN shadow_version;
-                 UPDATE schema_version SET version = 8;",
-            )
-            .unwrap();
-        drop(connection);
-
-        Repository::doctor(&path).unwrap();
-        let connection = Connection::open(&path).unwrap();
-        assert_eq!(
-            connection
-                .query_row("SELECT version FROM schema_version", [], |row| row
-                    .get::<_, i64>(0))
-                .unwrap(),
-            8
-        );
-        assert!(!table_has_column(&connection, "sessions", "shadow_stimuli_json").unwrap());
-    }
-
-    #[test]
     fn doctor_rejeita_selecao_shadow_que_nao_corresponde_ao_estimulo() {
         let temporary = tempfile::tempdir().unwrap();
         let path = temporary.path().join("shadow-invalido.db");
@@ -3521,28 +3036,6 @@ mod tests {
                 .to_string()
                 .contains("não corresponde ao texto")
         );
-    }
-
-    #[test]
-    fn banco_real_legado_com_habilidade_de_25_bytes_abre_e_passa_no_doctor() {
-        let temporary = tempfile::tempdir().unwrap();
-        let path = temporary.path().join("habilidade-legada.db");
-        let repository = Repository::open(&path).unwrap();
-        let state = postcard::to_allocvec(&(0.0_f64, 0.0_f64, 1.0_f64, 1_u32)).unwrap();
-        assert_eq!(state.len(), 25);
-        repository
-            .connection
-            .execute(
-                "INSERT INTO word_skill (language, word, state) VALUES ('portuguese', 'a', ?1)",
-                [state],
-            )
-            .unwrap();
-
-        let skills = repository.load_all_word_skills().unwrap();
-        assert_eq!(skills.len(), 1);
-        assert_eq!(skills[0].2.fast_successes, 1.0);
-        drop(repository);
-        Repository::doctor(&path).unwrap();
     }
 
     #[test]
@@ -3735,7 +3228,7 @@ mod tests {
     }
 
     #[test]
-    fn rebuild_usa_o_historico_legado_no_baseline_cronologico() {
+    fn rebuild_usa_o_historico_anterior_no_baseline_cronologico() {
         let temporary = tempfile::tempdir().unwrap();
         let repository = Repository::open(&temporary.path().join("history.db")).unwrap();
         for index in 0..8 {
@@ -3744,7 +3237,7 @@ mod tests {
                     &TestConfig::default(),
                     &TestStatus::Completed { ended_at_ms: index },
                     Metrics::default(),
-                    &[word_observation(&format!("legada{index}"), false)],
+                    &[word_observation(&format!("anterior{index}"), false)],
                 )
                 .unwrap();
         }

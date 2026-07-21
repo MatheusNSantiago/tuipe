@@ -65,8 +65,6 @@ pub struct WordAttempt {
     /// Tempo bruto entre teclas da palavra. A projeção persistente separa
     /// execução e interrupções pela distribuição da sessão.
     pub active_ms: u64,
-    /// Mantido para compatibilidade; a classificação robusta ocorre fora do motor.
-    pub afk_ms: u64,
 }
 
 impl WordAttempt {

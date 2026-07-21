@@ -167,27 +167,18 @@ impl Default for PersonalBaseline {
     }
 }
 
-/// Os primeiros campos preservam a leitura do estado v1. O modelo v2 nunca
-/// interpreta essas contagens históricas como se fossem uma posterior precisa.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct WordSkill {
     pub confirmed_errors: f64,
     pub corrections: f64,
     pub fast_successes: f64,
-    #[serde(default)]
     pub slowdowns: f64,
     pub observations: u32,
-    #[serde(default)]
     pub model_version: u16,
-    #[serde(default)]
     pub effective_exposures: f64,
-    #[serde(default)]
     pub uncorrected_error_mass: f64,
-    #[serde(default)]
     pub corrected_error_mass: f64,
-    #[serde(default)]
     pub latency_log_residual_sum: f64,
-    #[serde(default)]
     pub latency_weight: f64,
 }
 
@@ -271,48 +262,9 @@ impl NgramSkill {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
-struct LegacyWordSkillV2 {
-    confirmed_errors: f64,
-    corrections: f64,
-    fast_successes: f64,
-    slowdowns: f64,
-    observations: u32,
-}
-
-/// Estado gravado antes de o modelo registrar lentidão separadamente. Postcard
-/// é posicional, então `serde(default)` não recupera um campo ausente no meio
-/// da sequência; essa representação precisa permanecer explícita.
-#[derive(Debug, Clone, Deserialize)]
-struct LegacyWordSkillV1 {
-    confirmed_errors: f64,
-    corrections: f64,
-    fast_successes: f64,
-    observations: u32,
-}
-
 impl WordSkill {
     pub fn decode(encoded: &[u8]) -> Result<Self, postcard::Error> {
-        postcard::from_bytes(encoded).or_else(|_| {
-            postcard::from_bytes::<LegacyWordSkillV2>(encoded)
-                .map(|legacy| Self {
-                    confirmed_errors: legacy.confirmed_errors,
-                    corrections: legacy.corrections,
-                    fast_successes: legacy.fast_successes,
-                    slowdowns: legacy.slowdowns,
-                    observations: legacy.observations,
-                    ..Self::default()
-                })
-                .or_else(|_| {
-                    postcard::from_bytes::<LegacyWordSkillV1>(encoded).map(|legacy| Self {
-                        confirmed_errors: legacy.confirmed_errors,
-                        corrections: legacy.corrections,
-                        fast_successes: legacy.fast_successes,
-                        observations: legacy.observations,
-                        ..Self::default()
-                    })
-                })
-        })
+        postcard::from_bytes(encoded)
     }
 
     pub fn observe(&mut self, observation: Observation) {
@@ -1290,23 +1242,6 @@ mod tests {
 
     use super::*;
 
-    #[derive(Serialize)]
-    struct EncodedLegacyWordSkill {
-        confirmed_errors: f64,
-        corrections: f64,
-        fast_successes: f64,
-        slowdowns: f64,
-        observations: u32,
-    }
-
-    #[derive(Serialize)]
-    struct EncodedLegacyWordSkillV1 {
-        confirmed_errors: f64,
-        corrections: f64,
-        fast_successes: f64,
-        observations: u32,
-    }
-
     fn observe(skill: &mut WordSkill, errors: usize, corrections: usize, successes: usize) {
         for index in 0..(errors + corrections + successes) {
             skill.observe(Observation {
@@ -1328,37 +1263,11 @@ mod tests {
     }
 
     #[test]
-    fn estado_v1_continua_legivel_sem_fingir_evidencia_v2() {
-        let encoded = postcard::to_allocvec(&EncodedLegacyWordSkill {
-            confirmed_errors: 2.0,
-            corrections: 3.0,
-            fast_successes: 4.0,
-            slowdowns: 1.0,
-            observations: 10,
-        })
-        .unwrap();
-        let decoded = WordSkill::decode(&encoded).unwrap();
-        assert_eq!(decoded.confirmed_errors, 2.0);
-        assert_eq!(decoded.model_version, 0);
-        assert_eq!(decoded.effective_exposures, 0.0);
-    }
+    fn estado_serializado_fora_do_modelo_atual_e_rejeitado() {
+        let formato_incompleto =
+            postcard::to_allocvec(&(0.0_f64, 0.0_f64, 1.0_f64, 1_u32)).unwrap();
 
-    #[test]
-    fn estado_anterior_a_lentidao_separada_continua_legivel() {
-        let encoded = postcard::to_allocvec(&EncodedLegacyWordSkillV1 {
-            confirmed_errors: 0.0,
-            corrections: 0.0,
-            fast_successes: 1.0,
-            observations: 1,
-        })
-        .unwrap();
-        assert_eq!(encoded.len(), 25, "reproduz o blob encontrado em produção");
-
-        let decoded = WordSkill::decode(&encoded).unwrap();
-        assert_eq!(decoded.fast_successes, 1.0);
-        assert_eq!(decoded.observations, 1);
-        assert_eq!(decoded.slowdowns, 0.0);
-        assert_eq!(decoded.model_version, 0);
+        assert!(WordSkill::decode(&formato_incompleto).is_err());
     }
 
     #[test]

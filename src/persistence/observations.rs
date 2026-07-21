@@ -118,12 +118,7 @@ pub fn derive_word_observations(
                         event.word_index == word_index
                             && matches!(
                                 &event.kind,
-                                RecordedInputKind::Insert {
-                                    expected: Some(expected),
-                                    correct: false,
-                                    ..
-                                }
-                                | RecordedInputKind::InsertDelta {
+                                RecordedInputKind::InsertDelta {
                                     expected: Some(expected),
                                     correct: false,
                                     ..
@@ -187,14 +182,8 @@ fn word_timings(engine: &TestEngine) -> Vec<WordTiming> {
                     interrupted = true;
                 }
             }
-            RecordedInputKind::Insert { .. }
-            | RecordedInputKind::Delete { .. }
-            | RecordedInputKind::InsertDelta { .. }
-            | RecordedInputKind::DeleteDelta { .. } => {
-                let current_delete = matches!(
-                    event.kind,
-                    RecordedInputKind::Delete { .. } | RecordedInputKind::DeleteDelta { .. }
-                );
+            RecordedInputKind::InsertDelta { .. } | RecordedInputKind::DeleteDelta { .. } => {
+                let current_delete = matches!(event.kind, RecordedInputKind::DeleteDelta { .. });
                 let Some(counts) = event_counts.get_mut(event.word_index) else {
                     continue;
                 };
@@ -212,7 +201,7 @@ fn word_timings(engine: &TestEngine) -> Vec<WordTiming> {
                 previous_key = Some((event.at_ms, event.word_index, current_delete));
                 interrupted = false;
             }
-            RecordedInputKind::Paste { .. } | RecordedInputKind::PasteRedacted { .. } => {}
+            RecordedInputKind::PasteRedacted { .. } => {}
         }
     }
 
