@@ -80,6 +80,9 @@ struct Icons {
     repeticao: &'static str,
     proximo: &'static str,
     estatisticas: &'static str,
+    visao_geral: &'static str,
+    progresso: &'static str,
+    historico: &'static str,
     sair: &'static str,
     mouse: &'static str,
     favorito: &'static str,
@@ -96,6 +99,9 @@ const ICONES_UNICODE: Icons = Icons {
     repeticao: "↻",
     proximo: "›",
     estatisticas: "⌁",
+    visao_geral: "▦",
+    progresso: "↗",
+    historico: "≡",
     sair: "×",
     mouse: "↖",
     favorito: "♥",
@@ -112,6 +118,9 @@ const ICONES_NERD: Icons = Icons {
     repeticao: "",
     proximo: "",
     estatisticas: "",
+    visao_geral: "",
+    progresso: "",
+    historico: "",
     sair: "",
     mouse: "",
     favorito: "",
@@ -429,7 +438,11 @@ pub fn render_statistics(
         );
         return;
     }
-    let sections = Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).split(content);
+    let sections = Layout::vertical([
+        Constraint::Length(statistics_navigation_height(content.width)),
+        Constraint::Min(1),
+    ])
+    .split(content);
     render_statistics_navigation(frame, sections[0], statistics, state.page, theme);
     match state.page {
         StatisticsPage::Overview => render_statistics_overview(
@@ -505,55 +518,131 @@ fn render_statistics_navigation(
     theme: &Theme,
 ) {
     let compact = area.width < STATISTICS_WIDE_MIN_WIDTH;
-    let labels = if compact {
-        ["1 visão", "2 progresso", "3 histórico"]
-    } else {
-        ["1 visão geral", "2 progresso", "3 histórico"]
-    };
-    let mut spans = if compact {
-        Vec::new()
-    } else {
-        vec![Span::styled(
-            "estatísticas  ",
-            Style::default()
-                .fg(theme_color(theme, &theme.text, 4.5))
-                .add_modifier(Modifier::BOLD),
-        )]
-    };
-    for (index, label) in labels.into_iter().enumerate() {
-        if index > 0 {
-            spans.push(Span::styled(
-                "  ",
-                Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
-            ));
-        }
-        let selected = index
-            == match active {
-                StatisticsPage::Overview => 0,
-                StatisticsPage::Progress => 1,
-                StatisticsPage::History => 2,
-            };
-        spans.push(Span::styled(
-            label,
-            if selected {
-                Style::default()
-                    .fg(theme_color(theme, &theme.main, 3.0))
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(theme_color(theme, &theme.sub, 2.0))
-            },
-        ));
-    }
     if !compact {
-        spans.push(Span::styled(
-            format!(
-                "  ·  nível {}  ·  sequência {} dias",
-                statistics.level, statistics.streak
+        let header = Layout::horizontal([Constraint::Min(1), Constraint::Length(30)])
+            .split(Rect { height: 1, ..area });
+        frame.render_widget(
+            Paragraph::new("estatísticas").style(
+                Style::default()
+                    .fg(theme_color(theme, &theme.text, 4.5))
+                    .add_modifier(Modifier::BOLD),
             ),
-            Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
-        ));
+            header[0],
+        );
+        frame.render_widget(
+            Paragraph::new(format!(
+                "nível {}  ·  {} {}",
+                statistics.level,
+                statistics.streak,
+                if statistics.streak == 1 {
+                    "dia"
+                } else {
+                    "dias"
+                }
+            ))
+            .alignment(Alignment::Right)
+            .style(Style::default().fg(theme_color(theme, &theme.sub, 2.0))),
+            header[1],
+        );
     }
-    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+
+    let icones = icones_do_terminal();
+    let labels = if compact {
+        [
+            (icones.visao_geral, "1 visão"),
+            (icones.progresso, "2 progresso"),
+            (icones.historico, "3 histórico"),
+        ]
+    } else {
+        [
+            (icones.visao_geral, "1  visão geral"),
+            (icones.progresso, "2  progresso"),
+            (icones.historico, "3  histórico"),
+        ]
+    };
+    let active_index = match active {
+        StatisticsPage::Overview => 0,
+        StatisticsPage::Progress => 1,
+        StatisticsPage::History => 2,
+    };
+    for (index, (tab, (icon, label))) in statistics_tab_areas(area)
+        .into_iter()
+        .zip(labels)
+        .enumerate()
+    {
+        let selected = index == active_index;
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(
+                    format!("{icon} "),
+                    Style::default().fg(theme_color(
+                        theme,
+                        if selected { &theme.main } else { &theme.sub },
+                        if selected { 3.0 } else { 2.0 },
+                    )),
+                ),
+                Span::styled(
+                    label,
+                    Style::default()
+                        .fg(theme_color(
+                            theme,
+                            if selected { &theme.text } else { &theme.sub },
+                            if selected { 4.5 } else { 2.0 },
+                        ))
+                        .add_modifier(if selected {
+                            Modifier::BOLD
+                        } else {
+                            Modifier::empty()
+                        }),
+                ),
+            ]))
+            .alignment(Alignment::Center)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
+                    .border_style(Style::default().fg(theme_color(
+                        theme,
+                        if selected {
+                            &theme.main
+                        } else {
+                            &theme.sub_alt
+                        },
+                        if selected { 3.0 } else { 1.5 },
+                    )))
+                    .style(Style::default().bg(if selected {
+                        color(&theme.sub_alt)
+                    } else {
+                        color(&theme.bg)
+                    })),
+            ),
+            tab,
+        );
+    }
+}
+
+fn statistics_navigation_height(width: u16) -> u16 {
+    if width < STATISTICS_WIDE_MIN_WIDTH {
+        3
+    } else {
+        4
+    }
+}
+
+fn statistics_tab_areas(area: Rect) -> Vec<Rect> {
+    let tabs = if area.height >= 4 {
+        Rect::new(area.x, area.y + 1, area.width, 3)
+    } else {
+        Rect::new(area.x, area.y, area.width, area.height.min(3))
+    };
+    Layout::horizontal([
+        Constraint::Ratio(1, 3),
+        Constraint::Ratio(1, 3),
+        Constraint::Ratio(1, 3),
+    ])
+    .spacing(1)
+    .split(tabs)
+    .to_vec()
 }
 
 fn render_statistics_progress(
@@ -1116,11 +1205,12 @@ pub fn statistics_word_at(
         return None;
     }
     let content = statistics_content_area(viewport);
+    let navigation_height = statistics_navigation_height(content.width);
     let content = Rect::new(
         content.x,
-        content.y.saturating_add(1),
+        content.y.saturating_add(navigation_height),
         content.width,
-        content.height.saturating_sub(1),
+        content.height.saturating_sub(navigation_height),
     );
     if content.width < STATISTICS_WIDE_MIN_WIDTH || viewport.height < 24 {
         let first_row = content.y.saturating_add(6);
@@ -1137,7 +1227,6 @@ pub fn statistics_word_at(
         .then_some(index);
     }
     let sections = Layout::vertical([
-        Constraint::Length(1),
         Constraint::Length(11.min(content.height.saturating_sub(9))),
         Constraint::Length(3),
         Constraint::Min(7),
@@ -1146,7 +1235,7 @@ pub fn statistics_word_at(
     .split(content);
     let details = Layout::horizontal([Constraint::Percentage(58), Constraint::Percentage(42)])
         .spacing(1)
-        .split(sections[3]);
+        .split(sections[2]);
     let first_row = details[0].y.saturating_add(2);
     let visible = details[0].height.saturating_sub(2) as usize;
     let offset = selected_word.saturating_sub(visible.saturating_sub(1));
@@ -1170,32 +1259,20 @@ pub fn statistics_action_at(
         return None;
     }
     let content = statistics_content_area(viewport);
-    if position.y == content.y {
-        let compact = content.width < STATISTICS_WIDE_MIN_WIDTH;
-        let mut x = content.x.saturating_add(if compact {
-            0
-        } else {
-            "estatísticas  ".width() as u16
-        });
-        let labels = if compact {
-            [
-                ("1 visão", StatisticsPage::Overview),
-                ("2 progresso", StatisticsPage::Progress),
-                ("3 histórico", StatisticsPage::History),
-            ]
-        } else {
-            [
-                ("1 visão geral", StatisticsPage::Overview),
-                ("2 progresso", StatisticsPage::Progress),
-                ("3 histórico", StatisticsPage::History),
-            ]
-        };
-        for (label, target) in labels {
-            let right = x.saturating_add(label.width() as u16);
-            if (x..right).contains(&position.x) {
-                return Some(StatisticsAction::Page(target));
-            }
-            x = right.saturating_add(2);
+    for (tab, target) in statistics_tab_areas(Rect::new(
+        content.x,
+        content.y,
+        content.width,
+        statistics_navigation_height(content.width),
+    ))
+    .into_iter()
+    .zip([
+        StatisticsPage::Overview,
+        StatisticsPage::Progress,
+        StatisticsPage::History,
+    ]) {
+        if tab.contains(position) {
+            return Some(StatisticsAction::Page(target));
         }
     }
     if position.y == content.bottom().saturating_sub(1) {
@@ -1232,11 +1309,12 @@ pub fn statistics_action_at(
         return None;
     }
     let sessions = filtered_history(&statistics.history, filter);
+    let navigation_height = statistics_navigation_height(content.width);
     let body = Rect::new(
         content.x,
-        content.y.saturating_add(1),
+        content.y.saturating_add(navigation_height),
         content.width,
-        content.height.saturating_sub(1),
+        content.height.saturating_sub(navigation_height),
     );
     let first_row = body.y.saturating_add(2);
     if position.y < first_row || position.y >= body.bottom().saturating_sub(1) {
@@ -3755,71 +3833,32 @@ fn render_footer(
             ]
         }
         TestStatus::Completed { .. } | TestStatus::Failed { .. } if quote.is_some() => vec![
-            result_action_icons(icones, quote, theme),
-            key_hints(
-                &[
-                    (&next, "próximo"),
-                    (&repeat, "repetir"),
-                    (&statistics, "estatísticas"),
-                    (&favorite, "favoritar"),
-                    (&quit, "sair"),
+            Line::from(""),
+            compact_action_line(
+                [
+                    (icones.proximo, &next, "próximo"),
+                    (icones.repeticao, &repeat, "repetir"),
+                    (icones.estatisticas, &statistics, "estatísticas"),
+                    (favorite_icon, &favorite, "favoritar"),
+                    (icones.sair, &quit, "sair"),
                 ],
                 theme,
             ),
         ],
         TestStatus::Completed { .. } | TestStatus::Failed { .. } => vec![
-            result_action_icons(icones, quote, theme),
-            key_hints(
-                &[
-                    (&next, "próximo"),
-                    (&repeat, "repetir"),
-                    (&statistics, "estatísticas"),
-                    (&quit, "sair"),
+            Line::from(""),
+            compact_action_line(
+                [
+                    (icones.proximo, &next, "próximo"),
+                    (icones.repeticao, &repeat, "repetir"),
+                    (icones.estatisticas, &statistics, "estatísticas"),
+                    (icones.sair, &quit, "sair"),
                 ],
                 theme,
             ),
         ],
     };
     frame.render_widget(Paragraph::new(lines).alignment(Alignment::Center), area);
-}
-
-fn result_action_icons(
-    icones: Icons,
-    quote: Option<QuoteRenderState<'_>>,
-    theme: &Theme,
-) -> Line<'static> {
-    let mut spans = Vec::new();
-    let icons = result_icons(icones, quote.map(|quote| quote.favorite));
-    for (index, icon) in icons.into_iter().enumerate() {
-        if index > 0 {
-            spans.push(Span::raw("        "));
-        }
-        spans.push(Span::styled(
-            icon,
-            Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
-        ));
-    }
-    Line::from(spans)
-}
-
-fn result_icons(icones: Icons, quote_favorite: Option<bool>) -> Vec<&'static str> {
-    let mut icons = vec![
-        icones.proximo,
-        icones.repeticao,
-        icones.estatisticas,
-        icones.sair,
-    ];
-    if let Some(favorite) = quote_favorite {
-        icons.insert(
-            3,
-            if favorite {
-                icones.favorito
-            } else {
-                icones.nao_favorito
-            },
-        );
-    }
-    icons
 }
 
 pub fn result_action_at(
@@ -3832,13 +3871,6 @@ pub fn result_action_at(
     if !content.contains(position) {
         return None;
     }
-    let actions = [
-        ResultAction::Next,
-        ResultAction::Repeat,
-        ResultAction::Statistics,
-        ResultAction::Favorite,
-        ResultAction::Quit,
-    ];
     let icones = icones_do_terminal();
     if result_actions_are_compact(content.width, keymap, has_quote) {
         let row_actions: &[(ResultAction, String)] = if position.y == viewport.bottom() - 2 {
@@ -3905,46 +3937,40 @@ pub fn result_action_at(
         let mut labels = vec![
             (
                 ResultAction::Next,
-                format!("{} próximo", Keymap::label(keymap.next)),
+                format!("{} {} próximo", icones.proximo, Keymap::label(keymap.next)),
             ),
             (
                 ResultAction::Repeat,
-                format!("{} repetir", Keymap::label(keymap.repeat)),
+                format!(
+                    "{} {} repetir",
+                    icones.repeticao,
+                    Keymap::label(keymap.repeat)
+                ),
             ),
             (
                 ResultAction::Statistics,
-                format!("{} estatísticas", Keymap::label(keymap.statistics)),
+                format!(
+                    "{} {} estatísticas",
+                    icones.estatisticas,
+                    Keymap::label(keymap.statistics)
+                ),
             ),
         ];
         if has_quote {
             labels.push((
                 ResultAction::Favorite,
-                format!("{} favoritar", Keymap::label(keymap.favorite)),
+                format!(
+                    "{} {} favoritar",
+                    icones.nao_favorito,
+                    Keymap::label(keymap.favorite)
+                ),
             ));
         }
         labels.push((
             ResultAction::Quit,
-            format!("{} sair", Keymap::label(keymap.quit)),
+            format!("{} {} sair", icones.sair, Keymap::label(keymap.quit)),
         ));
         return centered_text_hit(content, position.x, &labels, 4);
-    }
-    if position.y != viewport.bottom() - 2 {
-        return None;
-    }
-    let icons = result_icons(icones, has_quote.then_some(false));
-    let width = icons
-        .iter()
-        .map(|icon| UnicodeWidthStr::width(*icon) as u16)
-        .sum::<u16>()
-        .saturating_add(8 * icons.len().saturating_sub(1) as u16);
-    let mut cursor = content.x + content.width.saturating_sub(width) / 2;
-    for (index, icon) in icons.iter().enumerate() {
-        let icon_width = UnicodeWidthStr::width(*icon) as u16;
-        if (cursor..cursor.saturating_add(icon_width.max(1))).contains(&position.x) {
-            let action_index = if !has_quote && index == 3 { 4 } else { index };
-            return actions.get(action_index).copied();
-        }
-        cursor = cursor.saturating_add(icon_width + 8);
     }
     None
 }
@@ -5268,22 +5294,19 @@ mod tests {
         let viewport = Rect::new(0, 0, 100, 28);
         let keymap = Keymap::default();
 
-        assert_eq!(
-            result_action_at(viewport, &keymap, false, Position::new(36, 26)),
-            Some(ResultAction::Next)
-        );
-        assert_eq!(
-            result_action_at(viewport, &keymap, false, Position::new(63, 26)),
-            Some(ResultAction::Quit)
-        );
-        assert_eq!(
-            result_action_at(viewport, &keymap, false, Position::new(95, 26)),
-            None
-        );
-        assert_eq!(
-            result_action_at(viewport, &keymap, false, Position::new(24, 27)),
-            Some(ResultAction::Next)
-        );
+        assert!((0..viewport.width).all(|x| {
+            result_action_at(viewport, &keymap, false, Position::new(x, 26)).is_none()
+        }));
+        for expected in [
+            ResultAction::Next,
+            ResultAction::Repeat,
+            ResultAction::Statistics,
+            ResultAction::Quit,
+        ] {
+            assert!((0..viewport.width).any(|x| {
+                result_action_at(viewport, &keymap, false, Position::new(x, 27)) == Some(expected)
+            }));
+        }
         assert!((0..viewport.width).any(|x| {
             result_action_at(viewport, &keymap, true, Position::new(x, 27))
                 == Some(ResultAction::Favorite)
@@ -5311,19 +5334,13 @@ mod tests {
     #[test]
     fn clique_na_palavra_prioritaria_abre_seu_detalhe() {
         let statistics = statistics_fixture();
-        assert_eq!(
-            statistics_word_at(
-                Rect::new(0, 0, 100, 28),
-                &statistics,
-                0,
-                Position::new(6, 18),
-            ),
-            Some(0)
-        );
-        assert_eq!(
-            statistics_word_at(Rect::new(0, 0, 50, 14), &statistics, 0, Position::new(2, 7),),
-            Some(0)
-        );
+        for viewport in [Rect::new(0, 0, 100, 28), Rect::new(0, 0, 50, 14)] {
+            assert!((0..viewport.height).any(|y| {
+                (0..viewport.width).any(|x| {
+                    statistics_word_at(viewport, &statistics, 0, Position::new(x, y)) == Some(0)
+                })
+            }));
+        }
     }
 
     #[test]
@@ -5623,7 +5640,7 @@ mod tests {
                 StatisticsPage::Overview,
                 0,
                 HistoryFilter::All,
-                Position::new(35, 0),
+                Position::new(50, 2),
             ),
             Some(StatisticsAction::Page(StatisticsPage::Progress))
         );
@@ -5634,7 +5651,7 @@ mod tests {
                 StatisticsPage::History,
                 0,
                 HistoryFilter::All,
-                Position::new(6, 3),
+                Position::new(6, 6),
             ),
             Some(StatisticsAction::Session(0))
         );

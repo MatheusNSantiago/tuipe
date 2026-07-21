@@ -24,6 +24,9 @@ os dados existentes.
   áreas clicáveis compatíveis com o desenho completo dos controles;
 - navegação de configurações com foco explícito, setas direcionais simétricas,
   estados booleanos legíveis e legenda permanente dos comandos;
+- ações do resultado com ícone, tecla e descrição reunidos no mesmo controle;
+- navegação das estatísticas em abas delimitadas, responsivas, clicáveis e com
+  estado ativo destacado por superfície, borda, cor e ícone;
 - tendência suavizada sobre todas as tentativas válidas e prioridade adaptativa
   que ignora correções isoladas sem evidência suficiente.
 

@@ -2,7 +2,10 @@
 source: src/ui.rs
 expression: "render_statistics_at(95, 28)"
 ---
-    estatísticas  1 visão geral  2 progresso  3 histórico  ·  nível 0  ·  sequência 0 dias
+    estatísticas                                                         nível 0  ·  0 dias
+    ╭──────────────────────────╮ ╭───────────────────────────╮ ╭──────────────────────────╮
+    │      1  visão geral     │ │       2  progresso       │ │       3  histórico      │
+    ╰──────────────────────────╯ ╰───────────────────────────╯ ╰──────────────────────────╯
     tendência de wpm  ·  12 testes válidos
      100│
         │                                     ⡀      ⢀       ⡀      ⢀   ⢀⣀⣀⣠⣀⣀⣀⣀⣀⣀⣀⣄⣀⣀⣀⣀⣀⣀⣠
@@ -20,9 +23,6 @@ expression: "render_statistics_at(95, 28)"
     palavras prioritárias                             padrões que pedem treino
     palavra      aumento  falha  correção  exposições tipo/padrão       falha  palavras
     ›através        ≈18%    30%    20%     10         técnica acento …    21% 5 palavras
-
-
-
 
 
 

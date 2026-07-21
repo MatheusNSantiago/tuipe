@@ -2,13 +2,13 @@
 source: src/ui.rs
 expression: compact_history
 ---
-  1 visão  2 progresso  3 histórico
+  ╭─────────────╮ ╭────────────╮ ╭─────────────╮
+  │   1 visão  │ │ 2 progress│ │ 3 histórico│
+  ╰─────────────╯ ╰────────────╯ ╰─────────────╯
   histórico de sessões  ·  filtro: todos
   sessão     resultado    wpm   acc   tempo
   › #42     concluído     92    98%   15.0s
     #41     falhou        61    86%    4.2s
-
-
 
 
 

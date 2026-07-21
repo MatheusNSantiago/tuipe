@@ -2,14 +2,14 @@
 source: src/ui.rs
 expression: history
 ---
-     estatísticas  1 visão geral  2 progresso  3 histórico  ·  nível 0  ·  sequência 0 dias
+     estatísticas                                                            nível 0  ·  0 dias
+     ╭───────────────────────────╮ ╭────────────────────────────╮ ╭───────────────────────────╮
+     │      1  visão geral      │ │        2  progresso       │ │       3  histórico       │
+     ╰───────────────────────────╯ ╰────────────────────────────╯ ╰───────────────────────────╯
      histórico de sessões  ·  filtro: todos
      sessão     quando          resultado       modo          wpm  precisão  duração
      › #42     14/07 10:33    concluído       30 segundos    92       98%    15.0s
        #41     13/07 10:33    falhou          30 segundos    61       86%     4.2s
-
-
-
 
 
 

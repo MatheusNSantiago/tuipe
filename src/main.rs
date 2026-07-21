@@ -2573,7 +2573,7 @@ mod tests {
     }
 
     #[test]
-    fn somente_o_icone_de_sair_devolve_ordem_de_encerramento() {
+    fn somente_o_controle_de_sair_devolve_ordem_de_encerramento() {
         let temporary = tempfile::tempdir().unwrap();
         let repository = Repository::open(&temporary.path().join("history.db")).unwrap();
         let mut app = app_de_teste(tuipe::typing::TestConfig::default(), &["que "]);
@@ -2599,13 +2599,23 @@ mod tests {
         .unwrap();
         assert_eq!(vazio, MouseOutcome::Unchanged);
 
+        let quit_x = (0..100)
+            .find(|x| {
+                ui::result_action_at(
+                    ratatui::layout::Rect::new(0, 0, 100, 28),
+                    &app.preferences.keymap,
+                    false,
+                    ratatui::layout::Position::new(*x, 27),
+                ) == Some(ui::ResultAction::Quit)
+            })
+            .expect("controle de sair visível");
         let outcome = handle_mouse(
             &mut app,
             &repository,
             MouseEvent {
                 kind: MouseEventKind::Down(MouseButton::Left),
-                column: 63,
-                row: 26,
+                column: quit_x,
+                row: 27,
                 modifiers: KeyModifiers::NONE,
             },
             ratatui::layout::Size::new(100, 28),
