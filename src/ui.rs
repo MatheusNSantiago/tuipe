@@ -144,6 +144,10 @@ fn icones_do_terminal() -> Icons {
     *ICON_PROFILE.get_or_init(|| match env::var("TUIPE_ICONS").ok().as_deref() {
         Some("unicode") => ICONES_UNICODE,
         Some("nerd") => ICONES_NERD,
+        // Os snapshots usam glifos Nerd de forma deliberada. A detecção real
+        // depende do terminal que iniciou o processo e tornaria a suíte
+        // diferente entre a máquina local e o CI.
+        _ if cfg!(test) => ICONES_NERD,
         _ if active_terminal_uses_nerd_font() => ICONES_NERD,
         _ => ICONES_UNICODE,
     })
