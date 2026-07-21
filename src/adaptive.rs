@@ -24,6 +24,9 @@ mod simulation;
 
 pub const UNIFORM_POLICY_VERSION: u16 = 0;
 pub const CURRENT_POLICY_VERSION: u16 = 2;
+/// Sinal abaixo deste valor ainda é ruído e não deve ser apresentado como uma
+/// dificuldade acionável para o usuário.
+pub const MINIMUM_ACTIONABLE_DIFFICULTY: f64 = 0.01;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AdaptivePolicy {
@@ -660,6 +663,42 @@ impl AdaptiveSampler {
             .collect()
     }
 
+    /// Estima somente o aumento causado pelo modelo adaptativo, descontando a
+    /// chance que qualquer palavra já teria no sorteio representativo.
+    pub fn estimated_session_uplifts_with_number_probability(
+        &self,
+        language: &str,
+        targets: &[String],
+        candidates: &[String],
+        draws: usize,
+        number_probability: f64,
+    ) -> HashMap<String, f64> {
+        let adaptive = self.estimated_session_chances_with_number_probability(
+            language,
+            targets,
+            candidates,
+            draws,
+            number_probability,
+        );
+        let representative = Self::new(self.policy)
+            .estimated_session_chances_with_number_probability(
+                language,
+                targets,
+                candidates,
+                draws,
+                number_probability,
+            );
+
+        targets
+            .iter()
+            .map(|word| {
+                let adaptive = adaptive.get(word).copied().unwrap_or(0.0);
+                let representative = representative.get(word).copied().unwrap_or(0.0);
+                (word.clone(), (adaptive - representative).max(0.0))
+            })
+            .collect()
+    }
+
     pub fn estimated_session_chance(
         &self,
         language: &str,
@@ -1101,7 +1140,30 @@ mod tests {
         let policy = AdaptivePolicy::default();
         let mut skill = WordSkill::default();
         observe(&mut skill, 0, 1, 0);
-        assert!(policy.difficulty(&skill) < 0.05);
+        assert!(policy.difficulty(&skill) < MINIMUM_ACTIONABLE_DIFFICULTY);
+    }
+
+    #[test]
+    fn uma_correcao_isolada_nao_cria_aumento_relevante_na_sessao() {
+        let words = (0..200)
+            .map(|index| format!("palavra{index}"))
+            .collect::<Vec<_>>();
+        let mut sampler = AdaptiveSampler::default();
+        sampler.observe(
+            "portuguese",
+            &words[0],
+            Observation::regular(false, true, false),
+        );
+
+        let uplifts = sampler.estimated_session_uplifts_with_number_probability(
+            "portuguese",
+            &[words[0].clone()],
+            &words,
+            24,
+            0.0,
+        );
+
+        assert!(uplifts[&words[0]] <= 0.01);
     }
 
     #[test]

@@ -4,15 +4,15 @@ expression: "render_engine_with_settings(50, 14, &engine, true)"
 ---
 ╭────────────────────────────────────────────────╮
 │                                                │
-│ ⚙ configurações do teste · ↑↓ enter            │
-│  p pontuação    n números                      │
-│  m tempo    m palavras    m citação            │
-│  v 15    v 30    v 60    v 120                 │
-│  d normal    d especialista    d mestre        │
-│  a adaptativo                                  │
-│  l português    l inglês                       │
-│  k comum    k 1k    k 5k                       │
-│ t tema   arch                                  │
+│ ⚙  configurações                               │
+│ extras         pontuação    números            │
+│ modo           tempo    palavras    citação    │
+│ duração        15 s    30 s    60 s    120 s   │
+│ dificuldade    normal    especialista    mestr │
+│ treino         adaptativo                      │
+│ idioma         português    inglês             │
+│ vocabulário    comum    1k    5k               │
+│ tema           arch                            │
 │ esc fechar    q sair                           │
 │                                                │
 ╰────────────────────────────────────────────────╯

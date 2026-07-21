@@ -19,6 +19,8 @@ const INICIO_COLAGEM: &[u8] = b"\x1b[?2004h";
 const FIM_COLAGEM: &[u8] = b"\x1b[?2004l";
 const INICIO_FOCO: &[u8] = b"\x1b[?1004h";
 const FIM_FOCO: &[u8] = b"\x1b[?1004l";
+const INICIO_MOUSE: &[u8] = b"\x1b[?1000h";
+const INICIO_MOUSE_SGR: &[u8] = b"\x1b[?1006h";
 
 struct AplicativoNoTerminal {
     child: Box<dyn Child + Send + Sync>,
@@ -211,6 +213,23 @@ fn inicia_com_deteccao_automatica_de_icones() {
     thread::sleep(Duration::from_millis(80));
     app.escrever(b"q");
 
+    confirmar_protocolos_restaurados(&app.esperar_encerrar());
+}
+
+#[test]
+fn mouse_real_altera_a_configuracao_no_pseudo_terminal() {
+    let home = tempfile::tempdir().expect("criar diretório temporário");
+    let mut app = AplicativoNoTerminal::iniciar(home.path());
+    app.esperar_saida(INICIO_MOUSE);
+    app.esperar_saida(INICIO_MOUSE_SGR);
+
+    // Clique SGR, coordenadas baseadas em 1, sobre "citação" no cartão de modo.
+    app.escrever(b"\x1b[<0;62;7M\x1b[<0;62;7m");
+    app.esperar_saida(b"todas");
+
+    app.escrever(b"\x1b");
+    thread::sleep(Duration::from_millis(80));
+    app.escrever(b"q");
     confirmar_protocolos_restaurados(&app.esperar_encerrar());
 }
 

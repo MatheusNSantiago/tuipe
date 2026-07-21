@@ -3,7 +3,7 @@ source: src/ui.rs
 expression: rendered
 ---
   palavra  através
-  chance estimada na próxima sessão: ≈18%
+  aumento estimado no próximo treino: ≈18%
   falhas 30%  ·  correções 20%  ·  10 exposições
   ritmo 120 ms/caractere  ·  +33% vs base
   tendência ainda incerta

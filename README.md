@@ -55,10 +55,10 @@ Para executar sem instalar:
 cargo run --release
 ```
 
-No Kitty, o tuipe consulta a fonte ativa e usa os ícones Nerd Font quando ela é
-compatível. Nos demais terminais, o conjunto Unicode seguro é usado por padrão,
-pois não existe um protocolo portátil para descobrir a fonte ativa. A seleção
-pode ser sobrescrita sem recompilar:
+No Kitty, inclusive quando ele hospeda uma sessão tmux, o tuipe detecta o
+cliente e usa os ícones Nerd Font. Nos demais terminais, o conjunto Unicode
+seguro é usado por padrão, pois não existe um protocolo portátil para descobrir
+a fonte ativa. A seleção pode ser sobrescrita sem recompilar:
 
 ```sh
 TUIPE_ICONS=nerd tuipe
@@ -82,10 +82,9 @@ aviso na interface e não impede o aplicativo de abrir.
 
 ## Uso
 
-Basta começar a digitar. Avaliações de progresso, revisões de retenção e testes
-com palavras novas são agendados pelo próprio tuipe quando há evidência para
-isso. Esses contextos aparecem na interface apenas para explicar o teste atual;
-eles não são escolhas adicionais.
+Basta digitar. Avaliações de progresso, revisões de retenção e testes com
+palavras novas são agendados pelo próprio tuipe quando há evidência para isso;
+eles não são escolhas adicionais nem ocupam a tela principal.
 
 ### Atalhos padrão do teste
 
@@ -130,16 +129,20 @@ atalhos seguros são restaurados.
 ### Estatísticas e diagnóstico
 
 As estatísticas possuem três páginas próprias. `1`, `2`, `3`, `tab` ou as setas
-laterais alternam entre visão geral, progresso e histórico. O progresso compara
-somente testes com a mesma configuração e mostra evolução, distribuição de WPM
-e atividade diária. O histórico pode ser filtrado com `f`; `↑`/`↓` ou `j`/`k`
-selecionam uma sessão e `enter` abre seu diagnóstico.
+laterais alternam entre visão geral, progresso e histórico. A visão geral usa
+todas as tentativas válidas e suaviza a tendência de WPM ao longo do tempo;
+tentativas interrompidas, curtas demais ou muito abaixo da base pessoal não
+distorcem o gráfico. O progresso detalha distribuição de WPM e atividade diária.
+O histórico pode ser filtrado com `f`; `↑`/`↓` ou `j`/`k` selecionam uma sessão
+e `enter` abre seu diagnóstico.
 
 Na visão geral, `↑`/`↓` ou `j`/`k` percorrem as palavras prioritárias e `enter`
-abre o diagnóstico da palavra. O detalhe mostra a chance estimada no próximo
-treino adaptativo, falhas, correções, ritmo contra a base pessoal, tendência,
-recência, sequências relacionadas e tentativas recentes. As páginas, palavras
-e sessões também podem ser abertas com o mouse.
+abre o diagnóstico da palavra. O detalhe mostra apenas o aumento de chance
+causado pelo treino adaptativo, descontando a chance representativa normal,
+além de falhas, correções, ritmo contra a base pessoal, tendência, recência,
+padrões relacionados e tentativas recentes. Uma correção isolada permanece
+abaixo do limiar de dificuldade acionável. As páginas, palavras e sessões
+também podem ser abertas com o mouse.
 
 `r` no detalhe solicita o reset daquela palavra. `R` no panorama solicita o
 reset do modelo adaptativo inteiro. Ambos exigem confirmação e preservam

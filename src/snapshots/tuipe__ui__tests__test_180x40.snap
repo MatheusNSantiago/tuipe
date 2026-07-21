@@ -1,6 +1,5 @@
 ---
 source: src/ui.rs
-assertion_line: 4800
 expression: rendered
 ---
 
@@ -18,7 +17,7 @@ expression: rendered
 
 
 
-                                                                            ◎ português · ★ especialista
+                                                                              português · especialista
 
           olá mundo prática
 
@@ -41,4 +40,4 @@ expression: rendered
 
 
 
-                                                            comece a digitar    esc configurações    ctrl+s estatísticas
+                                                                      esc configurações    ctrl+s estatísticas

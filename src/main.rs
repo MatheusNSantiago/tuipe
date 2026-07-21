@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     env,
     fs::{self, OpenOptions},
     io::Write,
@@ -12,6 +12,9 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+
+#[cfg(test)]
+use std::collections::HashSet;
 
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
@@ -854,17 +857,17 @@ impl App {
                 .iter()
                 .map(|word| word.word.clone())
                 .collect::<Vec<_>>();
-            let next_kind = repository.next_session_kind(config, configured_words)?;
             let chances = if matches!(config.mode, TestMode::Quote) {
                 HashMap::new()
-            } else if next_kind == SessionKind::Practice
-                && config.adaptive
-                && self.policy_version == CURRENT_POLICY_VERSION
-            {
-                let (candidates, _) =
-                    session_word_pool(configured_words, config, &self.adaptive, next_kind);
+            } else if config.adaptive && self.policy_version == CURRENT_POLICY_VERSION {
+                let (candidates, _) = session_word_pool(
+                    configured_words,
+                    config,
+                    &self.adaptive,
+                    SessionKind::Practice,
+                );
                 self.adaptive
-                    .estimated_session_chances_with_number_probability(
+                    .estimated_session_uplifts_with_number_probability(
                         &config.language,
                         &targets,
                         &candidates,
@@ -872,15 +875,7 @@ impl App {
                         if config.numbers { 0.1 } else { 0.0 },
                     )
             } else {
-                estimated_generator_chances(
-                    &self.catalog,
-                    config,
-                    &self.adaptive,
-                    next_kind,
-                    &targets,
-                    draws,
-                    self.policy_version,
-                )?
+                HashMap::new()
             };
             for word in &mut statistics.priority_words {
                 word.estimated_session_chance = chances.get(&word.word).copied().unwrap_or(0.0);
@@ -1364,7 +1359,7 @@ fn handle_mouse(
     }
 
     let config_bar = ui::config_bar_area(viewport);
-    if mouse.row != config_bar.y + 1 {
+    if !config_bar.contains(ratatui::layout::Position::new(mouse.column, mouse.row)) {
         return Ok(MouseOutcome::Unchanged);
     }
 
@@ -2083,6 +2078,7 @@ fn session_word_pool(
     (words, retention_words)
 }
 
+#[cfg(test)]
 fn estimated_generator_chances(
     catalog: &ContentCatalog,
     config: &tuipe::typing::TestConfig,

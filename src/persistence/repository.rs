@@ -24,7 +24,7 @@ use crate::persistence::{
 };
 use crate::typing::{
     ExternalEvent, InputEvent, KeyAction, Metrics, RecordedInputKind, TestConfig, TestEngine,
-    TestStatus,
+    TestMode, TestStatus,
 };
 
 pub struct Repository {
@@ -107,7 +107,7 @@ pub struct StatisticsOverview {
     pub average_wpm: f64,
     pub average_accuracy: f64,
     pub best_wpm: f64,
-    pub recent_tests: Vec<SessionSummary>,
+    pub trend_tests: Vec<SessionSummary>,
     pub history: Vec<SessionHistoryItem>,
     pub distribution: Vec<WpmBucket>,
     pub daily_activity: Vec<ActivityDay>,
@@ -1426,9 +1426,9 @@ impl Repository {
         self.statistics_overview_for(&TestConfig::default())
     }
 
-    /// Calcula velocidade, precisão, recorde e evolução apenas entre sessões
-    /// com a mesma configuração. Misturar duração, modo ou dificuldade cria
-    /// uma tendência enganosa e não ajuda a avaliar progresso real.
+    /// Calcula a tendência geral com todas as sessões concluídas que tenham
+    /// duração, volume e velocidade compatíveis com uma tentativa séria.
+    /// Distribuição e atividade continuam disponíveis para análises locais.
     pub fn statistics_overview_for(
         &self,
         comparable_config: &TestConfig,
@@ -1460,7 +1460,7 @@ impl Repository {
                     average_wpm: row.get(2)?,
                     average_accuracy: row.get(3)?,
                     best_wpm: row.get(4)?,
-                    recent_tests: Vec::new(),
+                    trend_tests: Vec::new(),
                     history: Vec::new(),
                     distribution: Vec::new(),
                     daily_activity: Vec::new(),
@@ -1484,13 +1484,10 @@ impl Repository {
                     incorrect_chars, extra_chars, config_toml, session_kind
              FROM sessions
              WHERE terminal_state = 'completed'
-               AND config_toml = ?1
-               AND (?2 = 0 OR session_kind = 'assessment')
-             ORDER BY id DESC
-             LIMIT 12",
+             ORDER BY id",
         )?;
-        overview.recent_tests = statement
-            .query_map(params![config_toml, assessments_only], |row| {
+        overview.trend_tests = statement
+            .query_map([], |row| {
                 Ok(SessionSummary {
                     id: row.get::<_, i64>(0)? as u64,
                     elapsed_ms: row.get::<_, i64>(1)? as u64,
@@ -1511,7 +1508,32 @@ impl Repository {
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        overview.recent_tests.reverse();
+        overview.trend_tests = valid_trend_sessions(overview.trend_tests);
+        overview.comparable_tests = overview.trend_tests.len() as u64;
+        if !overview.trend_tests.is_empty() {
+            let count = overview.trend_tests.len() as f64;
+            overview.average_wpm = overview
+                .trend_tests
+                .iter()
+                .map(|session| session.wpm)
+                .sum::<f64>()
+                / count;
+            overview.average_accuracy = overview
+                .trend_tests
+                .iter()
+                .map(|session| session.accuracy)
+                .sum::<f64>()
+                / count;
+            overview.best_wpm = overview
+                .trend_tests
+                .iter()
+                .map(|session| session.wpm)
+                .fold(0.0, f64::max);
+        } else {
+            overview.average_wpm = 0.0;
+            overview.average_accuracy = 0.0;
+            overview.best_wpm = 0.0;
+        }
         overview.history = self.session_history(50)?;
         overview.distribution = self.wpm_distribution(&config_toml, assessments_only)?;
         overview.daily_activity = self.daily_activity(14)?;
@@ -1726,7 +1748,9 @@ impl Repository {
             .into_iter()
             .filter_map(|(language, word, skill, difficulty)| {
                 let exposures = skill.effective_exposures;
-                if difficulty <= 0.0 || counts.get(&language).copied().unwrap_or(0) >= 8 {
+                if difficulty < crate::adaptive::MINIMUM_ACTIONABLE_DIFFICULTY
+                    || counts.get(&language).copied().unwrap_or(0) >= 8
+                {
                     return None;
                 }
                 *counts.entry(language.clone()).or_default() += 1;
@@ -2112,6 +2136,33 @@ fn replay_delete(engine: &mut TestEngine, count: usize, whole_word: bool, at_ms:
             });
         }
     }
+}
+
+fn valid_trend_sessions(sessions: Vec<SessionSummary>) -> Vec<SessionSummary> {
+    let mut speeds = sessions
+        .iter()
+        .filter_map(|session| session.wpm.is_finite().then_some(session.wpm))
+        .collect::<Vec<_>>();
+    speeds.sort_by(f64::total_cmp);
+    let median = speeds.get(speeds.len() / 2).copied().unwrap_or(0.0);
+    let minimum_wpm = (median * 0.4).max(15.0);
+
+    sessions
+        .into_iter()
+        .filter(|session| {
+            let enough_time = match session.config.mode {
+                TestMode::Time { seconds } => {
+                    session.elapsed_ms >= u64::from(seconds).saturating_mul(800)
+                }
+                TestMode::Words { .. } | TestMode::Quote => session.elapsed_ms >= 1_000,
+            };
+            enough_time
+                && session.correct_chars >= 10
+                && session.wpm.is_finite()
+                && session.wpm >= minimum_wpm
+                && session.accuracy.is_finite()
+        })
+        .collect()
 }
 
 fn session_history_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionHistoryItem> {
@@ -3537,16 +3588,20 @@ mod tests {
         let temporary = tempfile::tempdir().unwrap();
         let repository = Repository::open(&temporary.path().join("history.db")).unwrap();
         let completed = Metrics {
-            duration_ms: 12_000,
+            duration_ms: 30_000,
             wpm: 80.0,
             accuracy: 95.0,
+            characters: crate::typing::CharacterStats {
+                correct_word: 100,
+                ..crate::typing::CharacterStats::default()
+            },
             ..Metrics::default()
         };
         repository
             .save_session(
                 &TestConfig::default(),
                 &TestStatus::Completed {
-                    ended_at_ms: 12_000,
+                    ended_at_ms: 30_000,
                 },
                 completed,
             )
@@ -3565,19 +3620,19 @@ mod tests {
         let overview = repository.statistics_overview().unwrap();
         assert_eq!(overview.completed_tests, 1);
         assert_eq!(overview.comparable_tests, 1);
-        assert_eq!(overview.active_ms, 12_000);
+        assert_eq!(overview.active_ms, 30_000);
         assert_eq!(overview.average_wpm, 80.0);
         assert_eq!(overview.average_accuracy, 95.0);
         assert_eq!(overview.best_wpm, 80.0);
         assert_eq!(
-            overview.recent_tests,
+            overview.trend_tests,
             vec![SessionSummary {
                 id: 1,
-                elapsed_ms: 12_000,
+                elapsed_ms: 30_000,
                 wpm: 80.0,
                 accuracy: 95.0,
                 raw_wpm: 0.0,
-                correct_chars: 0,
+                correct_chars: 100,
                 incorrect_chars: 0,
                 extra_chars: 0,
                 config: TestConfig::default(),
@@ -3592,13 +3647,13 @@ mod tests {
         assert_eq!(overview.daily_activity.len(), 14);
         assert_eq!(overview.priority_words, Vec::new());
         assert_eq!(overview.priority_patterns, Vec::new());
-        assert_eq!(overview.total_xp, 27);
+        assert_eq!(overview.total_xp, 68);
         assert_eq!(overview.level, 1);
         assert_eq!(overview.streak, 1);
     }
 
     #[test]
-    fn progresso_compara_apenas_configuracoes_identicas() {
+    fn tendencia_reune_testes_validos_de_configuracoes_diferentes() {
         let temporary = tempfile::tempdir().unwrap();
         let repository = Repository::open(&temporary.path().join("history.db")).unwrap();
         let reference = TestConfig::default();
@@ -3607,10 +3662,17 @@ mod tests {
         repository
             .save_session(
                 &reference,
-                &TestStatus::Completed { ended_at_ms: 1 },
+                &TestStatus::Completed {
+                    ended_at_ms: 30_000,
+                },
                 Metrics {
+                    duration_ms: 30_000,
                     wpm: 70.0,
                     accuracy: 95.0,
+                    characters: crate::typing::CharacterStats {
+                        correct_word: 100,
+                        ..crate::typing::CharacterStats::default()
+                    },
                     ..Metrics::default()
                 },
             )
@@ -3618,10 +3680,17 @@ mod tests {
         repository
             .save_session(
                 &other,
-                &TestStatus::Completed { ended_at_ms: 1 },
+                &TestStatus::Completed {
+                    ended_at_ms: 30_000,
+                },
                 Metrics {
+                    duration_ms: 30_000,
                     wpm: 140.0,
                     accuracy: 80.0,
+                    characters: crate::typing::CharacterStats {
+                        correct_word: 100,
+                        ..crate::typing::CharacterStats::default()
+                    },
                     ..Metrics::default()
                 },
             )
@@ -3629,11 +3698,12 @@ mod tests {
 
         let overview = repository.statistics_overview_for(&reference).unwrap();
         assert_eq!(overview.completed_tests, 2);
-        assert_eq!(overview.comparable_tests, 1);
-        assert_eq!(overview.average_wpm, 70.0);
-        assert_eq!(overview.average_accuracy, 95.0);
-        assert_eq!(overview.recent_tests.len(), 1);
-        assert_eq!(overview.recent_tests[0].wpm, 70.0);
+        assert_eq!(overview.comparable_tests, 2);
+        assert_eq!(overview.average_wpm, 105.0);
+        assert_eq!(overview.average_accuracy, 87.5);
+        assert_eq!(overview.trend_tests.len(), 2);
+        assert_eq!(overview.trend_tests[0].wpm, 70.0);
+        assert_eq!(overview.trend_tests[1].wpm, 140.0);
     }
 
     #[test]

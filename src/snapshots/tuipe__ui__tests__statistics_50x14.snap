@@ -6,7 +6,7 @@ expression: "render_statistics_at(50, 14)"
   estatísticas
   42 testes totais  ·  12 testes iguais
   84 wpm  ·  96% precisão  ·  melhor 112
-  12 testes iguais  ·  74 → 80 wpm típico
+  12 testes válidos  ·  74 → 80 wpm típico
 
   palavras prioritárias
   › através  chance ≈18%  falha 30%

@@ -20,11 +20,15 @@ os dados existentes.
   explícita de lentidão;
 - atalhos configuráveis, mouse, terminais compactos e recuperação segura do
   terminal em saída, erro e sinais do sistema.
+- detecção de Nerd Font no Kitty através do tmux, configurações reorganizadas e
+  áreas clicáveis compatíveis com o desenho completo dos controles;
+- tendência suavizada sobre todas as tentativas válidas e prioridade adaptativa
+  que ignora correções isoladas sem evidência suficiente.
 
 ### Validado
 
 - paridade visual dos fluxos de 30 segundos, 50 palavras e citação;
-- 142 testes automatizados em unidade, integração e pseudo-terminal;
+- 145 testes automatizados em unidade, integração e pseudo-terminal;
 - pacote Cargo reproduzível e binário Linux otimizado para glibc 2.29 ou mais
   recente, distribuído com licença e proveniência dos conteúdos;
 - latência p99 abaixo de 1 ms para tecla e resize na máquina de validação.

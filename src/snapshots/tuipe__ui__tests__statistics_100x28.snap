@@ -3,10 +3,10 @@ source: src/ui.rs
 expression: "render_statistics_at(100, 28)"
 ---
      estatísticas  1 visão geral  2 progresso  3 histórico  ·  nível 0  ·  sequência 0 dias
-     wpm em testes de progresso  ·  12 testes mais recentes
+     tendência de wpm  ·  12 testes válidos
       100│
-         │                                      ⢀       ⡀       ⡀      ⢀       ⠄       ⠄      ⠠
-         │⠂      ⠐       ⠈       ⠁      ⠈
+         │                                      ⢀       ⡀       ⡀      ⢀   ⢀⣀⣀⣀⣄⣀⣀⣀⣀⣀⣀⣀⣄⣀⣀⣀⣀⣀⣀⣠
+         │⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠚⠒⠒⠒⠒⠒⠒⠒⠓⠒⠒⠒⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠁
          │
        50│
          │
@@ -14,11 +14,11 @@ expression: "render_statistics_at(100, 28)"
          │
         0└─────────────────────────────────────────────────────────────────────────────────────
          #1                                        #7                                       #12
-     testes totais  progresso       wpm médio      precisão       melhor          tempo ativo
+     testes totais  testes válidos  wpm médio      precisão       melhor          tempo ativo
      42             12              84             96%            112             1h 01m
 
      palavras prioritárias                               padrões que pedem treino
-     palavra       chance  falha  correção  exposições   tipo/padrão       falha  palavras
+     palavra      aumento  falha  correção  exposições   tipo/padrão       falha  palavras
      ›através        ≈18%    30%    20%     10           técnica acento …    21% 5 palavras
 
 

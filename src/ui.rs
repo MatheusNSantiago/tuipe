@@ -76,11 +76,7 @@ struct Icons {
     tempo: &'static str,
     palavras: &'static str,
     citacao: &'static str,
-    idioma: &'static str,
     dificuldade: &'static str,
-    avaliacao: &'static str,
-    transferencia: &'static str,
-    retencao: &'static str,
     repeticao: &'static str,
     proximo: &'static str,
     estatisticas: &'static str,
@@ -96,11 +92,7 @@ const ICONES_UNICODE: Icons = Icons {
     tempo: "◷",
     palavras: "Aa",
     citacao: "❝",
-    idioma: "◎",
     dificuldade: "★",
-    avaliacao: "↗",
-    transferencia: "⇄",
-    retencao: "↺",
     repeticao: "↻",
     proximo: "›",
     estatisticas: "⌁",
@@ -116,11 +108,7 @@ const ICONES_NERD: Icons = Icons {
     tempo: "",
     palavras: "",
     citacao: "",
-    idioma: "",
     dificuldade: "",
-    avaliacao: "",
-    transferencia: "",
-    retencao: "",
     repeticao: "",
     proximo: "",
     estatisticas: "",
@@ -140,8 +128,11 @@ fn icones_do_terminal() -> Icons {
 }
 
 fn active_terminal_uses_nerd_font() -> bool {
+    let tmux_kitty = tmux_client_uses_kitty();
     let kitty = env::var("KITTY_WINDOW_ID").is_ok_and(|window| !window.is_empty())
-        || env::var("TERM").is_ok_and(|term| term.contains("kitty"));
+        || env::var("TERM").is_ok_and(|term| term.contains("kitty"))
+        || env::var("TERM_PROGRAM").is_ok_and(|program| program.contains("kitty"))
+        || tmux_kitty;
     if !kitty {
         return false;
     }
@@ -151,31 +142,53 @@ fn active_terminal_uses_nerd_font() -> bool {
         .stderr(Stdio::null())
         .spawn()
     else {
-        return false;
+        return tmux_kitty;
     };
     let deadline = Instant::now() + Duration::from_millis(250);
     loop {
         match query.try_wait() {
             Ok(Some(status)) => {
                 if !status.success() {
-                    return false;
+                    return tmux_kitty;
                 }
                 let mut family = String::new();
-                return query
+                let detected = query
                     .stdout
                     .take()
                     .is_some_and(|mut stdout| stdout.read_to_string(&mut family).is_ok())
                     && is_nerd_font_family(&family);
+                // O tmux pode bloquear a consulta de fonte mesmo quando o
+                // cliente Kitty usa a fonte configurada pelo usuário. Nesse
+                // ambiente preferimos os ícones Nerd; `TUIPE_ICONS=unicode`
+                // continua sendo o fallback explícito para fontes sem glifos.
+                return detected || tmux_kitty;
             }
             Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(5)),
             Ok(None) => {
                 let _ = query.kill();
                 let _ = query.wait();
-                return false;
+                return tmux_kitty;
             }
-            Err(_) => return false,
+            Err(_) => return tmux_kitty,
         }
     }
+}
+
+fn tmux_client_uses_kitty() -> bool {
+    if env::var_os("TMUX").is_none() {
+        return false;
+    }
+    Command::new("tmux")
+        .args(["display-message", "-p", "#{client_termname}"])
+        .output()
+        .is_ok_and(|output| {
+            output.status.success()
+                && terminal_name_is_kitty(&String::from_utf8_lossy(&output.stdout))
+        })
+}
+
+fn terminal_name_is_kitty(name: &str) -> bool {
+    name.to_ascii_lowercase().contains("kitty")
 }
 
 fn is_nerd_font_family(family: &str) -> bool {
@@ -376,7 +389,7 @@ pub fn render_statistics(
         render_size_requirement(frame, viewport, theme, 50, 14, "ver as estatísticas");
         return;
     }
-    let content = page_content(viewport);
+    let content = statistics_content_area(viewport);
     if let Some(detail) = state.word_detail {
         render_word_detail(frame, content, detail, theme);
         return;
@@ -441,6 +454,10 @@ pub fn render_statistics(
     }
 }
 
+fn statistics_content_area(viewport: Rect) -> Rect {
+    centered_height(page_content(viewport), 30)
+}
+
 fn render_statistics_overview(
     frame: &mut Frame,
     content: Rect,
@@ -460,7 +477,7 @@ fn render_statistics_overview(
         Constraint::Length(1),
     ])
     .split(content);
-    render_statistics_chart(frame, sections[0], &statistics.recent_tests, theme);
+    render_statistics_chart(frame, sections[0], &statistics.trend_tests, theme);
     render_statistics_summary(frame, sections[1], statistics, theme);
     let details = Layout::horizontal([Constraint::Percentage(58), Constraint::Percentage(42)])
         .spacing(1)
@@ -570,7 +587,7 @@ fn render_statistics_progress(
         Constraint::Length(1),
     ])
     .split(area);
-    render_statistics_chart(frame, sections[0], &statistics.recent_tests, theme);
+    render_statistics_chart(frame, sections[0], &statistics.trend_tests, theme);
     render_statistics_summary(frame, sections[1], statistics, theme);
     let lower = Layout::horizontal([Constraint::Percentage(48), Constraint::Percentage(52)])
         .spacing(4)
@@ -1098,7 +1115,7 @@ pub fn statistics_word_at(
     if viewport.width < 50 || viewport.height < 14 || statistics.priority_words.is_empty() {
         return None;
     }
-    let content = page_content(viewport);
+    let content = statistics_content_area(viewport);
     let content = Rect::new(
         content.x,
         content.y.saturating_add(1),
@@ -1152,7 +1169,7 @@ pub fn statistics_action_at(
     if viewport.width < 50 || viewport.height < 14 {
         return None;
     }
-    let content = page_content(viewport);
+    let content = statistics_content_area(viewport);
     if position.y == content.y {
         let compact = content.width < STATISTICS_WIDE_MIN_WIDTH;
         let mut x = content.x.saturating_add(if compact {
@@ -1239,7 +1256,7 @@ pub fn statistics_detail_action_at(
     session_detail: bool,
     position: Position,
 ) -> Option<StatisticsAction> {
-    let content = page_content(viewport);
+    let content = statistics_content_area(viewport);
     if position.y != content.bottom().saturating_sub(1) {
         return None;
     }
@@ -1310,7 +1327,7 @@ fn render_word_detail(frame: &mut Frame, area: Rect, detail: &WordDetail, theme:
             ]),
             Line::styled(
                 format!(
-                    "chance estimada na próxima sessão: {}",
+                    "aumento estimado no próximo treino: {}",
                     estimated_chance_label(priority.estimated_session_chance)
                 ),
                 Style::default().fg(theme_color(theme, &theme.main, 3.0)),
@@ -1388,7 +1405,7 @@ fn render_word_detail(frame: &mut Frame, area: Rect, detail: &WordDetail, theme:
     );
     frame.render_widget(
         Paragraph::new(format!(
-            "chance estimada na próxima sessão automática: {}",
+            "aumento estimado no próximo treino adaptativo: {}",
             estimated_chance_label(priority.estimated_session_chance)
         ))
         .style(Style::default().fg(theme_color(theme, &theme.main, 3.0))),
@@ -1646,7 +1663,7 @@ fn render_statistics_compact(
                 Style::default().fg(theme_color(theme, &theme.main, 3.0)),
             ),
         ]),
-        compact_trend(&statistics.recent_tests, theme),
+        compact_trend(&statistics.trend_tests, theme),
         Line::from(""),
         Line::styled(
             "palavras prioritárias",
@@ -1723,15 +1740,17 @@ fn render_statistics_compact(
                 .iter()
                 .take(compact_diagnostic_limit(area.height))
                 .map(|pattern| {
-                    let kind = if pattern.kind == "mecânica" {
-                        "técnica"
-                    } else {
-                        "sequência"
-                    };
+                    let kind = (pattern.kind == "mecânica").then_some("técnica");
                     let label = if area.width < 60 {
-                        format!("{kind} {}", pattern.pattern)
+                        kind.map_or_else(
+                            || pattern.pattern.clone(),
+                            |kind| format!("{kind} {}", pattern.pattern),
+                        )
                     } else {
-                        format!("{} {}", pattern.kind, pattern.pattern)
+                        kind.map_or_else(
+                            || pattern.pattern.clone(),
+                            |kind| format!("{kind} {}", pattern.pattern),
+                        )
                     };
                     let contexts = if area.width < 60 {
                         format!("  {} palavras  ", pattern.distinct_words)
@@ -1774,7 +1793,7 @@ fn render_statistics_compact(
 fn compact_trend(sessions: &[SessionSummary], theme: &Theme) -> Line<'static> {
     if sessions.len() < 4 {
         return Line::styled(
-            "tendência disponível após 4 testes na mesma configuração",
+            "tendência disponível após 4 testes válidos",
             Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
         );
     }
@@ -1783,7 +1802,7 @@ fn compact_trend(sessions: &[SessionSummary], theme: &Theme) -> Line<'static> {
     let last = median_wpm(&sessions[middle..]);
     Line::from(vec![
         Span::styled(
-            format!("{} testes iguais", sessions.len()),
+            format!("{} testes válidos", sessions.len()),
             Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
         ),
         Span::styled(
@@ -1824,22 +1843,14 @@ fn render_statistics_chart(
     if area.height < 4 {
         return;
     }
-    let assessments_only = !sessions.is_empty()
-        && sessions
-            .iter()
-            .all(|session| session.kind == crate::persistence::SessionKind::Assessment);
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled(
-                if assessments_only {
-                    "wpm em testes de progresso"
-                } else {
-                    "wpm por teste"
-                },
+                "tendência de wpm",
                 Style::default().fg(theme_color(theme, &theme.text, 4.5)),
             ),
             Span::styled(
-                format!("  ·  {} testes mais recentes", sessions.len()),
+                format!("  ·  {} testes válidos", sessions.len()),
                 Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
             ),
         ])),
@@ -1856,6 +1867,7 @@ fn render_statistics_chart(
         .iter()
         .map(|session| (session.id as f64, session.wpm))
         .collect::<Vec<_>>();
+    let smoothed = smooth_session_wpm(&points);
     let ceiling =
         ((points.iter().map(|point| point.1).fold(20.0, f64::max) / 20.0).ceil() * 20.0).max(20.0);
     let canvas_area = Rect::new(
@@ -1882,8 +1894,17 @@ fn render_statistics_chart(
             .paint(|context| {
                 context.draw(&Points {
                     coords: &points,
-                    color: theme_color(theme, &theme.main, 3.0),
+                    color: theme_color(theme, &theme.sub, 2.0),
                 });
+                for segment in smoothed.windows(2) {
+                    context.draw(&CanvasLine {
+                        x1: segment[0].0,
+                        y1: segment[0].1,
+                        x2: segment[1].0,
+                        y2: segment[1].1,
+                        color: theme_color(theme, &theme.main, 3.0),
+                    });
+                }
             }),
         canvas_area,
     );
@@ -1915,24 +1936,30 @@ fn render_statistics_chart(
     }
 }
 
+fn smooth_session_wpm(points: &[(f64, f64)]) -> Vec<(f64, f64)> {
+    let Some(&(first_x, first_wpm)) = points.first() else {
+        return Vec::new();
+    };
+    let window = points.len().clamp(2, 9) as f64;
+    let alpha = 2.0 / (window + 1.0);
+    let mut current = first_wpm;
+    let mut smoothed = vec![(first_x, current)];
+    for &(x, wpm) in &points[1..] {
+        current += alpha * (wpm - current);
+        smoothed.push((x, current));
+    }
+    smoothed
+}
+
 fn render_statistics_summary(
     frame: &mut Frame,
     area: Rect,
     statistics: &StatisticsOverview,
     theme: &Theme,
 ) {
-    let comparable_label = if statistics
-        .recent_tests
-        .iter()
-        .all(|test| test.kind == SessionKind::Assessment)
-    {
-        "progresso"
-    } else {
-        "base comparável"
-    };
     let values = [
         ("testes totais", statistics.completed_tests.to_string()),
-        (comparable_label, statistics.comparable_tests.to_string()),
+        ("testes válidos", statistics.comparable_tests.to_string()),
         ("wpm médio", format!("{:.0}", statistics.average_wpm)),
         ("precisão", format!("{:.0}%", statistics.average_accuracy)),
         ("melhor", format!("{:.0}", statistics.best_wpm)),
@@ -1988,7 +2015,7 @@ fn render_priority_words(
         ));
     } else {
         lines.push(Line::styled(
-            "palavra       chance  falha  correção  exposições",
+            "palavra      aumento  falha  correção  exposições",
             Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
         ));
         let visible = area.height.saturating_sub(2) as usize;
@@ -2060,12 +2087,11 @@ fn render_priority_patterns(
                 .iter()
                 .take(area.height.saturating_sub(2) as usize)
                 .map(|pattern| {
-                    let kind = if pattern.kind == "mecânica" {
-                        "técnica"
+                    let label = if pattern.kind == "mecânica" {
+                        quote_source_label(&format!("técnica {}", pattern.pattern), 16)
                     } else {
-                        "sequência"
+                        quote_source_label(&pattern.pattern, 16)
                     };
-                    let label = quote_source_label(&format!("{kind} {}", pattern.pattern), 16);
                     Line::from(vec![
                         Span::styled(
                             format!("{label:<18}"),
@@ -2302,7 +2328,6 @@ fn render_settings(
         Block::default().style(Style::default().bg(color(&theme.bg))),
         viewport,
     );
-    let compact = viewport.width < 62 || viewport.height < 21;
     let area = settings_area(viewport);
     frame.render_widget(Clear, area);
     frame.render_widget(
@@ -2320,95 +2345,123 @@ fn render_settings(
         height: area.height.saturating_sub(4),
     };
     let config = engine.config();
+    let row = |label: &str, choices: Line<'static>| {
+        let mut spans = vec![Span::styled(
+            format!("{label:<14}"),
+            Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
+        )];
+        spans.extend(choices.spans);
+        Line::from(spans)
+    };
     let mut sections = vec![
         Line::styled(
-            format!("{} configurações do teste · ↑↓ enter", icones.configuracoes),
-            Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
+            format!("{}  configurações", icones.configuracoes),
+            Style::default()
+                .fg(theme_color(theme, &theme.text, 4.5))
+                .add_modifier(Modifier::BOLD),
         ),
         if matches!(config.mode, TestMode::Quote) {
-            Line::styled(
-                "pontuação e números indisponíveis em citações",
-                Style::default()
-                    .fg(theme_color(theme, &theme.sub, 2.0))
-                    .add_modifier(Modifier::DIM),
+            row(
+                "extras",
+                Line::styled(
+                    "indisponíveis em citações",
+                    Style::default()
+                        .fg(theme_color(theme, &theme.sub, 2.0))
+                        .add_modifier(Modifier::DIM),
+                ),
             )
         } else {
-            button_group(
-                &[
-                    ("p pontuação", config.punctuation),
-                    ("n números", config.numbers),
-                ],
-                theme,
+            row(
+                "extras",
+                button_group(
+                    &[
+                        ("pontuação", config.punctuation),
+                        ("números", config.numbers),
+                    ],
+                    theme,
+                ),
             )
         },
-        button_group(
-            &[
-                ("m tempo", matches!(config.mode, TestMode::Time { .. })),
-                ("m palavras", matches!(config.mode, TestMode::Words { .. })),
-                ("m citação", matches!(config.mode, TestMode::Quote)),
-            ],
-            theme,
-        ),
-        match config.mode {
-            TestMode::Time { seconds } => button_group(
+        row(
+            "modo",
+            button_group(
                 &[
-                    ("v 15", seconds == 15),
-                    ("v 30", seconds == 30),
-                    ("v 60", seconds == 60),
-                    ("v 120", seconds == 120),
+                    ("tempo", matches!(config.mode, TestMode::Time { .. })),
+                    ("palavras", matches!(config.mode, TestMode::Words { .. })),
+                    ("citação", matches!(config.mode, TestMode::Quote)),
                 ],
                 theme,
             ),
-            TestMode::Words { count } => button_group(
+        ),
+        row(
+            "duração",
+            match config.mode {
+                TestMode::Time { seconds } => button_group(
+                    &[
+                        ("15 s", seconds == 15),
+                        ("30 s", seconds == 30),
+                        ("60 s", seconds == 60),
+                        ("120 s", seconds == 120),
+                    ],
+                    theme,
+                ),
+                TestMode::Words { count } => button_group(
+                    &[
+                        ("10", count == 10),
+                        ("25", count == 25),
+                        ("50", count == 50),
+                        ("100", count == 100),
+                    ],
+                    theme,
+                ),
+                TestMode::Quote => button_group(
+                    &[
+                        ("todas", config.quote_length == QuoteLength::All),
+                        ("curta", config.quote_length == QuoteLength::Short),
+                        ("média", config.quote_length == QuoteLength::Medium),
+                        ("longa", config.quote_length == QuoteLength::Long),
+                    ],
+                    theme,
+                ),
+            },
+        ),
+        row(
+            "dificuldade",
+            button_group(
                 &[
-                    ("v 10", count == 10),
-                    ("v 25", count == 25),
-                    ("v 50", count == 50),
-                    ("v 100", count == 100),
+                    ("normal", config.difficulty == Difficulty::Normal),
+                    ("especialista", config.difficulty == Difficulty::Expert),
+                    ("mestre", config.difficulty == Difficulty::Master),
                 ],
                 theme,
             ),
-            TestMode::Quote => button_group(
+        ),
+        row(
+            "treino",
+            button_group(&[("adaptativo", config.adaptive)], theme),
+        ),
+        row(
+            "idioma",
+            button_group(
                 &[
-                    ("todas", config.quote_length == QuoteLength::All),
-                    ("curta", config.quote_length == QuoteLength::Short),
-                    ("média", config.quote_length == QuoteLength::Medium),
-                    ("longa", config.quote_length == QuoteLength::Long),
+                    ("português", config.language == "portuguese"),
+                    ("inglês", config.language == "english"),
                 ],
                 theme,
             ),
-        },
-        button_group(
-            &[
-                ("d normal", config.difficulty == Difficulty::Normal),
-                ("d especialista", config.difficulty == Difficulty::Expert),
-                ("d mestre", config.difficulty == Difficulty::Master),
-            ],
-            theme,
         ),
-        button_group(&[("a adaptativo", config.adaptive)], theme),
-        button_group(
-            &[
-                ("l português", config.language == "portuguese"),
-                ("l inglês", config.language == "english"),
-            ],
-            theme,
-        ),
-        button_group(
-            &[
-                ("k comum", config.word_pack == "common"),
-                ("k 1k", config.word_pack == "1k"),
-                ("k 5k", config.word_pack == "5k"),
-            ],
-            theme,
-        ),
-        Line::from(vec![
-            Span::styled(
-                "t tema  ",
-                Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
+        row(
+            "vocabulário",
+            button_group(
+                &[
+                    ("comum", config.word_pack == "common"),
+                    ("1k", config.word_pack == "1k"),
+                    ("5k", config.word_pack == "5k"),
+                ],
+                theme,
             ),
-            chip(theme_name.to_owned(), true, theme),
-        ]),
+        ),
+        row("tema", Line::from(chip(theme_name.to_owned(), true, theme))),
         Line::styled(
             format!(
                 "{} fechar    {} sair",
@@ -2423,31 +2476,11 @@ fn render_settings(
             .clone()
             .style(Style::default().bg(color(&theme.sub_alt)));
     }
-    let lines = if compact {
-        sections
-    } else {
-        sections
-            .into_iter()
-            .enumerate()
-            .flat_map(|(index, line)| {
-                if matches!(index, 1 | 3 | 5 | 7 | 9) {
-                    vec![Line::from(""), line]
-                } else {
-                    vec![line]
-                }
-            })
-            .collect()
-    };
-    frame.render_widget(Paragraph::new(lines), inner);
+    frame.render_widget(Paragraph::new(sections), inner);
 }
 
 pub fn settings_area(viewport: Rect) -> Rect {
-    let height = if viewport.width < 62 || viewport.height < 21 {
-        14
-    } else {
-        21
-    };
-    centered_width(centered_height(viewport, height), 58)
+    centered_width(centered_height(viewport, 14), 72)
 }
 
 pub fn settings_action_at(
@@ -2461,7 +2494,6 @@ pub fn settings_action_at(
     if !area.contains(position) {
         return None;
     }
-    let compact = viewport.width < 62 || viewport.height < 21;
     let inner = Rect::new(
         area.x.saturating_add(2),
         area.y.saturating_add(2),
@@ -2469,61 +2501,42 @@ pub fn settings_action_at(
         area.height.saturating_sub(4),
     );
     let row = position.y.saturating_sub(inner.y);
-    let section = if compact {
-        usize::from(row)
-    } else {
-        match row {
-            0 => 0,
-            2 => 1,
-            3 => 2,
-            5 => 3,
-            6 => 4,
-            8 => 5,
-            9 => 6,
-            11 => 7,
-            12 => 8,
-            14 => 9,
-            _ => return None,
-        }
-    };
-    let choice = |labels: &[&str]| hit_chip(position.x, inner.x, labels);
+    let section = usize::from(row);
+    let choices_x = inner.x.saturating_add(14);
+    let choice = |labels: &[&str]| hit_chip(position.x, choices_x, labels);
     match section {
-        1 if !matches!(config.mode, TestMode::Quote) => {
-            match choice(&["p pontuação", "n números"])? {
-                0 => Some(SettingsAction::TogglePunctuation),
-                _ => Some(SettingsAction::ToggleNumbers),
-            }
-        }
-        2 => match choice(&["m tempo", "m palavras", "m citação"])? {
+        1 if !matches!(config.mode, TestMode::Quote) => match choice(&["pontuação", "números"])?
+        {
+            0 => Some(SettingsAction::TogglePunctuation),
+            _ => Some(SettingsAction::ToggleNumbers),
+        },
+        2 => match choice(&["tempo", "palavras", "citação"])? {
             0 => Some(SettingsAction::ModeTime),
             1 => Some(SettingsAction::ModeWords),
             _ => Some(SettingsAction::ModeQuote),
         },
         3 => choice(match config.mode {
-            TestMode::Time { .. } => &["v 15", "v 30", "v 60", "v 120"],
-            TestMode::Words { .. } => &["v 10", "v 25", "v 50", "v 100"],
+            TestMode::Time { .. } => &["15 s", "30 s", "60 s", "120 s"],
+            TestMode::Words { .. } => &["10", "25", "50", "100"],
             TestMode::Quote => &["todas", "curta", "média", "longa"],
         })
         .map(SettingsAction::Value),
-        4 => match choice(&["d normal", "d especialista", "d mestre"])? {
+        4 => match choice(&["normal", "especialista", "mestre"])? {
             0 => Some(SettingsAction::Difficulty(Difficulty::Normal)),
             1 => Some(SettingsAction::Difficulty(Difficulty::Expert)),
             _ => Some(SettingsAction::Difficulty(Difficulty::Master)),
         },
-        5 => choice(&["a adaptativo"]).map(|_| SettingsAction::ToggleAdaptive),
-        6 => match choice(&["l português", "l inglês"])? {
+        5 => choice(&["adaptativo"]).map(|_| SettingsAction::ToggleAdaptive),
+        6 => match choice(&["português", "inglês"])? {
             0 => Some(SettingsAction::LanguagePortuguese),
             _ => Some(SettingsAction::LanguageEnglish),
         },
-        7 => match choice(&["k comum", "k 1k", "k 5k"])? {
+        7 => match choice(&["comum", "1k", "5k"])? {
             0 => Some(SettingsAction::PackCommon),
             1 => Some(SettingsAction::Pack1k),
             _ => Some(SettingsAction::Pack5k),
         },
-        8 => {
-            let start = inner.x + UnicodeWidthStr::width("t tema  ") as u16;
-            hit_chip(position.x, start, &[theme_name]).map(|_| SettingsAction::NextTheme)
-        }
+        8 => hit_chip(position.x, choices_x, &[theme_name]).map(|_| SettingsAction::NextTheme),
         9 => {
             let close = format!("{} fechar", Keymap::label(keymap.settings));
             let quit = format!("{} sair", Keymap::label(keymap.quit));
@@ -2866,7 +2879,7 @@ fn render_compact_result(
     area: Rect,
     engine: &TestEngine,
     theme: &Theme,
-    session_kind: SessionKind,
+    _session_kind: SessionKind,
     quote: Option<QuoteRenderState<'_>>,
     icones: Icons,
 ) {
@@ -2946,9 +2959,6 @@ fn render_compact_result(
         .lines()
         .map(str::to_owned)
         .collect::<Vec<_>>();
-    if let Some(kind) = session_kind_descriptor(session_kind, icones) {
-        descriptor.push(kind);
-    }
     if let Some(quote) = quote {
         let heart = if quote.favorite {
             icones.favorito
@@ -2969,16 +2979,7 @@ fn render_compact_result(
     frame.render_widget(
         Paragraph::new(lines.into_iter().chain(descriptor).collect::<Vec<_>>())
             .alignment(Alignment::Center),
-        centered_height(
-            area,
-            if quote.is_some() {
-                9
-            } else if session_kind == SessionKind::Practice {
-                7
-            } else {
-                8
-            },
-        ),
+        centered_height(area, if quote.is_some() { 9 } else { 7 }),
     );
 }
 
@@ -2995,17 +2996,11 @@ fn render_result_chart(
     area: Rect,
     metrics: &Metrics,
     theme: &Theme,
-    session_kind: SessionKind,
+    _session_kind: SessionKind,
     quote: Option<QuoteRenderState<'_>>,
     icones: Icons,
 ) {
     let mut context = Vec::<Line<'static>>::new();
-    if let Some(kind) = session_kind_descriptor(session_kind, icones) {
-        context.push(Line::styled(
-            truncate_to_width(&kind, usize::from(area.width)),
-            Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
-        ));
-    }
     if let Some(quote) = quote {
         let heart = if quote.favorite {
             icones.favorito
@@ -3481,12 +3476,11 @@ fn render_footer(
     }
     let lines = match engine.status() {
         TestStatus::Ready if area.width < 64 => vec![
-            key_hints(&[("comece", "a digitar"), (&settings, "config")], theme),
+            key_hints(&[(&settings, "configurações")], theme),
             key_hints(&[(&statistics_global, "estatísticas")], theme),
         ],
         TestStatus::Ready => vec![key_hints(
             &[
-                ("comece", "a digitar"),
                 (&settings, "configurações"),
                 (&statistics_global, "estatísticas"),
             ],
@@ -3894,7 +3888,7 @@ fn mini_progress(engine: &TestEngine) -> String {
     }
 }
 
-fn test_descriptor(engine: &TestEngine, session_kind: SessionKind, icones: Icons) -> String {
+fn test_descriptor(engine: &TestEngine, _session_kind: SessionKind, _icones: Icons) -> String {
     let config = engine.config();
     let mut modifiers = vec![difficulty_name(config.difficulty)];
     if config.punctuation {
@@ -3903,18 +3897,11 @@ fn test_descriptor(engine: &TestEngine, session_kind: SessionKind, icones: Icons
     if config.numbers {
         modifiers.push("números");
     }
-    let mut descriptor = format!(
-        "{} {} · {} {}",
-        icones.idioma,
+    format!(
+        "{} · {}",
         language_descriptor(&config.language, &config.word_pack),
-        icones.dificuldade,
         modifiers.join(" · ")
-    );
-    if let Some(kind) = session_kind_descriptor(session_kind, icones) {
-        descriptor.push_str(" · ");
-        descriptor.push_str(&kind);
-    }
-    descriptor
+    )
 }
 
 fn result_descriptor(engine: &TestEngine, icones: Icons) -> String {
@@ -3932,8 +3919,7 @@ fn result_descriptor(engine: &TestEngine, icones: Icons) -> String {
         modifiers.push("números");
     }
     format!(
-        "{mode}\n{} {}\n{} {}",
-        icones.idioma,
+        "{mode}\n{}\n{} {}",
         language_descriptor(&config.language, &config.word_pack),
         icones.dificuldade,
         modifiers.join(" · ")
@@ -4007,17 +3993,6 @@ fn result_action_labels(keymap: &Keymap, has_quote: bool) -> Vec<(ResultAction, 
         format!("{} sair", Keymap::label(keymap.quit)),
     ));
     labels
-}
-
-fn session_kind_descriptor(session_kind: SessionKind, icones: Icons) -> Option<String> {
-    let descriptor = match session_kind {
-        SessionKind::Practice => return None,
-        SessionKind::Assessment => format!("{} avaliação de progresso", icones.avaliacao),
-        SessionKind::Transfer => format!("{} palavras novas", icones.transferencia),
-        SessionKind::Retention => format!("{} revisão de retenção", icones.retencao),
-        SessionKind::Repeat => format!("{} repetição", icones.repeticao),
-    };
-    Some(descriptor)
 }
 
 fn language_name(language: &str) -> &str {
@@ -4669,7 +4644,7 @@ mod tests {
             average_wpm: 84.0,
             average_accuracy: 96.0,
             best_wpm: 112.0,
-            recent_tests: (1_u16..=12)
+            trend_tests: (1_u16..=12)
                 .map(|id| SessionSummary {
                     id: u64::from(id),
                     elapsed_ms: 15_000,
@@ -5007,7 +4982,7 @@ mod tests {
                 &config,
                 "arch",
                 &Keymap::default(),
-                Position::new(inner.x + 12, inner.y + 3),
+                Position::new(inner.x + 24, inner.y + 2),
             ),
             Some(SettingsAction::ModeWords)
         );
@@ -5017,7 +4992,7 @@ mod tests {
                 &config,
                 "arch",
                 &Keymap::default(),
-                Position::new(inner.x + 1, inner.y + 6),
+                Position::new(inner.x + 15, inner.y + 4),
             ),
             Some(SettingsAction::Difficulty(Difficulty::Normal))
         );
@@ -5027,7 +5002,7 @@ mod tests {
                 &config,
                 "arch",
                 &Keymap::default(),
-                Position::new(inner.x + 9, inner.y + 12),
+                Position::new(inner.x + 15, inner.y + 8),
             ),
             Some(SettingsAction::NextTheme)
         );
@@ -5037,7 +5012,7 @@ mod tests {
                 &config,
                 "arch",
                 &Keymap::default(),
-                Position::new(inner.x + 30, inner.y + 12),
+                Position::new(inner.x + 30, inner.y + 8),
             ),
             None
         );
@@ -5047,7 +5022,7 @@ mod tests {
                 &config,
                 "arch",
                 &Keymap::default(),
-                Position::new(inner.x + 15, inner.y + 14),
+                Position::new(inner.x + 15, inner.y + 9),
             ),
             Some(SettingsAction::Quit)
         );
@@ -5137,21 +5112,22 @@ mod tests {
     }
 
     #[test]
-    fn automatic_session_kind_is_explained_without_becoming_a_setting() {
+    fn tipo_automatico_da_sessao_nao_vaza_para_a_interface() {
         let engine = TestEngine::new(
             TestConfig::default(),
             ["olá ".into(), "mundo ".into(), "prática ".into()],
         );
 
-        for (kind, expected) in [
-            (SessionKind::Assessment, "avaliação de progresso"),
-            (SessionKind::Transfer, "palavras novas"),
-            (SessionKind::Retention, "revisão de retenção"),
-            (SessionKind::Repeat, "repetição"),
+        for kind in [
+            SessionKind::Assessment,
+            SessionKind::Transfer,
+            SessionKind::Retention,
+            SessionKind::Repeat,
         ] {
             let rendered = render_engine_with_kind(100, 28, &engine, false, kind);
-            assert!(rendered.contains(expected));
-            assert!(!rendered.contains("escolher sessão"));
+            assert!(!rendered.contains("avaliação de progresso"));
+            assert!(!rendered.contains("palavras novas"));
+            assert!(!rendered.contains("revisão de retenção"));
         }
 
         let mut completed = TestEngine::new(
@@ -5167,7 +5143,7 @@ mod tests {
         });
         let narrow_result =
             render_engine_with_kind(70, 22, &completed, false, SessionKind::Assessment);
-        assert!(narrow_result.contains("avaliação de progresso"));
+        assert!(!narrow_result.contains("avaliação de progresso"));
     }
 
     #[test]
@@ -5444,7 +5420,7 @@ mod tests {
         for (width, height) in [(50, 14), (100, 28)] {
             let rendered = render_word_detail_at(width, height);
             assert!(rendered.contains("através"));
-            assert!(rendered.contains("chance"));
+            assert!(rendered.contains("aumento"));
             assert!(rendered.contains("ritmo"));
             assert!(rendered.contains("tentativas recentes"));
             assert!(!rendered.contains("difficulty"));
@@ -5485,6 +5461,13 @@ mod tests {
         assert!(is_nerd_font_family("font_family: Hack NF\n"));
         assert!(is_nerd_font_family("MesloLGSNFM-Regular"));
         assert!(!is_nerd_font_family("JetBrains Mono"));
+    }
+
+    #[test]
+    fn reconhece_kitty_como_cliente_do_tmux() {
+        assert!(terminal_name_is_kitty("xterm-kitty\n"));
+        assert!(terminal_name_is_kitty("KITTY"));
+        assert!(!terminal_name_is_kitty("tmux-256color"));
     }
 
     #[test]
