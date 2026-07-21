@@ -110,6 +110,11 @@ percorrem a lista alinhada de preferências, enquanto `←`, `→` e `enter` atu
 somente sobre a preferência destacada. Em terminais compactos, a mesma
 navegação aparece em uma lista de coluna única.
 
+As setas laterais alteram a opção e `enter` confirma o valor atual e fecha o
+painel. Na dificuldade normal, erros podem ser corrigidos sem encerrar o teste;
+especialista encerra ao confirmar uma palavra incorreta com espaço; mestre
+encerra no primeiro caractere incorreto.
+
 Os atalhos de aplicação podem ser alterados em `config.toml`. O tuipe usa a
 notação da crate Crokey e aceita uma tecla com modificadores por ação:
 

@@ -26,6 +26,8 @@ os dados existentes.
   estados booleanos legíveis e legenda permanente dos comandos;
 - painel mestre–detalhe para configurações largas, com resumo alinhado,
   descrição contextual, edição isolada e áreas de clique equivalentes;
+- confirmação das configurações sem alteração implícita e explicação visível
+  das regras normal, especialista e mestre;
 - ações do resultado com ícone, tecla e descrição reunidos no mesmo controle;
 - navegação das estatísticas em abas delimitadas, responsivas e clicáveis, com
   estado ativo indicado sem preenchimento luminoso;
@@ -37,7 +39,7 @@ os dados existentes.
 ### Validado
 
 - paridade visual dos fluxos de 30 segundos, 50 palavras e citação;
-- 146 testes automatizados em unidade, integração e pseudo-terminal;
+- 147 testes automatizados em unidade, integração e pseudo-terminal;
 - pacote Cargo reproduzível e binário Linux otimizado para glibc 2.29 ou mais
   recente, distribuído com licença e proveniência dos conteúdos;
 - latência p99 abaixo de 1 ms para tecla e resize na máquina de validação.

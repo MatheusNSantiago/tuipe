@@ -14,5 +14,5 @@ expression: "render_engine_with_settings(50, 14, &engine, true)"
 │   vocabulário   ‹ comum ›                      │
 │   tema          ‹ arch ›                       │
 │ ↑↓ navegar    ←→ alterar                       │
-│ enter alternar    esc fechar    q sair         │
+│ enter confirmar    esc fechar    q sair        │
 ╰────────────────────────────────────────────────╯

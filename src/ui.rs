@@ -2712,7 +2712,7 @@ fn render_settings(
         sections.push(key_hints(&[("↑↓", "navegar"), ("←→", "alterar")], theme));
         sections.push(key_hints(
             &[
-                ("enter", "alternar"),
+                ("enter", "confirmar"),
                 (&Keymap::label(keymap.settings), "fechar"),
                 (&Keymap::label(keymap.quit), "sair"),
             ],
@@ -2723,7 +2723,7 @@ fn render_settings(
             &[
                 ("↑↓", "navegar"),
                 ("←→", "alterar"),
-                ("enter", "alternar"),
+                ("enter", "confirmar e fechar"),
                 (&Keymap::label(keymap.settings), "fechar"),
                 (&Keymap::label(keymap.quit), "sair"),
             ],
@@ -2911,11 +2911,14 @@ fn render_wide_settings(
             ),
         );
     }
+    if focus == 4 {
+        render_difficulty_explanation(frame, detail_inner, config.difficulty, theme);
+    }
     frame.render_widget(
         Paragraph::new(if focus == 8 {
             "← ou → percorre os temas instalados"
         } else {
-            "← ou → altera  ·  enter confirma"
+            "← ou → altera  ·  enter confirma e fecha"
         })
         .alignment(Alignment::Center)
         .style(Style::default().fg(theme_color(theme, &theme.sub, 2.0))),
@@ -2932,7 +2935,7 @@ fn render_wide_settings(
             &[
                 ("↑↓", "navegar"),
                 ("←→", "alterar"),
-                ("enter", "confirmar"),
+                ("enter", "confirmar e fechar"),
                 (&Keymap::label(keymap.settings), "fechar"),
                 (&Keymap::label(keymap.quit), "sair"),
             ],
@@ -2941,6 +2944,60 @@ fn render_wide_settings(
         .alignment(Alignment::Center),
         layout.footer,
     );
+}
+
+fn render_difficulty_explanation(
+    frame: &mut Frame,
+    area: Rect,
+    difficulty: Difficulty,
+    theme: &Theme,
+) {
+    let lines = difficulty_explanations()
+        .into_iter()
+        .map(|(candidate, label, explanation)| {
+            let selected = difficulty == candidate;
+            Line::from(vec![
+                Span::styled(
+                    format!("{label:<13}"),
+                    Style::default()
+                        .fg(theme_color(
+                            theme,
+                            if selected { &theme.main } else { &theme.sub },
+                            if selected { 3.0 } else { 2.0 },
+                        ))
+                        .add_modifier(if selected {
+                            Modifier::BOLD
+                        } else {
+                            Modifier::empty()
+                        }),
+                ),
+                Span::styled(
+                    explanation,
+                    Style::default().fg(theme_color(
+                        theme,
+                        if selected { &theme.text } else { &theme.sub },
+                        if selected { 4.5 } else { 2.0 },
+                    )),
+                ),
+            ])
+        })
+        .collect::<Vec<_>>();
+    frame.render_widget(
+        Paragraph::new(lines),
+        Rect::new(area.x, area.y.saturating_add(5), area.width, 3),
+    );
+}
+
+fn difficulty_explanations() -> [(Difficulty, &'static str, &'static str); 3] {
+    [
+        (Difficulty::Normal, "normal", "permite corrigir e continuar"),
+        (
+            Difficulty::Expert,
+            "especialista",
+            "palavra errada + espaço encerra",
+        ),
+        (Difficulty::Master, "mestre", "1º caractere errado encerra"),
+    ]
 }
 
 fn settings_current_values(config: &crate::typing::TestConfig, theme_name: &str) -> Vec<String> {
@@ -2995,7 +3052,7 @@ fn settings_description(focus: usize) -> &'static str {
         "Mistura números às palavras do teste.",
         "Define como cada teste termina.",
         "Ajusta a duração ou a quantidade do modo atual.",
-        "Controla quando um erro encerra o teste.",
+        "Escolha o que acontece depois de um erro.",
         "Personaliza automaticamente as próximas palavras.",
         "Seleciona o idioma do conteúdo.",
         "Escolhe o tamanho do vocabulário.",
@@ -3235,7 +3292,13 @@ pub fn settings_action_at(
             match hit_text(
                 position.x,
                 inner.x,
-                &["↑↓ navegar", "←→ alterar", "enter alternar", &close, &quit],
+                &[
+                    "↑↓ navegar",
+                    "←→ alterar",
+                    "enter confirmar e fechar",
+                    &close,
+                    &quit,
+                ],
                 4,
             )? {
                 3 => Some(SettingsAction::Close),
@@ -3246,7 +3309,7 @@ pub fn settings_action_at(
         11 if compact => {
             let close = format!("{} fechar", Keymap::label(keymap.settings));
             let quit = format!("{} sair", Keymap::label(keymap.quit));
-            match hit_text(position.x, inner.x, &["enter alternar", &close, &quit], 4)? {
+            match hit_text(position.x, inner.x, &["enter confirmar", &close, &quit], 4)? {
                 1 => Some(SettingsAction::Close),
                 2 => Some(SettingsAction::Quit),
                 _ => None,
@@ -3304,7 +3367,13 @@ fn wide_settings_action_at(
     if layout.footer.contains(position) {
         let close = format!("{} fechar", Keymap::label(keymap.settings));
         let quit = format!("{} sair", Keymap::label(keymap.quit));
-        let labels = ["↑↓ navegar", "←→ alterar", "enter confirmar", &close, &quit];
+        let labels = [
+            "↑↓ navegar",
+            "←→ alterar",
+            "enter confirmar e fechar",
+            &close,
+            &quit,
+        ];
         let total_width = labels
             .iter()
             .map(|label| UnicodeWidthStr::width(*label) as u16)
@@ -5323,22 +5392,38 @@ mod tests {
             width,
             height,
             engine,
-            settings_open,
-            session_kind,
-            persistence,
-            false,
+            TestRenderOptions {
+                settings_open,
+                settings_focus: 0,
+                session_kind,
+                persistence,
+                focus_warning: false,
+            },
         )
+    }
+
+    #[derive(Clone, Copy)]
+    struct TestRenderOptions {
+        settings_open: bool,
+        settings_focus: usize,
+        session_kind: SessionKind,
+        persistence: PersistenceUiState,
+        focus_warning: bool,
     }
 
     fn render_engine_with_state(
         width: u16,
         height: u16,
         engine: &TestEngine,
-        settings_open: bool,
-        session_kind: SessionKind,
-        persistence: PersistenceUiState,
-        focus_warning: bool,
+        options: TestRenderOptions,
     ) -> String {
+        let TestRenderOptions {
+            settings_open,
+            settings_focus,
+            session_kind,
+            persistence,
+            focus_warning,
+        } = options;
         let catalog = ContentCatalog::bundled().unwrap();
         let theme = catalog.theme("arch").unwrap();
         let backend = TestBackend::new(width, height);
@@ -5352,7 +5437,7 @@ mod tests {
                     theme,
                     RenderContext {
                         settings_open,
-                        settings_focus: 0,
+                        settings_focus,
                         theme_name: "arch",
                         session_kind,
                         persistence,
@@ -5753,10 +5838,13 @@ mod tests {
             100,
             28,
             &engine,
-            false,
-            SessionKind::Practice,
-            PersistenceUiState::Saved,
-            true,
+            TestRenderOptions {
+                settings_open: false,
+                settings_focus: 0,
+                session_kind: SessionKind::Practice,
+                persistence: PersistenceUiState::Saved,
+                focus_warning: true,
+            },
         );
 
         assert!(rendered.contains("clique no terminal para continuar"));
@@ -5830,6 +5918,22 @@ mod tests {
                 Position::new(area.x + 1, area.y + 1),
             ),
             None
+        );
+    }
+
+    #[test]
+    fn dificuldades_explicam_exatamente_quando_o_teste_termina() {
+        assert_eq!(
+            difficulty_explanations(),
+            [
+                (Difficulty::Normal, "normal", "permite corrigir e continuar"),
+                (
+                    Difficulty::Expert,
+                    "especialista",
+                    "palavra errada + espaço encerra"
+                ),
+                (Difficulty::Master, "mestre", "1º caractere errado encerra"),
+            ]
         );
     }
 
@@ -6001,6 +6105,21 @@ mod tests {
         insta::assert_snapshot!(
             "settings_50x14",
             render_engine_with_settings(50, 14, &engine, true)
+        );
+        insta::assert_snapshot!(
+            "settings_difficulty_100x28",
+            render_engine_with_state(
+                100,
+                28,
+                &engine,
+                TestRenderOptions {
+                    settings_open: true,
+                    settings_focus: 4,
+                    session_kind: SessionKind::Practice,
+                    persistence: PersistenceUiState::Saved,
+                    focus_warning: false,
+                },
+            )
         );
     }
 

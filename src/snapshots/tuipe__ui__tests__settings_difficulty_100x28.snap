@@ -1,6 +1,6 @@
 ---
 source: src/ui.rs
-expression: "render_engine_with_settings(100, 28, &engine, true)"
+expression: "render_engine_with_state(100, 28, &engine, true, SessionKind::Practice,\nPersistenceUiState::Saved, 4, false,)"
 ---
 
 
@@ -10,15 +10,15 @@ expression: "render_engine_with_settings(100, 28, &engine, true)"
        ╭────────────────────────────────────────────────────────────────────────────────────╮
        │ ⚙  configurações  ·  salvo automaticamente                                         │
        │                                                                                    │
-       │ ╭ preferências ───────────────╮  ╭ pontuação ────────────────────────────────────╮ │
-       │ │› pontuação        desligada │  │ Inclui sinais de pontuação no conteúdo        │ │
-       │ │  números         desligados │  │ gerado.                                       │ │
+       │ ╭ preferências ───────────────╮  ╭ dificuldade ──────────────────────────────────╮ │
+       │ │  pontuação        desligada │  │ Escolha o que acontece depois de um erro.     │ │
+       │ │  números         desligados │  │                                               │ │
        │ │  modo                 tempo │  │                                               │ │
        │ │  duração               30 s │  │                                               │ │
-       │ │  dificuldade   especialista │  │              desligada    ligada              │ │
-       │ │  treino          adaptativo │  │                                               │ │
-       │ │  idioma           português │  │                                               │ │
-       │ │  vocabulário          comum │  │                                               │ │
+       │ │› dificuldade   especialista │  │       normal    especialista    mestre        │ │
+       │ │  treino          adaptativo │  │ normal       permite corrigir e continuar     │ │
+       │ │  idioma           português │  │ especialista palavra errada + espaço encerra  │ │
+       │ │  vocabulário          comum │  │ mestre       1º caractere errado encerra      │ │
        │ │  tema                  arch │  │                                               │ │
        │ │                             │  │   ← ou → altera  ·  enter confirma e fecha    │ │
        │ ╰─────────────────────────────╯  ╰───────────────────────────────────────────────╯ │

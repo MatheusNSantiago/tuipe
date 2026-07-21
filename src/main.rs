@@ -1810,7 +1810,11 @@ fn handle_settings_key(
         }
         _ => {}
     }
-    if matches!(code, KeyCode::Enter | KeyCode::Left | KeyCode::Right) {
+    if code == KeyCode::Enter {
+        app.settings_open = false;
+        return Ok(false);
+    }
+    if matches!(code, KeyCode::Left | KeyCode::Right) {
         adjust_focused_setting(app, repository, code)?;
         return Ok(false);
     }
@@ -1919,24 +1923,15 @@ fn cycle<T: Copy + PartialEq>(values: &[T], current: T, backwards: bool) -> T {
 fn adjust_focused_setting(app: &mut App, repository: &Repository, code: KeyCode) -> Result<()> {
     let backwards = code == KeyCode::Left;
     let forwards = code == KeyCode::Right;
-    let toggle = code == KeyCode::Enter;
     match app.settings_focus {
         0 if !matches!(app.engine.config().mode, TestMode::Quote) => {
             app.apply_preference(repository, |preferences| {
-                preferences.test.punctuation = if toggle {
-                    !preferences.test.punctuation
-                } else {
-                    forwards
-                };
+                preferences.test.punctuation = forwards;
             })?;
         }
         1 if !matches!(app.engine.config().mode, TestMode::Quote) => {
             app.apply_preference(repository, |preferences| {
-                preferences.test.numbers = if toggle {
-                    !preferences.test.numbers
-                } else {
-                    forwards
-                };
+                preferences.test.numbers = forwards;
             })?;
         }
         2 => app.apply_preference(repository, |preferences| {
@@ -1991,11 +1986,7 @@ fn adjust_focused_setting(app: &mut App, repository: &Repository, code: KeyCode)
             );
         })?,
         5 => app.apply_preference(repository, |preferences| {
-            preferences.test.adaptive = if toggle {
-                !preferences.test.adaptive
-            } else {
-                forwards
-            };
+            preferences.test.adaptive = forwards;
         })?,
         6 => app.apply_preference(repository, |preferences| {
             preferences.test.language = cycle(
@@ -2528,8 +2519,10 @@ mod tests {
 
         handle_settings_key(&mut app, &repository, KeyCode::Up, KeyModifiers::NONE).unwrap();
         assert_eq!(app.settings_focus, 1);
+        let numbers = app.preferences.test.numbers;
         handle_settings_key(&mut app, &repository, KeyCode::Enter, KeyModifiers::NONE).unwrap();
-        assert!(!app.preferences.test.numbers);
+        assert_eq!(app.preferences.test.numbers, numbers);
+        assert!(!app.settings_open);
 
         let quote_config = tuipe::typing::TestConfig {
             mode: TestMode::Quote,
