@@ -36,14 +36,14 @@ use crate::{
 
 const MIN_PAGE_PADDING: u16 = 2;
 const WORD_GAP: usize = 1;
-const CONFIG_CARD_GAP: u16 = 2;
-const CONFIG_MODIFIER_WIDTH: u16 = 26;
+const CONFIG_CARD_GAP: u16 = 1;
+const CONFIG_MODIFIER_WIDTH: u16 = 27;
 // O grupo central é o mais largo. A largura inclui as bordas e precisa caber
 // tanto com Nerd Font quanto com o fallback Unicode, cujos rótulos não têm a
 // mesma largura de célula.
-const CONFIG_MODE_WIDTH: u16 = 31;
-const CONFIG_COMPACT_VALUE_WIDTH: u16 = 20;
-const CONFIG_QUOTE_VALUE_WIDTH: u16 = 26;
+const CONFIG_MODE_WIDTH: u16 = 37;
+const CONFIG_COMPACT_VALUE_WIDTH: u16 = 24;
+const CONFIG_QUOTE_VALUE_WIDTH: u16 = 33;
 const RESULT_WIDE_WIDTH: u16 = 90;
 const RESULT_MEDIUM_WIDTH: u16 = 54;
 const RESULT_GROUP_HEIGHT: u16 = 4;
@@ -3534,7 +3534,7 @@ fn render_config_bar(
             active,
             modifier_idle,
         ),
-        Span::raw(" "),
+        config_group_divider(theme),
         selector(
             "# números",
             config.numbers && !matches!(config.mode, TestMode::Quote),
@@ -3551,14 +3551,14 @@ fn render_config_bar(
             active,
             idle,
         ),
-        Span::raw(" "),
+        config_group_divider(theme),
         selector(
             format!("{} palavras", icones.palavras),
             matches!(config.mode, TestMode::Words { .. }),
             active,
             idle,
         ),
-        Span::raw(" "),
+        config_group_divider(theme),
         selector(
             format!("{} citação", icones.citacao),
             matches!(config.mode, TestMode::Quote),
@@ -3569,8 +3569,8 @@ fn render_config_bar(
     render_card(frame, cards[1], modes, theme);
 
     let values = match config.mode {
-        TestMode::Time { seconds } => choices(&[15, 30, 60, 120], seconds, active, idle),
-        TestMode::Words { count } => choices(&[10, 25, 50, 100], count, active, idle),
+        TestMode::Time { seconds } => choices(&[15, 30, 60, 120], seconds, active, idle, theme),
+        TestMode::Words { count } => choices(&[10, 25, 50, 100], count, active, idle, theme),
         TestMode::Quote => choice_names(
             &["todas", "curta", "média", "longa"],
             match config.quote_length {
@@ -3581,13 +3581,14 @@ fn render_config_bar(
             },
             active,
             idle,
+            theme,
         ),
     };
     render_card(frame, cards[2], values, theme);
 }
 
 pub fn config_bar_area(viewport: Rect) -> Rect {
-    let content = page_content(viewport);
+    let content = centered_width(viewport, MAX_PAGE_CONTENT_WIDTH);
     let y = if viewport.height < 18 {
         viewport.y + 4
     } else {
@@ -4920,11 +4921,12 @@ fn choices<T: std::fmt::Display + Copy + PartialEq>(
     selected: T,
     active: Style,
     idle: Style,
+    theme: &Theme,
 ) -> Line<'static> {
     let mut spans = Vec::new();
     for (index, value) in values.iter().enumerate() {
         if index > 0 {
-            spans.push(Span::raw("  "));
+            spans.push(config_group_divider(theme));
         }
         spans.push(Span::styled(
             value.to_string(),
@@ -4934,11 +4936,17 @@ fn choices<T: std::fmt::Display + Copy + PartialEq>(
     Line::from(spans)
 }
 
-fn choice_names(values: &[&str], selected: usize, active: Style, idle: Style) -> Line<'static> {
+fn choice_names(
+    values: &[&str],
+    selected: usize,
+    active: Style,
+    idle: Style,
+    theme: &Theme,
+) -> Line<'static> {
     let mut spans = Vec::new();
     for (index, value) in values.iter().enumerate() {
         if index > 0 {
-            spans.push(Span::raw(" "));
+            spans.push(config_group_divider(theme));
         }
         spans.push(Span::styled(
             (*value).to_owned(),
@@ -4946,6 +4954,14 @@ fn choice_names(values: &[&str], selected: usize, active: Style, idle: Style) ->
         ));
     }
     Line::from(spans)
+}
+
+fn config_group_divider(theme: &Theme) -> Span<'static> {
+    let mut style = Style::default().fg(theme_color(theme, &theme.sub_alt, 1.2));
+    if color_profile() == ColorProfile::None {
+        style = style.add_modifier(Modifier::DIM);
+    }
+    Span::styled(" │ ", style)
 }
 
 fn difficulty_name(difficulty: Difficulty) -> &'static str {
@@ -5757,7 +5773,7 @@ mod tests {
                 "tempo_30",
                 TestConfig::default(),
                 practice_words.clone(),
-                "15  30  60  120",
+                "15 │ 30 │ 60 │ 120",
             ),
             (
                 "palavras_50",
@@ -5766,7 +5782,7 @@ mod tests {
                     ..TestConfig::default()
                 },
                 practice_words,
-                "10  25  50  100",
+                "10 │ 25 │ 50 │ 100",
             ),
             (
                 "citacao",
@@ -5776,7 +5792,7 @@ mod tests {
                     ..TestConfig::default()
                 },
                 quote_words,
-                "todas",
+                "todas │ curta │ média │ longa",
             ),
         ];
 
