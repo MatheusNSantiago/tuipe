@@ -38,8 +38,8 @@ use termina::{
 };
 use tuipe::{
     adaptive::{
-        AdaptivePolicy, AdaptiveSampler, CURRENT_POLICY_VERSION, Observation, lexical_ngrams,
-        mechanics_for_token,
+        AdaptivePolicy, AdaptiveSampler, CURRENT_POLICY_VERSION, Observation, ReachProfile,
+        lexical_ngrams, mechanics_for_token,
     },
     content::{ContentCatalog, Quote, WordGenerator},
     persistence::{
@@ -347,6 +347,7 @@ struct App {
     generator: Option<WordGenerator<SmallRng>>,
     selections: Vec<Option<tuipe::adaptive::WordSelection>>,
     adaptive: AdaptiveSampler,
+    reach_profile: ReachProfile,
     policy_version: u16,
     shadow_policy_version: Option<u16>,
     shadow_generator: Option<WordGenerator<SmallRng>>,
@@ -491,6 +492,10 @@ impl App {
         )?;
         let policy_state = repository.adaptive_policy_state()?;
         let policy_version = policy_state.active_version;
+        let reach_profile = repository.reach_profile_for(
+            &preferences.test,
+            reach_profile_positions(&preferences.test),
+        )?;
         let (engine, generator, selections, current_quote) = new_test(
             &catalog,
             &preferences.test,
@@ -498,6 +503,7 @@ impl App {
             &adaptive,
             session_kind,
             policy_version,
+            &reach_profile,
         )?;
         let shadow = shadow_test(
             &catalog,
@@ -506,6 +512,7 @@ impl App {
             &adaptive,
             session_kind,
             policy_state.shadow_version,
+            &reach_profile,
         )?;
         let quote_favorite = current_quote
             .as_ref()
@@ -535,6 +542,7 @@ impl App {
             generator,
             selections,
             adaptive,
+            reach_profile,
             policy_version,
             shadow_policy_version: policy_state.shadow_version,
             shadow_generator: shadow.generator,
@@ -592,6 +600,10 @@ impl App {
                 )
                 .context("o pacote de palavras configurado não está disponível")?,
         )?;
+        self.reach_profile = repository.reach_profile_for(
+            &self.preferences.test,
+            reach_profile_positions(&self.preferences.test),
+        )?;
         let (engine, generator, selections, current_quote) = new_test(
             &self.catalog,
             &self.preferences.test,
@@ -599,6 +611,7 @@ impl App {
             &self.adaptive,
             session_kind,
             self.policy_version,
+            &self.reach_profile,
         )?;
         let shadow = shadow_test(
             &self.catalog,
@@ -607,6 +620,7 @@ impl App {
             &self.adaptive,
             session_kind,
             self.shadow_policy_version,
+            &self.reach_profile,
         )?;
         self.engine = engine;
         self.generator = generator;
@@ -638,6 +652,7 @@ impl App {
             &self.adaptive,
             SessionKind::Repeat,
             self.policy_version,
+            &self.reach_profile,
         )?;
         self.engine = engine;
         self.generator = generator;
@@ -837,8 +852,10 @@ impl App {
     }
 
     fn load_statistics(&mut self, repository: &Repository) -> Result<()> {
-        let config = self.engine.config();
-        let mut statistics = repository.statistics_overview_for(config)?;
+        let config = self.engine.config().clone();
+        self.reach_profile =
+            repository.reach_profile_for(&config, reach_profile_positions(&config))?;
+        let mut statistics = repository.statistics_overview_for(&config)?;
         statistics
             .priority_words
             .retain(|word| word.language == config.language);
@@ -847,14 +864,6 @@ impl App {
             .retain(|pattern| pattern.language == config.language);
         if let Some(configured_words) = self.catalog.word_pack(&config.language, &config.word_pack)
         {
-            let draws = match config.mode {
-                TestMode::Words { count } => usize::from(count),
-                TestMode::Time { seconds } => {
-                    ((statistics.average_wpm.max(30.0) * f64::from(seconds) / 60.0).ceil() as usize)
-                        .max(1)
-                }
-                TestMode::Quote => 0,
-            };
             let targets = statistics
                 .priority_words
                 .iter()
@@ -865,29 +874,29 @@ impl App {
             } else if config.adaptive && self.policy_version == CURRENT_POLICY_VERSION {
                 let (candidates, _) = session_word_pool(
                     configured_words,
-                    config,
+                    &config,
                     &self.adaptive,
                     SessionKind::Practice,
                 );
                 self.adaptive
-                    .estimated_session_uplifts_with_number_probability(
+                    .estimated_reached_uplifts_with_number_probability(
                         &config.language,
                         &targets,
                         &candidates,
-                        draws,
+                        &self.reach_profile,
                         if config.numbers { 0.1 } else { 0.0 },
                     )
             } else {
                 HashMap::new()
             };
             for word in &mut statistics.priority_words {
-                word.estimated_session_chance = chances.get(&word.word).copied().unwrap_or(0.0);
+                word.estimated_exposure_uplift = chances.get(&word.word).copied().unwrap_or(0.0);
             }
 
             if config.adaptive && self.policy_version == CURRENT_POLICY_VERSION {
                 let (candidates, _) = session_word_pool(
                     configured_words,
-                    config,
+                    &config,
                     &self.adaptive,
                     SessionKind::Practice,
                 );
@@ -910,20 +919,20 @@ impl App {
                     .collect::<Vec<_>>();
                 let uplifts = self
                     .adaptive
-                    .estimated_session_group_uplifts_with_number_probability(
+                    .estimated_reached_group_uplifts_with_number_probability(
                         &config.language,
                         &groups,
                         &candidates,
-                        draws,
+                        &self.reach_profile,
                         if config.numbers { 0.1 } else { 0.0 },
                     );
                 for (pattern, uplift) in statistics.priority_patterns.iter_mut().zip(uplifts) {
-                    pattern.estimated_session_chance = uplift;
+                    pattern.estimated_exposure_uplift = uplift;
                 }
                 statistics.priority_patterns.sort_by(|left, right| {
                     right
-                        .estimated_session_chance
-                        .total_cmp(&left.estimated_session_chance)
+                        .estimated_exposure_uplift
+                        .total_cmp(&left.estimated_exposure_uplift)
                         .then_with(|| right.difficulty.total_cmp(&left.difficulty))
                 });
             }
@@ -966,7 +975,7 @@ impl App {
         self.statistics_detail = repository
             .word_detail(&priority.language, &priority.word)?
             .map(|mut detail| {
-                detail.priority.estimated_session_chance = priority.estimated_session_chance;
+                detail.priority.estimated_exposure_uplift = priority.estimated_exposure_uplift;
                 detail
             });
         Ok(())
@@ -1008,8 +1017,8 @@ impl App {
 
 fn sort_priority_words_by_uplift(words: &mut [PriorityWord]) {
     let uplift = |word: &PriorityWord| {
-        if word.estimated_session_chance.is_finite() {
-            word.estimated_session_chance
+        if word.estimated_exposure_uplift.is_finite() {
+            word.estimated_exposure_uplift
         } else {
             0.0
         }
@@ -2103,6 +2112,16 @@ struct ShadowTest {
     selections: Vec<Option<tuipe::adaptive::WordSelection>>,
 }
 
+const TIMED_TEST_BUFFER_WORDS: usize = 120;
+
+fn reach_profile_positions(config: &tuipe::typing::TestConfig) -> usize {
+    match config.mode {
+        TestMode::Words { count } => usize::from(count),
+        TestMode::Time { .. } => TIMED_TEST_BUFFER_WORDS,
+        TestMode::Quote => 0,
+    }
+}
+
 fn new_test(
     catalog: &ContentCatalog,
     config: &tuipe::typing::TestConfig,
@@ -2110,6 +2129,7 @@ fn new_test(
     adaptive: &AdaptiveSampler,
     session_kind: SessionKind,
     policy_version: u16,
+    reach_profile: &ReachProfile,
 ) -> Result<GeneratedTest> {
     let mut rng = SmallRng::seed_from_u64(seed);
     let (words, generator, selections, quote) = match config.mode {
@@ -2128,17 +2148,31 @@ fn new_test(
             (without_last_commit(words), None, selections, Some(quote))
         }
         TestMode::Words { count } => {
-            let mut generator =
-                word_generator(catalog, config, rng, adaptive, session_kind, policy_version)?;
+            let mut generator = word_generator(
+                catalog,
+                config,
+                rng,
+                adaptive,
+                session_kind,
+                policy_version,
+                reach_profile,
+            )?;
             let (words, selections) = generate(&mut generator, usize::from(count));
             (without_last_commit(words), None, selections, None)
         }
         TestMode::Time { .. } => {
-            let mut generator =
-                word_generator(catalog, config, rng, adaptive, session_kind, policy_version)?;
+            let mut generator = word_generator(
+                catalog,
+                config,
+                rng,
+                adaptive,
+                session_kind,
+                policy_version,
+                reach_profile,
+            )?;
             // O buffer inicial precisa preencher três linhas reais também em
             // terminais ultrawide, como o gerador contínuo do Monkeytype.
-            let (words, selections) = generate(&mut generator, 120);
+            let (words, selections) = generate(&mut generator, TIMED_TEST_BUFFER_WORDS);
             (words, Some(generator), selections, None)
         }
     };
@@ -2157,6 +2191,7 @@ fn shadow_test(
     adaptive: &AdaptiveSampler,
     session_kind: SessionKind,
     shadow_version: Option<u16>,
+    reach_profile: &ReachProfile,
 ) -> Result<ShadowTest> {
     let Some(shadow_version) = shadow_version else {
         return Ok(ShadowTest {
@@ -2182,6 +2217,7 @@ fn shadow_test(
         adaptive,
         session_kind,
         shadow_version,
+        reach_profile,
     )?;
     let stimuli = engine
         .targets()
@@ -2202,6 +2238,7 @@ fn word_generator(
     adaptive: &AdaptiveSampler,
     session_kind: SessionKind,
     policy_version: u16,
+    reach_profile: &ReachProfile,
 ) -> Result<WordGenerator<SmallRng>> {
     let configured_words = catalog
         .word_pack(&config.language, &config.word_pack)
@@ -2212,7 +2249,7 @@ fn word_generator(
     Ok(match session_kind {
         SessionKind::Assessment => generator.with_assessment(),
         SessionKind::Practice if config.adaptive && policy_version == CURRENT_POLICY_VERSION => {
-            generator.with_adaptive(&config.language, adaptive.clone())
+            generator.with_adaptive(&config.language, adaptive.clone(), reach_profile.clone())
         }
         SessionKind::Retention => generator.with_forced_words(retention_words),
         SessionKind::Practice | SessionKind::Transfer | SessionKind::Repeat => generator,
@@ -2288,6 +2325,7 @@ fn estimated_generator_chances(
             adaptive,
             session_kind,
             policy_version,
+            &ReachProfile::certain(draws),
         )?;
         let mut seen = HashSet::<String>::new();
         for _ in 0..draws {
@@ -2612,7 +2650,7 @@ mod tests {
             effective_exposures: 3.0,
             uncorrected_error_rate: 0.0,
             corrected_error_rate: 0.0,
-            estimated_session_chance: uplift,
+            estimated_exposure_uplift: uplift,
         };
         let mut words = vec![
             priority("por", 0.0, 0.9),
@@ -2853,7 +2891,7 @@ mod tests {
     }
 
     #[test]
-    fn chance_adaptativa_considera_os_draws_substituidos_por_numeros() {
+    fn presenca_gerada_considera_posicoes_substituidas_por_numeros() {
         let catalog = ContentCatalog::bundled().unwrap();
         let adaptive = AdaptiveSampler::default();
         let config = tuipe::typing::TestConfig::default();
@@ -2861,14 +2899,14 @@ mod tests {
             .word_pack(&config.language, &config.word_pack)
             .unwrap()
             .to_vec();
-        let plain_chances = adaptive.estimated_session_chances_with_number_probability(
+        let plain_chances = adaptive.estimated_generated_chances_with_number_probability(
             &config.language,
             &targets,
             &targets,
             30,
             0.0,
         );
-        let numbered_chances = adaptive.estimated_session_chances_with_number_probability(
+        let numbered_chances = adaptive.estimated_generated_chances_with_number_probability(
             &config.language,
             &targets,
             &targets,

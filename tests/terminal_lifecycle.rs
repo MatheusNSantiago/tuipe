@@ -191,17 +191,17 @@ fn rollback_da_politica_funciona_pela_interface_operacional() {
 
     let status = command("status");
     assert!(status.status.success());
-    assert!(String::from_utf8_lossy(&status.stdout).contains("adaptativa v2"));
+    assert!(String::from_utf8_lossy(&status.stdout).contains("adaptativa v3"));
 
     let rollback = command("rollback");
     assert!(rollback.status.success());
     let output = String::from_utf8_lossy(&rollback.stdout);
     assert!(output.contains("uniforme (modo seguro)"));
-    assert!(output.contains("shadow: adaptativa v2"));
+    assert!(output.contains("shadow: adaptativa v3"));
 
     let restore = command("rollback");
     assert!(restore.status.success());
-    assert!(String::from_utf8_lossy(&restore.stdout).contains("política ativa: adaptativa v2"));
+    assert!(String::from_utf8_lossy(&restore.stdout).contains("política ativa: adaptativa v3"));
 }
 
 #[test]

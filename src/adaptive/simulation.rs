@@ -2,14 +2,14 @@ use std::collections::{HashMap, HashSet};
 
 use rand::{Rng, SeedableRng, rngs::SmallRng};
 
-use super::{AdaptiveSampler, Observation};
+use super::{AdaptiveSampler, Observation, ReachProfile};
 
 /// Simulação longitudinal determinística. Ela não pretende provar os
 /// coeficientes; impede regressões óbvias de cobertura, explosão e aprendizado.
 #[test]
 fn duas_mil_sessoes_preservam_cobertura_e_encontram_dificuldade_real() {
     const SESSIONS: usize = 2_000;
-    const DRAWS: usize = 12;
+    const MAX_POSITIONS: usize = 14;
     let words = (0..80)
         // Grafemas sintéticos isolam a política lexical do custo dos n-gramas;
         // estes possuem uma simulação específica nos testes do modelo.
@@ -20,13 +20,23 @@ fn duas_mil_sessoes_preservam_cobertura_e_encontram_dificuldade_real() {
     let mut rng = SmallRng::seed_from_u64(0x5eed);
     let mut counts = HashMap::<String, usize>::new();
     let mut coverage = HashSet::<String>::new();
+    let reach = ReachProfile::from_reached_counts([8, 10, 12, 14], MAX_POSITIONS);
+    let mut reached_total = 0_usize;
 
     for _ in 0..SESSIONS {
+        let reached = reach.sample_reached(&mut rng);
+        reached_total += reached;
         let mut previous = Vec::<String>::new();
-        for _ in 0..DRAWS {
+        for position in 0..reached {
             let guard = previous.iter().map(String::as_str).collect::<Vec<_>>();
             let selected = sampler
-                .sample_with_provenance("portuguese", &words, &guard, &mut rng)
+                .sample_with_provenance_at_reach(
+                    "portuguese",
+                    &words,
+                    &guard,
+                    reach.probability(position),
+                    &mut rng,
+                )
                 .word
                 .to_owned();
             *counts.entry(selected.clone()).or_default() += 1;
@@ -52,8 +62,14 @@ fn duas_mil_sessoes_preservam_cobertura_e_encontram_dificuldade_real() {
 
     let hard_count = counts[&hard];
     let average = counts.values().sum::<usize>() as f64 / words.len() as f64;
-    let hard_share = hard_count as f64 / (SESSIONS * DRAWS) as f64;
-    let session_chance = sampler.estimated_session_chance("portuguese", &hard, &words, DRAWS);
+    let hard_share = hard_count as f64 / reached_total as f64;
+    let exposure_uplift = sampler.estimated_reached_uplifts_with_number_probability(
+        "portuguese",
+        std::slice::from_ref(&hard),
+        &words,
+        &reach,
+        0.0,
+    )[&hard];
     assert_eq!(coverage.len(), words.len(), "a mistura perdeu cobertura");
     assert!(
         hard_count as f64 > average * 1.15,
@@ -61,7 +77,7 @@ fn duas_mil_sessoes_preservam_cobertura_e_encontram_dificuldade_real() {
     );
     assert!(hard_share < 0.05, "uma palavra dominou o currículo");
     assert!(
-        session_chance <= 0.40,
+        exposure_uplift <= 0.40,
         "o sequenciador ultrapassou o teto de uma palavra"
     );
 }

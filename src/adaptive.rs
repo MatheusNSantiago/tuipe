@@ -23,10 +23,101 @@ use unicode_segmentation::UnicodeSegmentation;
 mod simulation;
 
 pub const UNIFORM_POLICY_VERSION: u16 = 0;
-pub const CURRENT_POLICY_VERSION: u16 = 2;
+pub const CURRENT_POLICY_VERSION: u16 = 3;
 /// Sinal abaixo deste valor ainda é ruído e não deve ser apresentado como uma
 /// dificuldade acionável para o usuário.
 pub const MINIMUM_ACTIONABLE_DIFFICULTY: f64 = 0.01;
+
+/// Probabilidade de uma pessoa alcançar cada posição do teste na próxima
+/// sessão. A curva é monotônica por construção: alcançar a posição `i + 1`
+/// implica ter alcançado `i`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ReachProfile {
+    survival: Vec<f64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReachObservation {
+    pub reached: usize,
+    /// `true` quando a sessão realmente terminou nessa posição; `false`
+    /// representa apenas censura porque o teste observado era mais curto.
+    pub terminal: bool,
+}
+
+impl ReachProfile {
+    /// Constrói a curva empírica a partir da quantidade de posições realmente
+    /// iniciadas em sessões comparáveis.
+    pub fn from_reached_counts(
+        reached_counts: impl IntoIterator<Item = usize>,
+        positions: usize,
+    ) -> Self {
+        Self::from_observations(
+            reached_counts.into_iter().map(|reached| ReachObservation {
+                reached,
+                terminal: true,
+            }),
+            positions,
+        )
+    }
+
+    /// Estima a sobrevivência sem interpretar sessões mais curtas como falha
+    /// em posições que elas nunca tiveram tempo de alcançar.
+    pub fn from_observations(
+        observations: impl IntoIterator<Item = ReachObservation>,
+        positions: usize,
+    ) -> Self {
+        let observations = observations.into_iter().collect::<Vec<_>>();
+        if observations.is_empty() || positions == 0 {
+            return Self::default();
+        }
+        let mut probability = 1.0;
+        let mut survival = Vec::with_capacity(positions);
+        for position in 0..positions {
+            let at_risk = observations
+                .iter()
+                .filter(|observation| {
+                    observation.reached > position
+                        || observation.terminal && observation.reached == position
+                })
+                .count();
+            if at_risk == 0 {
+                probability = 0.0;
+            } else {
+                let endings = observations
+                    .iter()
+                    .filter(|observation| observation.terminal && observation.reached == position)
+                    .count();
+                probability *= 1.0 - endings as f64 / at_risk as f64;
+            }
+            survival.push(probability);
+        }
+        Self { survival }
+    }
+
+    /// Perfil usado quando todas as posições informadas são necessariamente
+    /// alcançadas, principalmente em testes unitários do sequenciador.
+    pub fn certain(positions: usize) -> Self {
+        Self {
+            survival: vec![1.0; positions],
+        }
+    }
+
+    pub fn probability(&self, position: usize) -> f64 {
+        self.survival.get(position).copied().unwrap_or(0.0)
+    }
+
+    pub fn positions(&self) -> usize {
+        self.survival.len()
+    }
+
+    fn sample_reached<R: Rng>(&self, rng: &mut R) -> usize {
+        let threshold: f64 = rng.random();
+        self.survival
+            .iter()
+            .take_while(|probability| threshold < **probability)
+            .count()
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AdaptivePolicy {
@@ -548,19 +639,19 @@ impl AdaptiveSampler {
             .collect()
     }
 
-    pub fn estimated_session_chances(
+    pub fn estimated_generated_chances(
         &self,
         language: &str,
         targets: &[String],
         candidates: &[String],
         draws: usize,
     ) -> HashMap<String, f64> {
-        self.estimated_session_chances_with_number_probability(
+        self.estimated_generated_chances_with_number_probability(
             language, targets, candidates, draws, 0.0,
         )
     }
 
-    pub fn estimated_session_chances_with_number_probability(
+    pub fn estimated_generated_chances_with_number_probability(
         &self,
         language: &str,
         targets: &[String],
@@ -572,7 +663,7 @@ impl AdaptiveSampler {
             .iter()
             .map(|target| vec![target.clone()])
             .collect::<Vec<_>>();
-        let chances = self.estimated_session_group_chances_with_number_probability(
+        let chances = self.estimated_generated_group_chances_with_number_probability(
             language,
             &groups,
             candidates,
@@ -582,7 +673,7 @@ impl AdaptiveSampler {
         targets.iter().cloned().zip(chances).collect()
     }
 
-    fn estimated_session_group_chances_with_number_probability(
+    fn estimated_generated_group_chances_with_number_probability(
         &self,
         language: &str,
         target_groups: &[Vec<String>],
@@ -590,10 +681,27 @@ impl AdaptiveSampler {
         draws: usize,
         number_probability: f64,
     ) -> Vec<f64> {
-        if target_groups.is_empty() || candidates.is_empty() || draws == 0 {
+        self.estimated_reached_group_chances_with_number_probability(
+            language,
+            target_groups,
+            candidates,
+            &ReachProfile::certain(draws),
+            number_probability,
+        )
+    }
+
+    fn estimated_reached_group_chances_with_number_probability(
+        &self,
+        language: &str,
+        target_groups: &[Vec<String>],
+        candidates: &[String],
+        reach: &ReachProfile,
+        number_probability: f64,
+    ) -> Vec<f64> {
+        if target_groups.is_empty() || candidates.is_empty() || reach.positions() == 0 {
             return vec![0.0; target_groups.len()];
         }
-        const TRIALS: usize = 128;
+        const TRIALS: usize = 2_048;
         let number_probability = number_probability.clamp(0.0, 1.0);
         let target_sets = target_groups
             .iter()
@@ -629,29 +737,35 @@ impl AdaptiveSampler {
         language.hash(&mut hasher);
         target_groups.hash(&mut hasher);
         candidates.len().hash(&mut hasher);
-        draws.hash(&mut hasher);
+        reach
+            .survival
+            .iter()
+            .for_each(|probability| probability.to_bits().hash(&mut hasher));
         number_probability.to_bits().hash(&mut hasher);
         let mut rng = SmallRng::seed_from_u64(hasher.finish());
         for _ in 0..TRIALS {
+            let reached = reach.sample_reached(&mut rng);
             let mut previous = Vec::<usize>::new();
             let mut seen = vec![false; target_groups.len()];
-            for _ in 0..draws {
+            for position in 0..reached {
                 if number_probability > 0.0 && rng.random_bool(number_probability) {
                     continue;
                 }
-                let source = if !has_signal {
+                let reach_probability = reach.probability(position);
+                let targeted_share = self.policy.targeted_share * reach_probability;
+                let exploration_share = self.policy.exploration_share * reach_probability;
+                let transfer_share = self.policy.transfer_share * reach_probability;
+                let representative_share =
+                    1.0 - targeted_share - exploration_share - transfer_share;
+                let source = if !has_signal || reach_probability == 0.0 {
                     SelectionSource::Representative
                 } else {
                     let roll: f64 = rng.random();
-                    if roll < self.policy.representative_share {
+                    if roll < representative_share {
                         SelectionSource::Representative
-                    } else if roll < self.policy.representative_share + self.policy.targeted_share {
+                    } else if roll < representative_share + targeted_share {
                         SelectionSource::Targeted
-                    } else if roll
-                        < self.policy.representative_share
-                            + self.policy.targeted_share
-                            + self.policy.exploration_share
-                    {
+                    } else if roll < representative_share + targeted_share + exploration_share {
                         SelectionSource::Exploration
                     } else {
                         SelectionSource::Transfer
@@ -687,9 +801,64 @@ impl AdaptiveSampler {
             .collect()
     }
 
-    /// Estima somente o aumento causado pelo modelo adaptativo, descontando a
-    /// chance que qualquer palavra já teria no sorteio representativo.
-    pub fn estimated_session_uplifts_with_number_probability(
+    /// Estima a chance de a pessoa realmente começar a digitar cada palavra,
+    /// em vez da mera presença em alguma posição do buffer gerado.
+    pub fn estimated_reached_uplifts_with_number_probability(
+        &self,
+        language: &str,
+        targets: &[String],
+        candidates: &[String],
+        reach: &ReachProfile,
+        number_probability: f64,
+    ) -> HashMap<String, f64> {
+        let groups = targets
+            .iter()
+            .map(|target| vec![target.clone()])
+            .collect::<Vec<_>>();
+        let uplifts = self.estimated_reached_group_uplifts_with_number_probability(
+            language,
+            &groups,
+            candidates,
+            reach,
+            number_probability,
+        );
+        targets.iter().cloned().zip(uplifts).collect()
+    }
+
+    /// Estima o aumento da exposição real a qualquer palavra de cada grupo.
+    pub fn estimated_reached_group_uplifts_with_number_probability(
+        &self,
+        language: &str,
+        target_groups: &[Vec<String>],
+        candidates: &[String],
+        reach: &ReachProfile,
+        number_probability: f64,
+    ) -> Vec<f64> {
+        let adaptive = self.estimated_reached_group_chances_with_number_probability(
+            language,
+            target_groups,
+            candidates,
+            reach,
+            number_probability,
+        );
+        let representative = Self::new(self.policy)
+            .estimated_reached_group_chances_with_number_probability(
+                language,
+                target_groups,
+                candidates,
+                reach,
+                number_probability,
+            );
+        adaptive
+            .into_iter()
+            .zip(representative)
+            .map(|(adaptive, representative)| (adaptive - representative).max(0.0))
+            .collect()
+    }
+
+    /// Mede presença entre posições geradas e certamente alcançadas. Esta API
+    /// existe para validação do sampler; a interface usa exposição alcançada.
+    pub fn estimated_generated_uplifts_with_number_probability(
         &self,
         language: &str,
         targets: &[String],
@@ -697,7 +866,7 @@ impl AdaptiveSampler {
         draws: usize,
         number_probability: f64,
     ) -> HashMap<String, f64> {
-        let adaptive = self.estimated_session_chances_with_number_probability(
+        let adaptive = self.estimated_generated_chances_with_number_probability(
             language,
             targets,
             candidates,
@@ -705,7 +874,7 @@ impl AdaptiveSampler {
             number_probability,
         );
         let representative = Self::new(self.policy)
-            .estimated_session_chances_with_number_probability(
+            .estimated_generated_chances_with_number_probability(
                 language,
                 targets,
                 candidates,
@@ -723,9 +892,8 @@ impl AdaptiveSampler {
             .collect()
     }
 
-    /// Estima o aumento da chance de ao menos um item de cada grupo aparecer
-    /// na sessão, sempre contra o mesmo sorteio representativo usado na tela.
-    pub fn estimated_session_group_uplifts_with_number_probability(
+    /// Equivalente agrupado da presença em posições certamente alcançadas.
+    pub fn estimated_generated_group_uplifts_with_number_probability(
         &self,
         language: &str,
         target_groups: &[Vec<String>],
@@ -733,7 +901,7 @@ impl AdaptiveSampler {
         draws: usize,
         number_probability: f64,
     ) -> Vec<f64> {
-        let adaptive = self.estimated_session_group_chances_with_number_probability(
+        let adaptive = self.estimated_generated_group_chances_with_number_probability(
             language,
             target_groups,
             candidates,
@@ -741,7 +909,7 @@ impl AdaptiveSampler {
             number_probability,
         );
         let representative = Self::new(self.policy)
-            .estimated_session_group_chances_with_number_probability(
+            .estimated_generated_group_chances_with_number_probability(
                 language,
                 target_groups,
                 candidates,
@@ -755,14 +923,14 @@ impl AdaptiveSampler {
             .collect()
     }
 
-    pub fn estimated_session_chance(
+    pub fn estimated_generated_chance(
         &self,
         language: &str,
         word: &str,
         candidates: &[String],
         draws: usize,
     ) -> f64 {
-        self.estimated_session_chances(language, &[word.to_owned()], candidates, draws)
+        self.estimated_generated_chances(language, &[word.to_owned()], candidates, draws)
             .get(word)
             .copied()
             .unwrap_or(0.0)
@@ -834,6 +1002,20 @@ impl AdaptiveSampler {
         previous: &[&str],
         rng: &mut R,
     ) -> SelectedWord<'a> {
+        self.sample_with_provenance_at_reach(language, candidates, previous, 1.0, rng)
+    }
+
+    /// Sorteia uma palavra reduzindo suavemente apenas a parcela adaptativa
+    /// quando a posição provavelmente não será alcançada. O componente
+    /// representativo permanece intacto em todo o buffer.
+    pub fn sample_with_provenance_at_reach<'a, R: Rng>(
+        &self,
+        language: &str,
+        candidates: &'a [String],
+        previous: &[&str],
+        reach_probability: f64,
+        rng: &mut R,
+    ) -> SelectedWord<'a> {
         let eligible = candidates
             .iter()
             .filter(|word| !previous.contains(&word.as_str()))
@@ -872,19 +1054,20 @@ impl AdaptiveSampler {
             &uniform,
         );
         let has_signal = targeted != uniform || exploration != uniform || transfer != uniform;
-        let source = if !has_signal {
+        let reach_probability = reach_probability.clamp(0.0, 1.0);
+        let targeted_share = self.policy.targeted_share * reach_probability;
+        let exploration_share = self.policy.exploration_share * reach_probability;
+        let transfer_share = self.policy.transfer_share * reach_probability;
+        let representative_share = 1.0 - targeted_share - exploration_share - transfer_share;
+        let source = if !has_signal || reach_probability == 0.0 {
             SelectionSource::Representative
         } else {
             let roll: f64 = rng.random();
-            if roll < self.policy.representative_share {
+            if roll < representative_share {
                 SelectionSource::Representative
-            } else if roll < self.policy.representative_share + self.policy.targeted_share {
+            } else if roll < representative_share + targeted_share {
                 SelectionSource::Targeted
-            } else if roll
-                < self.policy.representative_share
-                    + self.policy.targeted_share
-                    + self.policy.exploration_share
-            {
+            } else if roll < representative_share + targeted_share + exploration_share {
                 SelectionSource::Exploration
             } else {
                 SelectionSource::Transfer
@@ -899,10 +1082,10 @@ impl AdaptiveSampler {
         let index = WeightedIndex::new(selected_distribution)
             .expect("distribuição adaptativa é finita e não vazia")
             .sample(rng);
-        let propensity = self.policy.representative_share * uniform[index]
-            + self.policy.targeted_share * targeted[index]
-            + self.policy.exploration_share * exploration[index]
-            + self.policy.transfer_share * transfer[index];
+        let propensity = representative_share * uniform[index]
+            + targeted_share * targeted[index]
+            + exploration_share * exploration[index]
+            + transfer_share * transfer[index];
         SelectedWord {
             word: eligible[index],
             source,
@@ -1214,7 +1397,7 @@ mod tests {
     }
 
     #[test]
-    fn uma_correcao_isolada_nao_cria_aumento_relevante_na_sessao() {
+    fn uma_correcao_isolada_nao_cria_aumento_relevante_no_sorteio() {
         let words = (0..200)
             .map(|index| format!("palavra{index}"))
             .collect::<Vec<_>>();
@@ -1225,7 +1408,7 @@ mod tests {
             Observation::regular(false, true, false),
         );
 
-        let uplifts = sampler.estimated_session_uplifts_with_number_probability(
+        let uplifts = sampler.estimated_generated_uplifts_with_number_probability(
             "portuguese",
             &[words[0].clone()],
             &words,
@@ -1277,18 +1460,107 @@ mod tests {
     }
 
     #[test]
+    fn curva_de_alcance_e_a_distribuicao_empirica_das_posicoes_digitadas() {
+        let profile = ReachProfile::from_reached_counts([2, 4], 5);
+
+        assert_eq!(profile.probability(0), 1.0);
+        assert_eq!(profile.probability(1), 1.0);
+        assert_eq!(profile.probability(2), 0.5);
+        assert_eq!(profile.probability(3), 0.5);
+        assert_eq!(profile.probability(4), 0.0);
+    }
+
+    #[test]
+    fn sessao_curta_e_censura_em_vez_de_falha_de_alcance() {
+        let profile = ReachProfile::from_observations(
+            [
+                ReachObservation {
+                    reached: 2,
+                    terminal: false,
+                },
+                ReachObservation {
+                    reached: 4,
+                    terminal: true,
+                },
+            ],
+            5,
+        );
+
+        assert_eq!(profile.probability(2), 1.0);
+        assert_eq!(profile.probability(3), 1.0);
+        assert_eq!(profile.probability(4), 0.0);
+    }
+
+    #[test]
+    fn posicao_inalcancavel_preserva_apenas_a_distribuicao_representativa() {
+        let words = ["alvo", "casa", "tempo", "mundo"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        let mut sampler = AdaptiveSampler::default();
+        for _ in 0..16 {
+            sampler.observe(
+                "portuguese",
+                "alvo",
+                Observation::regular(true, false, false),
+            );
+        }
+        let mut rng = SmallRng::seed_from_u64(7);
+
+        let selected =
+            sampler.sample_with_provenance_at_reach("portuguese", &words, &[], 0.0, &mut rng);
+
+        assert_eq!(selected.source, SelectionSource::Representative);
+        assert_eq!(selected.propensity, 0.25);
+    }
+
+    #[test]
+    fn chance_de_exposicao_ignora_palavras_que_ficam_so_no_buffer() {
+        let words = (0..64)
+            .map(|index| format!("palavra{index}"))
+            .collect::<Vec<_>>();
+        let target = words[0].clone();
+        let mut sampler = AdaptiveSampler::default();
+        for _ in 0..24 {
+            sampler.observe(
+                "portuguese",
+                &target,
+                Observation::regular(true, false, false),
+            );
+        }
+        let reach = ReachProfile::from_reached_counts([1], 20);
+
+        let reached = sampler.estimated_reached_uplifts_with_number_probability(
+            "portuguese",
+            std::slice::from_ref(&target),
+            &words,
+            &reach,
+            0.0,
+        )[&target];
+        let merely_generated = sampler.estimated_generated_uplifts_with_number_probability(
+            "portuguese",
+            std::slice::from_ref(&target),
+            &words,
+            20,
+            0.0,
+        )[&target];
+
+        assert!(reached < merely_generated);
+    }
+
+    #[test]
     fn simulacao_da_sessao_respeita_o_sequenciador_real() {
         let words = ["a", "b", "c", "d"]
             .into_iter()
             .map(str::to_owned)
             .collect::<Vec<_>>();
         let sampler = AdaptiveSampler::default();
-        let chance = sampler.estimated_session_chance("english", "a", &words, 2);
+        let chance = sampler.estimated_generated_chance("english", "a", &words, 2);
         assert!((0.0..=1.0).contains(&chance));
     }
 
     #[test]
-    fn aumento_do_padrao_mede_a_chance_do_grupo_na_sessao() {
+    fn presenca_gerada_do_padrao_mede_o_grupo_inteiro() {
         let observation = Observation::regular(true, false, false);
         let mut skill = NgramSkill::default();
         for word in ["primeiro", "principal", "privado"] {
@@ -1325,7 +1597,7 @@ mod tests {
             "privado".into(),
         ]];
 
-        let uplift = sampler.estimated_session_group_uplifts_with_number_probability(
+        let uplift = sampler.estimated_generated_group_uplifts_with_number_probability(
             "portuguese",
             &groups,
             &candidates,

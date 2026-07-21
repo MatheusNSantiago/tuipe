@@ -6,7 +6,7 @@ use unicode_segmentation::UnicodeSegmentation;
 
 use crate::adaptive::{
     AdaptiveSampler, MECHANIC_CAPITALIZATION, MECHANIC_COMMA, MECHANIC_FINAL_PUNCTUATION,
-    SelectionSource, WordSelection,
+    ReachProfile, SelectionSource, WordSelection,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -137,6 +137,7 @@ impl<R: Rng> UniformWordGenerator<R> {
         &mut self,
         sampler: &AdaptiveSampler,
         language: &str,
+        reach_probability: f64,
     ) -> WordSelection {
         let previous = self
             .previous
@@ -144,8 +145,13 @@ impl<R: Rng> UniformWordGenerator<R> {
             .flatten()
             .map(String::as_str)
             .collect::<Vec<_>>();
-        let selected =
-            sampler.sample_with_provenance(language, &self.words, &previous, &mut self.rng);
+        let selected = sampler.sample_with_provenance_at_reach(
+            language,
+            &self.words,
+            &previous,
+            reach_probability,
+            &mut self.rng,
+        );
         let candidate = selected.word.nfc().collect::<String>();
         self.previous.rotate_right(1);
         self.previous[0] = Some(candidate.clone());
@@ -176,7 +182,8 @@ pub struct WordGenerator<R> {
     punctuation: bool,
     numbers: bool,
     sentence_start: bool,
-    adaptive: Option<(String, AdaptiveSampler)>,
+    adaptive: Option<(String, AdaptiveSampler, ReachProfile)>,
+    position: usize,
     assessment: bool,
     forced: VecDeque<WordSelection>,
 }
@@ -189,13 +196,19 @@ impl<R: Rng> WordGenerator<R> {
             numbers,
             sentence_start: true,
             adaptive: None,
+            position: 0,
             assessment: false,
             forced: VecDeque::new(),
         }
     }
 
-    pub fn with_adaptive(mut self, language: impl Into<String>, sampler: AdaptiveSampler) -> Self {
-        self.adaptive = Some((language.into(), sampler));
+    pub fn with_adaptive(
+        mut self,
+        language: impl Into<String>,
+        sampler: AdaptiveSampler,
+        reach: ReachProfile,
+    ) -> Self {
+        self.adaptive = Some((language.into(), sampler, reach));
         self
     }
 
@@ -221,6 +234,8 @@ impl<R: Rng> WordGenerator<R> {
     }
 
     pub fn next_generated(&mut self) -> GeneratedWord {
+        let position = self.position;
+        self.position = self.position.saturating_add(1);
         if self.forced.is_empty() && self.numbers && self.uniform.rng_mut().random_bool(0.1) {
             return GeneratedWord {
                 text: self.random_number(),
@@ -228,17 +243,18 @@ impl<R: Rng> WordGenerator<R> {
             };
         }
 
-        let selection = if let Some(selection) = self.forced.pop_front() {
-            self.uniform.force(selection)
-        } else {
-            match (&self.adaptive, self.assessment) {
-                (_, true) => self.uniform.next_anchor(),
-                (Some((language, sampler)), false) => {
-                    self.uniform.next_lexical_adaptive(sampler, language)
+        let selection =
+            if let Some(selection) = self.forced.pop_front() {
+                self.uniform.force(selection)
+            } else {
+                match (&self.adaptive, self.assessment) {
+                    (_, true) => self.uniform.next_anchor(),
+                    (Some((language, sampler, reach)), false) => self
+                        .uniform
+                        .next_lexical_adaptive(sampler, language, reach.probability(position)),
+                    (None, false) => self.uniform.next_lexical_with_provenance(),
                 }
-                (None, false) => self.uniform.next_lexical_with_provenance(),
-            }
-        };
+            };
         let mut word = selection.word.clone();
         if !self.punctuation {
             return GeneratedWord {
@@ -254,7 +270,7 @@ impl<R: Rng> WordGenerator<R> {
         let (final_boost, comma_boost) =
             self.adaptive
                 .as_ref()
-                .map_or((1.0, 1.0), |(language, sampler)| {
+                .map_or((1.0, 1.0), |(language, sampler, _)| {
                     (
                         sampler
                             .mechanic_boost(language, MECHANIC_FINAL_PUNCTUATION)

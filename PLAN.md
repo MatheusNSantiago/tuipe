@@ -241,9 +241,16 @@ Usar SQLite em WAL mode e transacoes curtas. A documentacao oficial explica conc
 - Em `quote`, a evidencia atualiza palavras conhecidas, mas nunca influencia a escolha da citacao.
 - Cold start e exatamente uniforme, igual ao Monkeytype.
 - A selecao permanece suave: a maioria absoluta das palavras vem da distribuicao comum.
-- Alvo inicial: aproximadamente 90% de chance de ao menos uma selecao adaptativa numa sessao, desde que haja evidencia suficiente.
-- Uma palavra individual muito problematica raramente deve superar 40% de chance total de aparecer na sessao. Se a chance uniforme natural ja for maior em um teste muito longo, o adaptativo nao a reduz; ele apenas nao aumenta alem do baseline.
 - Nao ha garantia, fila, quota rigida ou cooldown.
+- A chance de uma palavra significa a probabilidade de o usuario realmente
+  comecar a digita-la, nao a probabilidade de ela existir em alguma posicao do
+  buffer.
+- Cada contexto comparavel aprende uma curva empirica de alcance a partir das
+  posicoes que receberam entrada real. A parcela adaptativa diminui junto dessa
+  curva; a distribuicao representativa permanece intacta.
+- Posicoes reservadas, faixas fixas por duracao e metas inteiras de exposicao
+  sao proibidas. A posicao resulta do mesmo sorteio probabilistico usado pelo
+  restante do texto.
 - Nao existe estado binario de palavra "dominada"; habilidade e dificuldade sao estimativas continuas.
 - Nao selecionar uma mesma palavra por boost mais vezes que o peso naturalmente produzir; a propria probabilidade controla repeticao.
 - Usar uma curva S/sigmoide saturante. Pouca evidencia quase nao altera a chance; evidencia recorrente acelera o aumento; casos extremos aproximam-se do teto sem explodir.
@@ -284,11 +291,25 @@ Implementar o modelo em tres camadas, mantendo os coeficientes ajustaveis no cod
 
 Combinar os sinais num `difficulty_score`, multiplicar por confianca/amostragem e passar pela sigmoide. Converter o boost em peso de sorteio sem mudar a massa uniforme mais que o necessario.
 
-Para calibrar chance por sessao:
+Para calibrar a chance de exposicao:
 
-- `words`: o numero de draws e conhecido;
-- `time`: estimar draws pela mediana pessoal recente, com fallback conservador no cold start;
-- validar a chance real por simulacao, pois a regra de nao repetir as duas palavras anteriores quebra a independencia perfeita dos draws.
+- reconstruir dos eventos brutos quantas posicoes receberam ao menos uma
+  entrada em cada tentativa valida ou falha real de um contexto comparavel;
+- normalizar duracoes menores sem extrapolar alcance que nunca foi observado;
+- tratar o fim de uma configuracao mais curta como censura, nao como falha nas
+  posicoes posteriores;
+- estimar `P(alcancar i)` com a curva de sobrevivencia dessas tentativas;
+- multiplicar por `P(alcancar i)` somente as parcelas direcionada, exploratoria
+  e de transferencia do sorteio na posicao `i`;
+- simular o ponto de parada, numeros e a exclusao das duas palavras anteriores
+  com o sequenciador real;
+- comparar a probabilidade de digitar o alvo no fluxo adaptativo com a mesma
+  probabilidade no fluxo representativo. A diferenca e o aumento mostrado na
+  interface.
+
+Sem historico comparavel, a curva de alcance e desconhecida e o fluxo permanece
+representativo. Isso nao prejudica o cold start, que ainda nao possui evidencia
+acionavel, e evita inventar uma velocidade universal.
 
 Nao esconder heuristica ruim com regras especiais. Ajustar pesos e curva com simulacao e dados reais.
 
@@ -296,7 +317,7 @@ Nao esconder heuristica ruim com regras especiais. Ajustar pesos e curva com sim
 
 Na tela principal de estatisticas, mostrar somente uma pequena lista de palavras prioritarias, tendencia e indicador visual discreto. Drill-down por palavra mostra progressivamente:
 
-- chance estimada de aparecer numa sessao adaptativa;
+- aumento estimado da chance de realmente digitar a palavra na proxima sessao;
 - erros, correcoes e acertos;
 - velocidade ativa contra baseline;
 - quantidade e recencia das amostras;
@@ -399,7 +420,9 @@ Streak:
 - [x] Implementar reset por palavra/modelo e versionamento/rebuild.
 - [x] Criar simulador deterministico de milhares de sessoes para calibracao.
 
-**Pronto quando:** cold start continua uniforme; o boost e incremental; ha ~90% de chance de alguma revisao com evidencia suficiente; nenhuma palavra e levada acima do teto adaptativo; AFK nao altera dificuldade.
+**Pronto quando:** cold start continua uniforme; o boost e incremental; o
+percentual mostrado mede exposicao realmente alcancada; posicoes improvaveis nao
+recebem aumento artificial; AFK nao altera dificuldade.
 
 ### Fase 6 — stats, XP e streak
 

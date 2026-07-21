@@ -1,6 +1,6 @@
 # Modelo de treinamento adaptativo do tuipe
 
-Status: especificação de pesquisa e registro de implementação, 19 de julho de
+Status: especificação de pesquisa e registro de implementação, 21 de julho de
 2026.
 
 Este documento define como o tuipe deve medir habilidade, escolher exercícios e
@@ -373,10 +373,11 @@ O gerador deve montar cada sessão a partir de quatro componentes:
 3. **exploração:** reduz incerteza em hipóteses plausíveis;
 4. **transferência:** usa palavras novas que compartilham a habilidade-alvo.
 
-Uma política experimental inicial pode reservar aproximadamente 55%, 25%, 10%
-e 10% para esses componentes. Esses valores são ponto de partida seguro, não
-resultado científico. Devem ser calibrados por retenção, transferência,
-cobertura e experiência subjetiva.
+Uma política experimental inicial pode atribuir aproximadamente 55%, 25%, 10%
+e 10% da massa de sorteio a esses componentes. Isso não reserva posições nem
+impõe quantidades por sessão. Os valores são ponto de partida, não resultado
+científico, e devem ser calibrados por retenção, transferência, cobertura e
+experiência subjetiva.
 
 Restrições do sequenciador:
 
@@ -394,9 +395,41 @@ Restrições do sequenciador:
   restante do idioma;
 - registrar a probabilidade final após todas as restrições.
 
-A chance de uma palavra aparecer na sessão deve vir de simulação ou cálculo do
-sequenciador real. `1 - (1 - p)^n` não é exato quando há exclusão das palavras
-anteriores, mistura de componentes e limites de diversidade.
+### Probabilidade de exposição realmente alcançada
+
+“Chance na próxima sessão” significa a probabilidade de a pessoa efetivamente
+começar a digitar o alvo. Não significa que ele foi colocado em algum lugar do
+buffer. Uma palavra gerada depois do ponto em que o teste normalmente termina
+não constitui exposição e não pode inflar o percentual apresentado.
+
+Para cada contexto comparável — modo, dificuldade, modificadores, idioma e
+vocabulário — o tuipe reconstrói dos eventos brutos a última posição que recebeu
+entrada nas tentativas válidas concluídas e nas falhas reais. Durações menores
+são normalizadas de forma conservadora e nunca usadas para presumir alcance
+além do que foi observado. Elas entram como censura à direita, não como falha
+nas posições que o teste curto nem chegou a oferecer. Uma estimativa de
+Kaplan–Meier produz então a curva `R(i) = P(alcançar a posição i)`. O estado do
+modificador adaptativo não separa as amostras: ele altera o conteúdo, mas não
+define a capacidade da pessoa de avançar naquele contexto.
+
+Na posição `i`, apenas as parcelas direcionada, exploratória e de transferência
+são multiplicadas por `R(i)`. A parcela representativa permanece intacta. Dessa
+forma, regiões raramente alcançadas continuam contendo texto normal, mas quase
+não recebem aumento adaptativo. Não há palavra reservada, faixa privilegiada,
+quota por duração ou quantidade inteira de “oportunidades”.
+
+A chance exibida vem de simulação do sequenciador real. Cada execução sorteia
+um ponto de parada coerente com a curva de alcance e reproduz números, mistura
+de componentes e exclusão das duas palavras anteriores. O aumento é:
+
+```text
+P(digitar o alvo | adaptativo) - P(digitar o alvo | representativo)
+```
+
+Sem histórico comparável, o alcance permanece desconhecido e a parcela
+adaptativa fica inativa. Isso evita inventar uma velocidade universal; no cold
+start também ainda não existe dificuldade acionável. A estimativa é
+probabilística e deve continuar apresentada como aproximada.
 
 ## Avaliação sem contaminação
 
@@ -453,7 +486,8 @@ Para cada palavra, n-grama ou mecânica relevante:
 - exposições efetivas, contextos distintos e recência;
 - incerteza, tendência e retenção estimada;
 - exemplos de palavras de transferência;
-- chance real de aparecer na próxima sessão e o motivo da seleção.
+- aumento estimado da chance de realmente digitar o alvo na próxima sessão e o
+  motivo da seleção.
 
 O histórico recente não deve ser uma tabela de testes heterogêneos sem contexto.
 Ele deve permitir distinguir prática de avaliação e explicar qualquer mudança
@@ -594,11 +628,12 @@ Limitações ainda abertas:
 - [ ] Mostrar fronteira velocidade–precisão e intervalos de incerteza.
 - [x] Exibir diagnóstico explicável de palavras, n-gramas e mecânicas.
 
-### Fase 5 — currículo adaptativo v2
+### Fase 5 — currículo adaptativo v3
 
 - [x] Implementar a mistura representativa/direcionada/exploração/transferência.
 - [x] Aplicar espaçamento, diversidade, holdout e limites de cobertura.
-- [x] Calcular chance de sessão com o sequenciador real.
+- [x] Reconstruir a curva de alcance a partir das posições com entrada real.
+- [x] Calcular exposição alcançada com o sequenciador real, sem contar o buffer.
 - [ ] Validar prospectivamente uma política candidata em shadow mode antes de
   promover uma nova versão.
 - [x] Manter rollback operacional e reversível por versão.

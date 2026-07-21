@@ -151,11 +151,16 @@ e `enter` abre seu diagnóstico.
 
 Na visão geral, `↑`/`↓` ou `j`/`k` percorrem as palavras prioritárias e `enter`
 abre o diagnóstico da palavra. O detalhe mostra apenas o aumento de chance
-causado pelo treino adaptativo, descontando a chance representativa normal,
-além de falhas, correções, ritmo contra a base pessoal, tendência, recência,
-padrões relacionados e tentativas recentes. Uma correção isolada permanece
-abaixo do limiar de dificuldade acionável. As páginas, palavras e sessões
-também podem ser abertas com o mouse.
+de **realmente começar a digitá-la** causado pelo treino adaptativo, descontando
+a chance representativa normal. Palavras apenas geradas depois do ponto em que
+o usuário costuma terminar não entram nessa conta. A estimativa usa a curva de
+alcance reconstruída dos eventos brutos de contextos comparáveis; durações
+menores nunca são extrapoladas além do alcance observado. Sem histórico útil, o
+teste permanece representativo em vez de presumir uma velocidade.
+O detalhe também mostra falhas, correções, ritmo contra a base pessoal,
+tendência, recência, padrões relacionados e tentativas recentes. Uma correção
+isolada permanece abaixo do limiar de dificuldade acionável. As páginas,
+palavras e sessões também podem ser abertas com o mouse.
 
 `r` no detalhe solicita o reset daquela palavra. `R` no panorama solicita o
 reset do modelo adaptativo inteiro. Ambos exigem confirmação e preservam

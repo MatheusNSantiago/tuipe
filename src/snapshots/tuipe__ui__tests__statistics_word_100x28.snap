@@ -3,7 +3,7 @@ source: src/ui.rs
 expression: rendered
 ---
      detalhes da palavra  ·  através  ·  português
-     aumento estimado no próximo treino adaptativo: ≈18%
+     aumento estimado na chance de você digitar esta palavra: ≈18%
      falhas                 correções              exposições             amostras
      30%                    20%                    10                     12
 

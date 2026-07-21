@@ -39,11 +39,15 @@ os dados existentes.
   colunas de escala explícita e barra de comandos separada por divisor;
 - tendência suavizada sobre todas as tentativas válidas e prioridade adaptativa
   que ignora correções isoladas sem evidência suficiente.
+- política adaptativa 3, que reconstrói a curva de alcance pelos eventos brutos,
+  concentra probabilisticamente o aumento nas posições que o usuário costuma
+  alcançar e mostra a chance de exposição digitada em vez da presença no
+  buffer.
 
 ### Validado
 
 - paridade visual dos fluxos de 30 segundos, 50 palavras e citação;
-- 148 testes automatizados em unidade, integração e pseudo-terminal;
+- 155 testes automatizados em unidade, integração e pseudo-terminal;
 - pacote Cargo reproduzível e binário Linux otimizado para glibc 2.29 ou mais
   recente, distribuído com licença e proveniência dos conteúdos;
 - latência p99 abaixo de 1 ms para tecla e resize na máquina de validação.

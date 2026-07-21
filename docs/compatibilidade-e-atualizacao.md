@@ -8,7 +8,7 @@ A versão 0.1 usa:
 - codec de eventos brutos 3, com leitura das versões 1 a 3;
 - métricas 2;
 - modelo adaptativo 2;
-- política de seleção 2.
+- política de seleção 3, com probabilidade condicionada ao alcance real.
 
 O tuipe migra bancos antigos de forma incremental e transacional. Um binário
 antigo nunca tenta reduzir um banco criado por versão mais nova: ele encerra com
@@ -39,6 +39,11 @@ O fallback uniforme preserva a coleta de evidências e nunca apaga o histórico.
 Nesse estado, a política alternativa roda em shadow mode: suas escolhas e
 propensões ficam registradas separadamente na sessão, sem influenciar o texto
 exibido. Isso permite comparar a candidata antes de restaurá-la.
+
+Ao abrir um banco anterior, referências operacionais à política 2 passam para a
+política 3. As sessões históricas preservam a versão com que foram geradas. A
+curva de alcance não exige nova coluna nem inventa dados retroativos: ela é
+reconstruída dos índices presentes nos eventos brutos já armazenados.
 
 ## Reversão
 

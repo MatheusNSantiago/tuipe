@@ -15,8 +15,9 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, pa
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::adaptive::{
-    CURRENT_POLICY_VERSION, MechanicSkill, NgramSkill, Observation, PersonalBaseline, ReviewState,
-    SelectionSource, UNIFORM_POLICY_VERSION, WordSelection, WordSkill, lexical_ngrams,
+    CURRENT_POLICY_VERSION, MechanicSkill, NgramSkill, Observation, PersonalBaseline,
+    ReachObservation, ReachProfile, ReviewState, SelectionSource, UNIFORM_POLICY_VERSION,
+    WordSelection, WordSkill, lexical_ngrams,
 };
 use crate::gamification::{StreakState, XpState, award};
 use crate::persistence::{
@@ -201,7 +202,7 @@ pub struct PriorityWord {
     pub effective_exposures: f64,
     pub uncorrected_error_rate: f64,
     pub corrected_error_rate: f64,
-    pub estimated_session_chance: f64,
+    pub estimated_exposure_uplift: f64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -231,7 +232,7 @@ pub struct PriorityPattern {
     pub model_pattern: String,
     pub kind: &'static str,
     pub difficulty: f64,
-    pub estimated_session_chance: f64,
+    pub estimated_exposure_uplift: f64,
     pub effective_exposures: f64,
     pub uncorrected_error_rate: f64,
     pub corrected_error_rate: f64,
@@ -1428,6 +1429,95 @@ impl Repository {
         self.statistics_overview_for(&TestConfig::default())
     }
 
+    /// Reconstrói a curva de alcance usando somente posições que receberam
+    /// entrada real em sessões comparáveis. Palavras presentes apenas no
+    /// buffer nunca contam como exposição.
+    pub fn reach_profile_for(&self, config: &TestConfig, positions: usize) -> Result<ReachProfile> {
+        if positions == 0 || matches!(config.mode, TestMode::Quote) {
+            return Ok(ReachProfile::default());
+        }
+        let mut statement = self.connection.prepare(
+            "SELECT s.id, s.terminal_state, s.config_toml, s.elapsed_ms, s.wpm,
+                    s.accuracy, s.raw_wpm, s.correct_chars, s.incorrect_chars,
+                    s.extra_chars, s.session_kind, re.codec_version,
+                    re.uncompressed_size, re.blob
+             FROM sessions s
+             JOIN raw_events re ON re.session_id = s.id
+             WHERE s.terminal_state IN ('completed', 'failed')
+             ORDER BY s.id",
+        )?;
+        let mut rows = statement.query([])?;
+        let mut samples = Vec::<(SessionSummary, bool, ReachObservation)>::new();
+        while let Some(row) = rows.next()? {
+            let sample_config = toml::from_str::<TestConfig>(&row.get::<_, String>(2)?)?;
+            if !same_reach_context(config, &sample_config) {
+                continue;
+            }
+            let terminal_state = row.get::<_, String>(1)?;
+            let completed = terminal_state == "completed";
+            let elapsed_ms = row.get::<_, i64>(3)? as u64;
+            let size = usize::try_from(row.get::<_, i64>(12)?)
+                .context("tamanho negativo nos eventos de uma sessão comparável")?;
+            let events = RawEventCodec::decode(row.get(11)?, size, &row.get::<_, Vec<u8>>(13)?)?;
+            let reached = events
+                .iter()
+                .filter_map(|event| match event.kind {
+                    RawEventKind::Input { word_index, .. } => usize::try_from(word_index)
+                        .ok()
+                        .and_then(|index| index.checked_add(1)),
+                    RawEventKind::Terminal(_) => None,
+                })
+                .max()
+                .unwrap_or(0);
+            let mut reach = normalized_reach_observation(
+                config,
+                &sample_config,
+                completed,
+                elapsed_ms,
+                reached,
+            );
+            reach.reached = reach.reached.min(positions);
+            if reach.reached == 0 {
+                continue;
+            }
+            samples.push((
+                SessionSummary {
+                    id: row.get::<_, i64>(0)? as u64,
+                    elapsed_ms,
+                    wpm: row.get(4)?,
+                    accuracy: row.get(5)?,
+                    raw_wpm: row.get(6)?,
+                    correct_chars: row.get::<_, i64>(7)? as u32,
+                    incorrect_chars: row.get::<_, i64>(8)? as u32,
+                    extra_chars: row.get::<_, i64>(9)? as u32,
+                    config: sample_config,
+                    kind: session_kind_from_db(&row.get::<_, String>(10)?),
+                },
+                completed,
+                reach,
+            ));
+        }
+        let valid_completed = valid_trend_sessions(
+            samples
+                .iter()
+                .filter(|(_, completed, _)| *completed)
+                .map(|(session, _, _)| session.clone())
+                .collect(),
+        )
+        .into_iter()
+        .map(|session| session.id)
+        .collect::<HashSet<_>>();
+        let reach_observations = samples
+            .into_iter()
+            .filter_map(|(session, completed, reach)| {
+                (!completed || valid_completed.contains(&session.id)).then_some(reach)
+            });
+        Ok(ReachProfile::from_observations(
+            reach_observations,
+            positions,
+        ))
+    }
+
     /// Calcula a tendência geral com todas as sessões concluídas que tenham
     /// duração, volume e velocidade compatíveis com uma tentativa séria.
     /// Distribuição e atividade continuam disponíveis para análises locais.
@@ -1774,7 +1864,7 @@ impl Repository {
                     } else {
                         0.0
                     },
-                    estimated_session_chance: 0.0,
+                    estimated_exposure_uplift: 0.0,
                 })
             })
             .collect())
@@ -1808,7 +1898,7 @@ impl Repository {
             effective_exposures: exposures,
             uncorrected_error_rate: rate(skill.uncorrected_error_mass, exposures),
             corrected_error_rate: rate(skill.corrected_error_mass, exposures),
-            estimated_session_chance: 0.0,
+            estimated_exposure_uplift: 0.0,
         };
 
         let mut statement = self.connection.prepare(
@@ -2169,6 +2259,62 @@ fn valid_trend_sessions(sessions: Vec<SessionSummary>) -> Vec<SessionSummary> {
         .collect()
 }
 
+fn same_reach_context(expected: &TestConfig, observed: &TestConfig) -> bool {
+    matches!(
+        (expected.mode, observed.mode),
+        (TestMode::Time { .. }, TestMode::Time { .. })
+            | (TestMode::Words { .. }, TestMode::Words { .. })
+    ) && expected.difficulty == observed.difficulty
+        && expected.punctuation == observed.punctuation
+        && expected.numbers == observed.numbers
+        && expected.language == observed.language
+        && expected.word_pack == observed.word_pack
+}
+
+fn normalized_reach_observation(
+    expected: &TestConfig,
+    observed: &TestConfig,
+    completed: bool,
+    elapsed_ms: u64,
+    reached: usize,
+) -> ReachObservation {
+    match (expected.mode, observed.mode) {
+        (TestMode::Time { seconds: expected }, TestMode::Time { seconds: observed }) => {
+            if completed && expected > observed {
+                return ReachObservation {
+                    reached,
+                    terminal: false,
+                };
+            }
+            let observed_horizon_ms = if completed {
+                u64::from(observed).saturating_mul(1_000).max(1)
+            } else {
+                elapsed_ms.max(1)
+            };
+            let expected_horizon_ms = u64::from(expected).saturating_mul(1_000);
+            let scale = (expected_horizon_ms as f64 / observed_horizon_ms as f64).min(1.0);
+            ReachObservation {
+                reached: (reached as f64 * scale).round() as usize,
+                terminal: true,
+            }
+        }
+        (TestMode::Words { count }, TestMode::Words { count: observed }) if completed => {
+            ReachObservation {
+                reached: usize::from(count.min(observed)),
+                terminal: count <= observed,
+            }
+        }
+        (TestMode::Words { count }, TestMode::Words { .. }) => ReachObservation {
+            reached: reached.min(usize::from(count)),
+            terminal: true,
+        },
+        _ => ReachObservation {
+            reached: 0,
+            terminal: false,
+        },
+    }
+}
+
 fn session_history_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionHistoryItem> {
     let state = row.get::<_, String>(2)?;
     let outcome = match state.as_str() {
@@ -2222,7 +2368,7 @@ fn pattern_diagnostic(
         model_pattern,
         kind,
         difficulty,
-        estimated_session_chance: 0.0,
+        estimated_exposure_uplift: 0.0,
         effective_exposures: exposures,
         uncorrected_error_rate: if exposures > 0.0 {
             uncorrected / exposures
@@ -2390,7 +2536,7 @@ fn migrate(connection: &Connection) -> Result<()> {
            changed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
          );
          INSERT INTO adaptive_policy_state (id, active_version, fallback_version)
-           VALUES (1, 2, 0) ON CONFLICT(id) DO NOTHING;
+           VALUES (1, 3, 0) ON CONFLICT(id) DO NOTHING;
          CREATE TABLE IF NOT EXISTS raw_events (session_id INTEGER PRIMARY KEY REFERENCES sessions(id), codec_version INTEGER NOT NULL, uncompressed_size INTEGER NOT NULL, blob BLOB NOT NULL);",
     )?;
     if !table_has_column(&transaction, "word_observations", "fast_success")? {
@@ -2405,6 +2551,13 @@ fn migrate(connection: &Connection) -> Result<()> {
             [],
         )?;
     }
+    transaction.execute(
+        "UPDATE adaptive_policy_state
+         SET active_version = CASE WHEN active_version = 2 THEN 3 ELSE active_version END,
+             fallback_version = CASE WHEN fallback_version = 2 THEN 3 ELSE fallback_version END,
+             shadow_version = CASE WHEN shadow_version = 2 THEN 3 ELSE shadow_version END",
+        [],
+    )?;
     if !table_has_column(&transaction, "word_observations", "grapheme_count")? {
         transaction.execute(
             "ALTER TABLE word_observations ADD COLUMN grapheme_count INTEGER NOT NULL DEFAULT 0",
@@ -2718,7 +2871,7 @@ fn table_has_column(connection: &Connection, table: &str, column: &str) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::typing::{TestMode, TestStatus};
+    use crate::typing::{RecordedInputEvent, TestMode, TestStatus};
 
     fn word_observation(word: &str, confirmed_error: bool) -> WordObservationRecord {
         WordObservationRecord {
@@ -2749,6 +2902,21 @@ mod tests {
         vec!["casa".into(), "tempo".into(), "ação".into()]
     }
 
+    fn raw_reach(reached: usize, end: RawSessionEnd) -> Vec<RawEvent> {
+        let events = (0..reached)
+            .map(|word_index| RecordedInputEvent {
+                at_ms: (word_index as u64 + 1) * 100,
+                word_index,
+                kind: RecordedInputKind::InsertDelta {
+                    grapheme: "a".into(),
+                    expected: Some("a".into()),
+                    correct: true,
+                },
+            })
+            .collect::<Vec<_>>();
+        RawEventCodec::materialize(&events, reached as u64 * 100, end)
+    }
+
     #[test]
     fn migrations_create_a_session_repository() {
         let temporary = tempfile::tempdir().unwrap();
@@ -2761,6 +2929,101 @@ mod tests {
             )
             .unwrap();
         assert_eq!(id, 1);
+    }
+
+    #[test]
+    fn curva_de_alcance_usa_posicoes_digitadas_e_nao_o_buffer() {
+        let temporary = tempfile::tempdir().unwrap();
+        let repository = Repository::open(&temporary.path().join("history.db")).unwrap();
+        let config = TestConfig {
+            mode: TestMode::Words { count: 4 },
+            ..TestConfig::default()
+        };
+        let metrics = Metrics {
+            duration_ms: 4_000,
+            wpm: 60.0,
+            raw_wpm: 60.0,
+            accuracy: 100.0,
+            characters: crate::typing::CharacterStats {
+                correct_word: 20,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        repository
+            .save_session_with_provenance(
+                &config,
+                &TestStatus::Completed { ended_at_ms: 400 },
+                metrics.clone(),
+                &[],
+                &raw_reach(4, RawSessionEnd::Completed),
+                &SessionProvenance::default(),
+            )
+            .unwrap();
+        let mut uniform_config = config.clone();
+        uniform_config.adaptive = false;
+        repository
+            .save_session_with_provenance(
+                &uniform_config,
+                &TestStatus::Failed {
+                    word_index: 2,
+                    ended_at_ms: 300,
+                },
+                metrics,
+                &[],
+                &raw_reach(3, RawSessionEnd::Failed),
+                &SessionProvenance::default(),
+            )
+            .unwrap();
+
+        let profile = repository.reach_profile_for(&config, 4).unwrap();
+
+        assert_eq!(profile.probability(0), 1.0);
+        assert_eq!(profile.probability(2), 1.0);
+        assert_eq!(profile.probability(3), 0.5);
+        assert_eq!(profile.probability(4), 0.0);
+    }
+
+    #[test]
+    fn normalizacao_de_alcance_nunca_extrapola_o_que_nao_foi_observado() {
+        let time_15 = TestConfig {
+            mode: TestMode::Time { seconds: 15 },
+            ..TestConfig::default()
+        };
+        let time_30 = TestConfig {
+            mode: TestMode::Time { seconds: 30 },
+            ..TestConfig::default()
+        };
+        let words_25 = TestConfig {
+            mode: TestMode::Words { count: 25 },
+            ..TestConfig::default()
+        };
+        let words_50 = TestConfig {
+            mode: TestMode::Words { count: 50 },
+            ..TestConfig::default()
+        };
+
+        assert_eq!(
+            normalized_reach_observation(&time_15, &time_30, true, 30_000, 20),
+            ReachObservation {
+                reached: 10,
+                terminal: true,
+            }
+        );
+        assert_eq!(
+            normalized_reach_observation(&time_30, &time_15, true, 15_000, 10),
+            ReachObservation {
+                reached: 10,
+                terminal: false,
+            }
+        );
+        assert_eq!(
+            normalized_reach_observation(&words_50, &words_25, true, 10_000, 25),
+            ReachObservation {
+                reached: 25,
+                terminal: false,
+            }
+        );
     }
 
     #[test]

@@ -1470,7 +1470,7 @@ fn render_word_detail(frame: &mut Frame, area: Rect, detail: &WordDetail, theme:
             Line::styled(
                 format!(
                     "aumento estimado no próximo treino: {}",
-                    estimated_chance_label(priority.estimated_session_chance)
+                    estimated_uplift_label(priority.estimated_exposure_uplift)
                 ),
                 Style::default().fg(theme_color(theme, &theme.main, 3.0)),
             ),
@@ -1553,8 +1553,8 @@ fn render_word_detail(frame: &mut Frame, area: Rect, detail: &WordDetail, theme:
     );
     frame.render_widget(
         Paragraph::new(format!(
-            "aumento estimado no próximo treino adaptativo: {}",
-            estimated_chance_label(priority.estimated_session_chance)
+            "aumento estimado na chance de você digitar esta palavra: {}",
+            estimated_uplift_label(priority.estimated_exposure_uplift)
         ))
         .style(Style::default().fg(theme_color(theme, &theme.main, 3.0))),
         sections[1],
@@ -1649,7 +1649,7 @@ fn render_word_detail(frame: &mut Frame, area: Rect, detail: &WordDetail, theme:
     );
 }
 
-fn estimated_chance_label(chance: f64) -> String {
+fn estimated_uplift_label(chance: f64) -> String {
     let chance = if chance.is_finite() {
         chance.clamp(0.0, 1.0)
     } else {
@@ -1842,12 +1842,12 @@ fn render_statistics_compact(
                     let chance = if area.width < 60 {
                         format!(
                             "  chance {}  ",
-                            estimated_chance_label(word.estimated_session_chance)
+                            estimated_uplift_label(word.estimated_exposure_uplift)
                         )
                     } else {
                         format!(
                             "  ·  {} na próxima sessão  ·  ",
-                            estimated_chance_label(word.estimated_session_chance)
+                            estimated_uplift_label(word.estimated_exposure_uplift)
                         )
                     };
                     Line::from(vec![
@@ -1904,13 +1904,13 @@ fn render_statistics_compact(
                     let contexts = if area.width < 60 {
                         format!(
                             "  aumento {}  ·  {} palavras  ",
-                            estimated_chance_label(pattern.estimated_session_chance),
+                            estimated_uplift_label(pattern.estimated_exposure_uplift),
                             pattern.distinct_words
                         )
                     } else {
                         format!(
                             "  ·  aumento {}  ·  {} palavras  ·  ",
-                            estimated_chance_label(pattern.estimated_session_chance),
+                            estimated_uplift_label(pattern.estimated_exposure_uplift),
                             pattern.distinct_words
                         )
                     };
@@ -2196,7 +2196,7 @@ fn render_priority_words(
                         Span::styled(
                             format!(
                                 "{:>6}  ",
-                                estimated_chance_label(word.estimated_session_chance)
+                                estimated_uplift_label(word.estimated_exposure_uplift)
                             ),
                             Style::default().fg(theme_color(theme, &theme.main, 3.0)),
                         ),
@@ -2258,7 +2258,7 @@ fn render_priority_patterns(
                         Span::styled(
                             format!(
                                 "{:>6} ",
-                                estimated_chance_label(pattern.estimated_session_chance)
+                                estimated_uplift_label(pattern.estimated_exposure_uplift)
                             ),
                             Style::default().fg(theme_color(theme, &theme.main, 3.0)),
                         ),
@@ -5609,7 +5609,7 @@ mod tests {
                 effective_exposures: 10.0,
                 uncorrected_error_rate: 0.3,
                 corrected_error_rate: 0.2,
-                estimated_session_chance: 0.18,
+                estimated_exposure_uplift: 0.18,
             }],
             priority_patterns: vec![PriorityPattern {
                 language: "portuguese".into(),
@@ -5617,7 +5617,7 @@ mod tests {
                 model_pattern: "acute_accent".into(),
                 kind: "mecânica",
                 difficulty: 0.3,
-                estimated_session_chance: 0.12,
+                estimated_exposure_uplift: 0.12,
                 effective_exposures: 14.0,
                 uncorrected_error_rate: 0.21,
                 corrected_error_rate: 0.14,
