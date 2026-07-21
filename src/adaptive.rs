@@ -296,7 +296,11 @@ impl AdaptivePolicy {
         } else {
             0.0
         };
-        let evidence_confidence = 1.0 - (-skill.effective_exposures / 8.0).exp();
+        // Uma observação isolada é muito fácil de explicar por distração,
+        // correção preventiva ou variação momentânea de ritmo. A confiança
+        // cresce de forma quadrática para exigir recorrência antes de alterar
+        // perceptivelmente o currículo.
+        let evidence_confidence = (1.0 - (-skill.effective_exposures / 8.0).exp()).powi(2);
         1.0 - (-(uncorrected + corrected + latency) * evidence_confidence * 12.0).exp()
     }
 
@@ -1140,6 +1144,20 @@ mod tests {
         let policy = AdaptivePolicy::default();
         let mut skill = WordSkill::default();
         observe(&mut skill, 0, 1, 0);
+        assert!(policy.difficulty(&skill) < MINIMUM_ACTIONABLE_DIFFICULTY);
+    }
+
+    #[test]
+    fn uma_correcao_lenta_isolada_ainda_e_ruido() {
+        let policy = AdaptivePolicy::default();
+        let mut skill = WordSkill::default();
+        skill.observe(Observation {
+            corrected: true,
+            slow: true,
+            latency_ratio: Some(1.91),
+            ..Observation::regular(false, false, false)
+        });
+
         assert!(policy.difficulty(&skill) < MINIMUM_ACTIONABLE_DIFFICULTY);
     }
 

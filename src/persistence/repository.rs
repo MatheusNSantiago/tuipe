@@ -3818,10 +3818,10 @@ mod tests {
             )]
         );
         let priority = repository.statistics_overview().unwrap().priority_words;
-        assert_eq!(priority.len(), 1);
-        assert_eq!(priority[0].word, "difícil");
-        assert_eq!(priority[0].language, "portuguese");
-        assert_eq!(priority[0].confirmed_errors, 1.0);
+        assert!(
+            priority.is_empty(),
+            "uma observação isolada deve continuar abaixo do limiar acionável"
+        );
         let detail = repository
             .word_detail("portuguese", "difícil")
             .unwrap()

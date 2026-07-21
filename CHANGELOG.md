@@ -28,7 +28,7 @@ os dados existentes.
 ### Validado
 
 - paridade visual dos fluxos de 30 segundos, 50 palavras e citação;
-- 145 testes automatizados em unidade, integração e pseudo-terminal;
+- 146 testes automatizados em unidade, integração e pseudo-terminal;
 - pacote Cargo reproduzível e binário Linux otimizado para glibc 2.29 ou mais
   recente, distribuído com licença e proveniência dos conteúdos;
 - latência p99 abaixo de 1 ms para tecla e resize na máquina de validação.
