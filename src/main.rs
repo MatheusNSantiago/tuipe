@@ -1428,17 +1428,32 @@ fn handle_settings_mouse_action(
 ) -> Result<bool> {
     use ui::SettingsAction;
 
+    app.settings_focus = match action {
+        SettingsAction::Punctuation(_) => 0,
+        SettingsAction::Numbers(_) => 1,
+        SettingsAction::ModeTime | SettingsAction::ModeWords | SettingsAction::ModeQuote => 2,
+        SettingsAction::Value(_) => 3,
+        SettingsAction::Difficulty(_) => 4,
+        SettingsAction::Adaptive(_) => 5,
+        SettingsAction::LanguagePortuguese | SettingsAction::LanguageEnglish => 6,
+        SettingsAction::PackCommon | SettingsAction::Pack1k | SettingsAction::Pack5k => 7,
+        SettingsAction::NextTheme => 8,
+        SettingsAction::Close | SettingsAction::Quit => app.settings_focus,
+    };
+
     match action {
         SettingsAction::Close => app.settings_open = false,
         SettingsAction::Quit => return Ok(true),
         SettingsAction::NextTheme => {
             return handle_settings_key(app, repository, KeyCode::Char('t'), KeyModifiers::NONE);
         }
-        SettingsAction::TogglePunctuation => app.apply_preference(repository, |preferences| {
-            preferences.test.punctuation = !preferences.test.punctuation;
-        })?,
-        SettingsAction::ToggleNumbers => app.apply_preference(repository, |preferences| {
-            preferences.test.numbers = !preferences.test.numbers;
+        SettingsAction::Punctuation(enabled) => {
+            app.apply_preference(repository, |preferences| {
+                preferences.test.punctuation = enabled;
+            })?
+        }
+        SettingsAction::Numbers(enabled) => app.apply_preference(repository, |preferences| {
+            preferences.test.numbers = enabled;
         })?,
         SettingsAction::ModeTime => app.apply_preference(repository, |preferences| {
             let seconds = match preferences.test.mode {
@@ -1483,8 +1498,8 @@ fn handle_settings_mouse_action(
                 preferences.test.difficulty = difficulty;
             })?
         }
-        SettingsAction::ToggleAdaptive => app.apply_preference(repository, |preferences| {
-            preferences.test.adaptive = !preferences.test.adaptive;
+        SettingsAction::Adaptive(enabled) => app.apply_preference(repository, |preferences| {
+            preferences.test.adaptive = enabled;
         })?,
         SettingsAction::LanguagePortuguese | SettingsAction::LanguageEnglish => {
             let language = if action == SettingsAction::LanguagePortuguese {
@@ -1778,44 +1793,24 @@ fn handle_settings_key(
     match code {
         KeyCode::Tab | KeyCode::Down => {
             app.settings_focus = (app.settings_focus + 1) % 9;
-            if matches!(app.engine.config().mode, TestMode::Quote) && app.settings_focus == 0 {
-                app.settings_focus = 1;
+            if matches!(app.engine.config().mode, TestMode::Quote) && app.settings_focus < 2 {
+                app.settings_focus = 2;
             }
             return Ok(false);
         }
         KeyCode::BackTab | KeyCode::Up => {
             app.settings_focus = app.settings_focus.checked_sub(1).unwrap_or(8);
-            if matches!(app.engine.config().mode, TestMode::Quote) && app.settings_focus == 0 {
+            if matches!(app.engine.config().mode, TestMode::Quote) && app.settings_focus < 2 {
                 app.settings_focus = 8;
             }
             return Ok(false);
         }
         _ => {}
     }
-    let code = if matches!(code, KeyCode::Enter | KeyCode::Left | KeyCode::Right) {
-        match app.settings_focus {
-            0 => match (
-                app.preferences.test.punctuation,
-                app.preferences.test.numbers,
-            ) {
-                (false, false) | (true, true) => KeyCode::Char('p'),
-                (true, false) | (false, true) => KeyCode::Char('n'),
-            },
-            1 => KeyCode::Char('m'),
-            2 => KeyCode::Char('v'),
-            3 => KeyCode::Char('d'),
-            4 => KeyCode::Char('a'),
-            5 => KeyCode::Char('l'),
-            6 => KeyCode::Char('k'),
-            7 => KeyCode::Char('t'),
-            _ => {
-                app.settings_open = false;
-                return Ok(false);
-            }
-        }
-    } else {
-        code
-    };
+    if matches!(code, KeyCode::Enter | KeyCode::Left | KeyCode::Right) {
+        adjust_focused_setting(app, repository, code)?;
+        return Ok(false);
+    }
     match code {
         KeyCode::Char('m') => app.apply_preference(repository, |preferences| {
             preferences.test.mode = match preferences.test.mode {
@@ -1894,15 +1889,147 @@ fn handle_settings_key(
 }
 
 fn initial_settings_focus(mode: &TestMode) -> usize {
-    usize::from(matches!(mode, TestMode::Quote))
+    if matches!(mode, TestMode::Quote) {
+        2
+    } else {
+        0
+    }
 }
 
 fn next<T: Copy + PartialEq>(values: &[T], current: T) -> T {
+    cycle(values, current, false)
+}
+
+fn cycle<T: Copy + PartialEq>(values: &[T], current: T, backwards: bool) -> T {
     let index = values
         .iter()
         .position(|value| *value == current)
         .unwrap_or(0);
-    values[(index + 1) % values.len()]
+    let next = if backwards {
+        index.checked_sub(1).unwrap_or(values.len() - 1)
+    } else {
+        (index + 1) % values.len()
+    };
+    values[next]
+}
+
+fn adjust_focused_setting(app: &mut App, repository: &Repository, code: KeyCode) -> Result<()> {
+    let backwards = code == KeyCode::Left;
+    let forwards = code == KeyCode::Right;
+    let toggle = code == KeyCode::Enter;
+    match app.settings_focus {
+        0 if !matches!(app.engine.config().mode, TestMode::Quote) => {
+            app.apply_preference(repository, |preferences| {
+                preferences.test.punctuation = if toggle {
+                    !preferences.test.punctuation
+                } else {
+                    forwards
+                };
+            })?;
+        }
+        1 if !matches!(app.engine.config().mode, TestMode::Quote) => {
+            app.apply_preference(repository, |preferences| {
+                preferences.test.numbers = if toggle {
+                    !preferences.test.numbers
+                } else {
+                    forwards
+                };
+            })?;
+        }
+        2 => app.apply_preference(repository, |preferences| {
+            let modes = [0_u8, 1, 2];
+            let current = match preferences.test.mode {
+                TestMode::Time { .. } => 0,
+                TestMode::Words { .. } => 1,
+                TestMode::Quote => 2,
+            };
+            preferences.test.mode = match cycle(&modes, current, backwards) {
+                0 => TestMode::Time { seconds: 30 },
+                1 => TestMode::Words { count: 25 },
+                _ => {
+                    preferences.test.punctuation = false;
+                    preferences.test.numbers = false;
+                    TestMode::Quote
+                }
+            };
+        })?,
+        3 => app.apply_preference(repository, |preferences| {
+            preferences.test.mode = match preferences.test.mode {
+                TestMode::Time { seconds } => TestMode::Time {
+                    seconds: cycle(&[15, 30, 60, 120], seconds, backwards),
+                },
+                TestMode::Words { count } => TestMode::Words {
+                    count: cycle(&[10, 25, 50, 100], count, backwards),
+                },
+                TestMode::Quote => {
+                    preferences.test.quote_length = cycle(
+                        &[
+                            QuoteLength::All,
+                            QuoteLength::Short,
+                            QuoteLength::Medium,
+                            QuoteLength::Long,
+                        ],
+                        preferences.test.quote_length,
+                        backwards,
+                    );
+                    TestMode::Quote
+                }
+            };
+        })?,
+        4 => app.apply_preference(repository, |preferences| {
+            preferences.test.difficulty = cycle(
+                &[
+                    tuipe::typing::Difficulty::Normal,
+                    tuipe::typing::Difficulty::Expert,
+                    tuipe::typing::Difficulty::Master,
+                ],
+                preferences.test.difficulty,
+                backwards,
+            );
+        })?,
+        5 => app.apply_preference(repository, |preferences| {
+            preferences.test.adaptive = if toggle {
+                !preferences.test.adaptive
+            } else {
+                forwards
+            };
+        })?,
+        6 => app.apply_preference(repository, |preferences| {
+            preferences.test.language = cycle(
+                &["portuguese", "english"],
+                preferences.test.language.as_str(),
+                backwards,
+            )
+            .into();
+        })?,
+        7 => app.apply_preference(repository, |preferences| {
+            preferences.test.word_pack = cycle(
+                &["common", "1k", "5k"],
+                preferences.test.word_pack.as_str(),
+                backwards,
+            )
+            .into();
+        })?,
+        8 => {
+            let names = app
+                .catalog
+                .theme_names()
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+            let current = app.preferences.theme.clone();
+            app.apply_preference(repository, |preferences| {
+                let index = names.iter().position(|name| name == &current).unwrap_or(0);
+                let next = if backwards {
+                    index.checked_sub(1).unwrap_or(names.len() - 1)
+                } else {
+                    (index + 1) % names.len()
+                };
+                preferences.theme = names[next].clone();
+            })?;
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 type GeneratedTest = (
@@ -2372,7 +2499,7 @@ mod tests {
     }
 
     #[test]
-    fn configuracoes_aceitam_tab_setas_e_enter() {
+    fn configuracoes_explicam_e_respeitam_a_direcao_das_setas() {
         let temporary = tempfile::tempdir().unwrap();
         let repository = Repository::open(&temporary.path().join("history.db")).unwrap();
         let mut app = app_de_teste(tuipe::typing::TestConfig::default(), &["casa "]);
@@ -2381,15 +2508,25 @@ mod tests {
         handle_settings_key(&mut app, &repository, KeyCode::Tab, KeyModifiers::NONE).unwrap();
         assert_eq!(app.settings_focus, 1);
         handle_settings_key(&mut app, &repository, KeyCode::Right, KeyModifiers::NONE).unwrap();
+        assert!(app.preferences.test.numbers);
+
+        handle_settings_key(&mut app, &repository, KeyCode::Down, KeyModifiers::NONE).unwrap();
+        assert_eq!(app.settings_focus, 2);
+        handle_settings_key(&mut app, &repository, KeyCode::Right, KeyModifiers::NONE).unwrap();
         assert!(matches!(
             app.preferences.test.mode,
             TestMode::Words { count: 25 }
         ));
+        handle_settings_key(&mut app, &repository, KeyCode::Left, KeyModifiers::NONE).unwrap();
+        assert!(matches!(
+            app.preferences.test.mode,
+            TestMode::Time { seconds: 30 }
+        ));
 
         handle_settings_key(&mut app, &repository, KeyCode::Up, KeyModifiers::NONE).unwrap();
-        assert_eq!(app.settings_focus, 0);
+        assert_eq!(app.settings_focus, 1);
         handle_settings_key(&mut app, &repository, KeyCode::Enter, KeyModifiers::NONE).unwrap();
-        assert!(app.preferences.test.punctuation);
+        assert!(!app.preferences.test.numbers);
 
         let quote_config = tuipe::typing::TestConfig {
             mode: TestMode::Quote,
@@ -2398,7 +2535,7 @@ mod tests {
         let mut quote = app_de_teste(quote_config, &["casa "]);
         handle_key(&mut quote, &repository, KeyCode::Esc, KeyModifiers::NONE).unwrap();
         assert!(quote.settings_open);
-        assert_eq!(quote.settings_focus, 1);
+        assert_eq!(quote.settings_focus, 2);
         handle_settings_key(&mut quote, &repository, KeyCode::Up, KeyModifiers::NONE).unwrap();
         assert_eq!(quote.settings_focus, 8);
     }

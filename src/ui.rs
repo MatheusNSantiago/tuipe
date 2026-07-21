@@ -305,14 +305,14 @@ pub enum ResetConfirmation<'a> {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SettingsAction {
-    TogglePunctuation,
-    ToggleNumbers,
+    Punctuation(bool),
+    Numbers(bool),
     ModeTime,
     ModeWords,
     ModeQuote,
     Value(usize),
     Difficulty(Difficulty),
-    ToggleAdaptive,
+    Adaptive(bool),
     LanguagePortuguese,
     LanguageEnglish,
     PackCommon,
@@ -2340,143 +2340,298 @@ fn render_settings(
     );
     let inner = Rect {
         x: area.x + 2,
-        y: area.y + 2,
+        y: area.y + 1,
         width: area.width.saturating_sub(4),
-        height: area.height.saturating_sub(4),
+        height: area.height.saturating_sub(2),
     };
     let config = engine.config();
-    let row = |label: &str, choices: Line<'static>| {
+    let compact = area.width < 72;
+    let row = |index: usize, label: &str, choices: Line<'static>| {
+        let selected = focus == index;
         let mut spans = vec![Span::styled(
-            format!("{label:<14}"),
-            Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
+            if selected { "› " } else { "  " },
+            Style::default()
+                .fg(theme_color(theme, &theme.main, 3.0))
+                .add_modifier(Modifier::BOLD),
         )];
+        spans.push(Span::styled(
+            format!("{label:<14}"),
+            Style::default()
+                .fg(theme_color(
+                    theme,
+                    if selected { &theme.text } else { &theme.sub },
+                    if selected { 4.5 } else { 2.0 },
+                ))
+                .add_modifier(if selected {
+                    Modifier::BOLD
+                } else {
+                    Modifier::empty()
+                }),
+        ));
         spans.extend(choices.spans);
         Line::from(spans)
     };
+    let disabled = matches!(config.mode, TestMode::Quote);
     let mut sections = vec![
         Line::styled(
-            format!("{}  configurações", icones.configuracoes),
+            if compact {
+                format!("{}  configurações", icones.configuracoes)
+            } else {
+                format!(
+                    "{}  configurações  ·  alterações salvas automaticamente",
+                    icones.configuracoes
+                )
+            },
             Style::default()
                 .fg(theme_color(theme, &theme.text, 4.5))
                 .add_modifier(Modifier::BOLD),
         ),
-        if matches!(config.mode, TestMode::Quote) {
-            row(
-                "extras",
-                Line::styled(
-                    "indisponíveis em citações",
-                    Style::default()
-                        .fg(theme_color(theme, &theme.sub, 2.0))
-                        .add_modifier(Modifier::DIM),
-                ),
-            )
-        } else {
-            row(
-                "extras",
-                button_group(
-                    &[
-                        ("pontuação", config.punctuation),
-                        ("números", config.numbers),
-                    ],
-                    theme,
-                ),
-            )
-        },
         row(
-            "modo",
-            button_group(
-                &[
-                    ("tempo", matches!(config.mode, TestMode::Time { .. })),
-                    ("palavras", matches!(config.mode, TestMode::Words { .. })),
-                    ("citação", matches!(config.mode, TestMode::Quote)),
-                ],
+            0,
+            "pontuação",
+            setting_toggle(
+                config.punctuation,
+                disabled,
+                compact,
+                "desligada",
+                "ligada",
                 theme,
             ),
         ),
         row(
-            "duração",
-            match config.mode {
-                TestMode::Time { seconds } => button_group(
+            1,
+            "números",
+            setting_toggle(
+                config.numbers,
+                disabled,
+                compact,
+                "desligados",
+                "ligados",
+                theme,
+            ),
+        ),
+        row(
+            2,
+            "modo",
+            if compact {
+                compact_setting_value(
+                    match config.mode {
+                        TestMode::Time { .. } => "tempo",
+                        TestMode::Words { .. } => "palavras",
+                        TestMode::Quote => "citação",
+                    },
+                    theme,
+                )
+            } else {
+                button_group(
                     &[
-                        ("15 s", seconds == 15),
-                        ("30 s", seconds == 30),
-                        ("60 s", seconds == 60),
-                        ("120 s", seconds == 120),
+                        ("tempo", matches!(config.mode, TestMode::Time { .. })),
+                        ("palavras", matches!(config.mode, TestMode::Words { .. })),
+                        ("citação", matches!(config.mode, TestMode::Quote)),
                     ],
                     theme,
-                ),
-                TestMode::Words { count } => button_group(
-                    &[
-                        ("10", count == 10),
-                        ("25", count == 25),
-                        ("50", count == 50),
-                        ("100", count == 100),
-                    ],
-                    theme,
-                ),
-                TestMode::Quote => button_group(
-                    &[
-                        ("todas", config.quote_length == QuoteLength::All),
-                        ("curta", config.quote_length == QuoteLength::Short),
-                        ("média", config.quote_length == QuoteLength::Medium),
-                        ("longa", config.quote_length == QuoteLength::Long),
-                    ],
-                    theme,
-                ),
+                )
             },
         ),
         row(
+            3,
+            "duração",
+            if compact {
+                compact_setting_value(
+                    match config.mode {
+                        TestMode::Time { seconds } => format!("{seconds} s"),
+                        TestMode::Words { count } => count.to_string(),
+                        TestMode::Quote => match config.quote_length {
+                            QuoteLength::All => "todas".into(),
+                            QuoteLength::Short => "curta".into(),
+                            QuoteLength::Medium => "média".into(),
+                            QuoteLength::Long => "longa".into(),
+                        },
+                    },
+                    theme,
+                )
+            } else {
+                match config.mode {
+                    TestMode::Time { seconds } => button_group(
+                        &[
+                            ("15 s", seconds == 15),
+                            ("30 s", seconds == 30),
+                            ("60 s", seconds == 60),
+                            ("120 s", seconds == 120),
+                        ],
+                        theme,
+                    ),
+                    TestMode::Words { count } => button_group(
+                        &[
+                            ("10", count == 10),
+                            ("25", count == 25),
+                            ("50", count == 50),
+                            ("100", count == 100),
+                        ],
+                        theme,
+                    ),
+                    TestMode::Quote => button_group(
+                        &[
+                            ("todas", config.quote_length == QuoteLength::All),
+                            ("curta", config.quote_length == QuoteLength::Short),
+                            ("média", config.quote_length == QuoteLength::Medium),
+                            ("longa", config.quote_length == QuoteLength::Long),
+                        ],
+                        theme,
+                    ),
+                }
+            },
+        ),
+        row(
+            4,
             "dificuldade",
-            button_group(
-                &[
-                    ("normal", config.difficulty == Difficulty::Normal),
-                    ("especialista", config.difficulty == Difficulty::Expert),
-                    ("mestre", config.difficulty == Difficulty::Master),
-                ],
-                theme,
-            ),
+            if compact {
+                compact_setting_value(difficulty_name(config.difficulty), theme)
+            } else {
+                button_group(
+                    &[
+                        ("normal", config.difficulty == Difficulty::Normal),
+                        ("especialista", config.difficulty == Difficulty::Expert),
+                        ("mestre", config.difficulty == Difficulty::Master),
+                    ],
+                    theme,
+                )
+            },
         ),
         row(
+            5,
             "treino",
-            button_group(&[("adaptativo", config.adaptive)], theme),
+            if compact {
+                compact_setting_value(
+                    if config.adaptive {
+                        "adaptativo"
+                    } else {
+                        "padrão"
+                    },
+                    theme,
+                )
+            } else {
+                button_group(
+                    &[
+                        ("padrão", !config.adaptive),
+                        ("adaptativo", config.adaptive),
+                    ],
+                    theme,
+                )
+            },
         ),
         row(
+            6,
             "idioma",
-            button_group(
-                &[
-                    ("português", config.language == "portuguese"),
-                    ("inglês", config.language == "english"),
-                ],
-                theme,
-            ),
+            if compact {
+                compact_setting_value(language_name(&config.language), theme)
+            } else {
+                button_group(
+                    &[
+                        ("português", config.language == "portuguese"),
+                        ("inglês", config.language == "english"),
+                    ],
+                    theme,
+                )
+            },
         ),
         row(
+            7,
             "vocabulário",
-            button_group(
-                &[
-                    ("comum", config.word_pack == "common"),
-                    ("1k", config.word_pack == "1k"),
-                    ("5k", config.word_pack == "5k"),
-                ],
-                theme,
-            ),
+            if compact {
+                compact_setting_value(
+                    if config.word_pack == "common" {
+                        "comum"
+                    } else {
+                        &config.word_pack
+                    },
+                    theme,
+                )
+            } else {
+                button_group(
+                    &[
+                        ("comum", config.word_pack == "common"),
+                        ("1k", config.word_pack == "1k"),
+                        ("5k", config.word_pack == "5k"),
+                    ],
+                    theme,
+                )
+            },
         ),
-        row("tema", Line::from(chip(theme_name.to_owned(), true, theme))),
-        Line::styled(
-            format!(
-                "{} fechar    {} sair",
-                Keymap::label(keymap.settings),
-                Keymap::label(keymap.quit)
-            ),
-            Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
+        row(
+            8,
+            "tema",
+            if compact {
+                compact_setting_value(theme_name, theme)
+            } else {
+                Line::from(chip(theme_name.to_owned(), true, theme))
+            },
         ),
     ];
-    if let Some(line) = sections.get_mut(focus.min(8) + 1) {
-        *line = line
-            .clone()
-            .style(Style::default().bg(color(&theme.sub_alt)));
+    if compact {
+        sections.push(key_hints(&[("↑↓", "navegar"), ("←→", "alterar")], theme));
+        sections.push(key_hints(
+            &[
+                ("enter", "alternar"),
+                (&Keymap::label(keymap.settings), "fechar"),
+                (&Keymap::label(keymap.quit), "sair"),
+            ],
+            theme,
+        ));
+    } else {
+        sections.push(key_hints(
+            &[
+                ("↑↓", "navegar"),
+                ("←→", "alterar"),
+                ("enter", "alternar"),
+                (&Keymap::label(keymap.settings), "fechar"),
+                (&Keymap::label(keymap.quit), "sair"),
+            ],
+            theme,
+        ));
     }
     frame.render_widget(Paragraph::new(sections), inner);
+}
+
+fn setting_toggle(
+    enabled: bool,
+    disabled: bool,
+    compact: bool,
+    off: &'static str,
+    on: &'static str,
+    theme: &Theme,
+) -> Line<'static> {
+    if disabled {
+        return Line::styled(
+            "indisponível no modo citação",
+            Style::default()
+                .fg(theme_color(theme, &theme.sub, 2.0))
+                .add_modifier(Modifier::DIM),
+        );
+    }
+    if compact {
+        return compact_setting_value(if enabled { on } else { off }, theme);
+    }
+    button_group(&[(off, !enabled), (on, enabled)], theme)
+}
+
+fn compact_setting_value(value: impl Into<String>, theme: &Theme) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(
+            "‹ ",
+            Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
+        ),
+        Span::styled(
+            value.into(),
+            Style::default()
+                .fg(theme_color(theme, &theme.main, 3.0))
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            " ›",
+            Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
+        ),
+    ])
 }
 
 pub fn settings_area(viewport: Rect) -> Rect {
@@ -2496,57 +2651,127 @@ pub fn settings_action_at(
     }
     let inner = Rect::new(
         area.x.saturating_add(2),
-        area.y.saturating_add(2),
+        area.y.saturating_add(1),
         area.width.saturating_sub(4),
-        area.height.saturating_sub(4),
+        area.height.saturating_sub(2),
     );
     let row = position.y.saturating_sub(inner.y);
     let section = usize::from(row);
-    let choices_x = inner.x.saturating_add(14);
+    let choices_x = inner.x.saturating_add(16);
+    let compact = area.width < 72;
+    if compact && position.x >= choices_x && position.x < inner.right() {
+        return match section {
+            1 if !matches!(config.mode, TestMode::Quote) => {
+                Some(SettingsAction::Punctuation(!config.punctuation))
+            }
+            2 if !matches!(config.mode, TestMode::Quote) => {
+                Some(SettingsAction::Numbers(!config.numbers))
+            }
+            3 => Some(match config.mode {
+                TestMode::Time { .. } => SettingsAction::ModeWords,
+                TestMode::Words { .. } => SettingsAction::ModeQuote,
+                TestMode::Quote => SettingsAction::ModeTime,
+            }),
+            4 => Some(SettingsAction::Value(match config.mode {
+                TestMode::Time { seconds } => next_index(&[15, 30, 60, 120], seconds),
+                TestMode::Words { count } => next_index(&[10, 25, 50, 100], count),
+                TestMode::Quote => next_index(
+                    &[
+                        QuoteLength::All,
+                        QuoteLength::Short,
+                        QuoteLength::Medium,
+                        QuoteLength::Long,
+                    ],
+                    config.quote_length,
+                ),
+            })),
+            5 => Some(SettingsAction::Difficulty(match config.difficulty {
+                Difficulty::Normal => Difficulty::Expert,
+                Difficulty::Expert => Difficulty::Master,
+                Difficulty::Master => Difficulty::Normal,
+            })),
+            6 => Some(SettingsAction::Adaptive(!config.adaptive)),
+            7 => Some(if config.language == "portuguese" {
+                SettingsAction::LanguageEnglish
+            } else {
+                SettingsAction::LanguagePortuguese
+            }),
+            8 => Some(match config.word_pack.as_str() {
+                "common" => SettingsAction::Pack1k,
+                "1k" => SettingsAction::Pack5k,
+                _ => SettingsAction::PackCommon,
+            }),
+            9 => Some(SettingsAction::NextTheme),
+            _ => None,
+        };
+    }
     let choice = |labels: &[&str]| hit_chip(position.x, choices_x, labels);
     match section {
-        1 if !matches!(config.mode, TestMode::Quote) => match choice(&["pontuação", "números"])?
-        {
-            0 => Some(SettingsAction::TogglePunctuation),
-            _ => Some(SettingsAction::ToggleNumbers),
-        },
-        2 => match choice(&["tempo", "palavras", "citação"])? {
+        1 if !matches!(config.mode, TestMode::Quote) => {
+            choice(&["desligada", "ligada"]).map(|index| SettingsAction::Punctuation(index == 1))
+        }
+        2 if !matches!(config.mode, TestMode::Quote) => {
+            choice(&["desligados", "ligados"]).map(|index| SettingsAction::Numbers(index == 1))
+        }
+        3 => match choice(&["tempo", "palavras", "citação"])? {
             0 => Some(SettingsAction::ModeTime),
             1 => Some(SettingsAction::ModeWords),
             _ => Some(SettingsAction::ModeQuote),
         },
-        3 => choice(match config.mode {
+        4 => choice(match config.mode {
             TestMode::Time { .. } => &["15 s", "30 s", "60 s", "120 s"],
             TestMode::Words { .. } => &["10", "25", "50", "100"],
             TestMode::Quote => &["todas", "curta", "média", "longa"],
         })
         .map(SettingsAction::Value),
-        4 => match choice(&["normal", "especialista", "mestre"])? {
+        5 => match choice(&["normal", "especialista", "mestre"])? {
             0 => Some(SettingsAction::Difficulty(Difficulty::Normal)),
             1 => Some(SettingsAction::Difficulty(Difficulty::Expert)),
             _ => Some(SettingsAction::Difficulty(Difficulty::Master)),
         },
-        5 => choice(&["adaptativo"]).map(|_| SettingsAction::ToggleAdaptive),
-        6 => match choice(&["português", "inglês"])? {
+        6 => choice(&["padrão", "adaptativo"]).map(|index| SettingsAction::Adaptive(index == 1)),
+        7 => match choice(&["português", "inglês"])? {
             0 => Some(SettingsAction::LanguagePortuguese),
             _ => Some(SettingsAction::LanguageEnglish),
         },
-        7 => match choice(&["comum", "1k", "5k"])? {
+        8 => match choice(&["comum", "1k", "5k"])? {
             0 => Some(SettingsAction::PackCommon),
             1 => Some(SettingsAction::Pack1k),
             _ => Some(SettingsAction::Pack5k),
         },
-        8 => hit_chip(position.x, choices_x, &[theme_name]).map(|_| SettingsAction::NextTheme),
-        9 => {
+        9 => hit_chip(position.x, choices_x, &[theme_name]).map(|_| SettingsAction::NextTheme),
+        10 if !compact => {
             let close = format!("{} fechar", Keymap::label(keymap.settings));
             let quit = format!("{} sair", Keymap::label(keymap.quit));
-            match hit_text(position.x, inner.x, &[&close, &quit], 4)? {
-                0 => Some(SettingsAction::Close),
-                _ => Some(SettingsAction::Quit),
+            match hit_text(
+                position.x,
+                inner.x,
+                &["↑↓ navegar", "←→ alterar", "enter alternar", &close, &quit],
+                4,
+            )? {
+                3 => Some(SettingsAction::Close),
+                4 => Some(SettingsAction::Quit),
+                _ => None,
+            }
+        }
+        11 if compact => {
+            let close = format!("{} fechar", Keymap::label(keymap.settings));
+            let quit = format!("{} sair", Keymap::label(keymap.quit));
+            match hit_text(position.x, inner.x, &["enter alternar", &close, &quit], 4)? {
+                1 => Some(SettingsAction::Close),
+                2 => Some(SettingsAction::Quit),
+                _ => None,
             }
         }
         _ => None,
     }
+}
+
+fn next_index<T: PartialEq>(values: &[T], current: T) -> usize {
+    values
+        .iter()
+        .position(|value| *value == current)
+        .map_or(0, |index| (index + 1) % values.len())
 }
 
 fn hit_chip(x: u16, start: u16, labels: &[&str]) -> Option<usize> {
@@ -4973,7 +5198,7 @@ mod tests {
     fn clique_na_configuracao_escolhe_a_opcao_exata() {
         let viewport = Rect::new(0, 0, 100, 28);
         let area = settings_area(viewport);
-        let inner = Position::new(area.x + 2, area.y + 2);
+        let inner = Position::new(area.x + 2, area.y + 1);
         let config = TestConfig::default();
 
         assert_eq!(
@@ -4982,7 +5207,7 @@ mod tests {
                 &config,
                 "arch",
                 &Keymap::default(),
-                Position::new(inner.x + 24, inner.y + 2),
+                Position::new(inner.x + 26, inner.y + 3),
             ),
             Some(SettingsAction::ModeWords)
         );
@@ -4992,7 +5217,7 @@ mod tests {
                 &config,
                 "arch",
                 &Keymap::default(),
-                Position::new(inner.x + 15, inner.y + 4),
+                Position::new(inner.x + 17, inner.y + 5),
             ),
             Some(SettingsAction::Difficulty(Difficulty::Normal))
         );
@@ -5002,7 +5227,7 @@ mod tests {
                 &config,
                 "arch",
                 &Keymap::default(),
-                Position::new(inner.x + 15, inner.y + 8),
+                Position::new(inner.x + 17, inner.y + 9),
             ),
             Some(SettingsAction::NextTheme)
         );
@@ -5012,7 +5237,7 @@ mod tests {
                 &config,
                 "arch",
                 &Keymap::default(),
-                Position::new(inner.x + 30, inner.y + 8),
+                Position::new(inner.x + 30, inner.y + 9),
             ),
             None
         );
@@ -5022,7 +5247,7 @@ mod tests {
                 &config,
                 "arch",
                 &Keymap::default(),
-                Position::new(inner.x + 15, inner.y + 9),
+                Position::new(inner.x + 60, inner.y + 10),
             ),
             Some(SettingsAction::Quit)
         );

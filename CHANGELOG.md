@@ -19,9 +19,11 @@ os dados existentes.
 - leitura retrocompatível dos estados adaptativos gravados antes da separação
   explícita de lentidão;
 - atalhos configuráveis, mouse, terminais compactos e recuperação segura do
-  terminal em saída, erro e sinais do sistema.
+  terminal em saída, erro e sinais do sistema;
 - detecção de Nerd Font no Kitty através do tmux, configurações reorganizadas e
   áreas clicáveis compatíveis com o desenho completo dos controles;
+- navegação de configurações com foco explícito, setas direcionais simétricas,
+  estados booleanos legíveis e legenda permanente dos comandos;
 - tendência suavizada sobre todas as tentativas válidas e prioridade adaptativa
   que ignora correções isoladas sem evidência suficiente.
 

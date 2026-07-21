@@ -150,8 +150,12 @@ sessões, métricas, eventos brutos, XP e streak.
 
 ### Configurações
 
-Na janela aberta por `esc`, cada tecla percorre as opções do respectivo grupo.
-`↑`/`↓` ou `tab` movem o foco; `←`/`→` ou `enter` alteram a opção selecionada:
+Na janela aberta por `esc`, a linha em foco é marcada com `›` e o valor ativo
+recebe a cor principal. `↑`/`↓` ou `tab` movem o foco, `←` escolhe o valor
+anterior, `→` escolhe o próximo e `enter` alterna a opção atual. As alterações
+são aplicadas e salvas imediatamente. A legenda permanece visível no rodapé.
+
+Os atalhos diretos continuam disponíveis para quem preferir:
 
 | Tecla | Configuração |
 | --- | --- |
