@@ -27,8 +27,10 @@ os dados existentes.
 - painel mestre–detalhe para configurações largas, com resumo alinhado,
   descrição contextual, edição isolada e áreas de clique equivalentes;
 - ações do resultado com ícone, tecla e descrição reunidos no mesmo controle;
-- navegação das estatísticas em abas delimitadas, responsivas, clicáveis e com
-  estado ativo destacado por superfície, borda, cor e ícone;
+- navegação das estatísticas em abas delimitadas, responsivas e clicáveis, com
+  estado ativo indicado sem preenchimento luminoso;
+- eixos de gráficos com referências adaptativas, distribuição e atividade em
+  colunas de escala explícita e barra de comandos separada por divisor;
 - tendência suavizada sobre todas as tentativas válidas e prioridade adaptativa
   que ignora correções isoladas sem evidência suficiente.
 

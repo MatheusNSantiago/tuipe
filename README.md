@@ -137,7 +137,10 @@ As estatísticas possuem três páginas próprias. `1`, `2`, `3`, `tab` ou as se
 laterais alternam entre visão geral, progresso e histórico. A visão geral usa
 todas as tentativas válidas e suaviza a tendência de WPM ao longo do tempo;
 tentativas interrompidas, curtas demais ou muito abaixo da base pessoal não
-distorcem o gráfico. O progresso detalha distribuição de WPM e atividade diária.
+distorcem o gráfico. Os eixos mostram de três a seis referências conforme o
+espaço disponível. O progresso detalha a distribuição de WPM como parcela dos
+testes válidos e a atividade diária como minutos, testes e tempo relativo.
+Uma barra de comandos separada do conteúdo reúne os controles de cada página.
 O histórico pode ser filtrado com `f`; `↑`/`↓` ou `j`/`k` selecionam uma sessão
 e `enter` abre seu diagnóstico.
 

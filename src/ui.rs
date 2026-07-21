@@ -488,7 +488,7 @@ fn render_statistics_overview(
         Constraint::Length(11.min(content.height.saturating_sub(9))),
         Constraint::Length(3),
         Constraint::Min(7),
-        Constraint::Length(1),
+        Constraint::Length(2),
     ])
     .split(content);
     render_statistics_chart(frame, sections[0], &statistics.trend_tests, theme);
@@ -504,10 +504,11 @@ fn render_statistics_overview(
         theme,
     );
     render_priority_patterns(frame, details[1], &statistics.priority_patterns, theme);
-    frame.render_widget(
-        Paragraph::new("↑↓ selecionar   enter detalhes   R zerar modelo   esc voltar")
-            .style(Style::default().fg(theme_color(theme, &theme.sub, 2.0))),
+    render_statistics_controls(
+        frame,
         sections[3],
+        "↑↓ selecionar   enter detalhes   R zerar modelo   esc voltar",
+        theme,
     );
 }
 
@@ -587,8 +588,8 @@ fn render_statistics_navigation(
                     Style::default()
                         .fg(theme_color(
                             theme,
-                            if selected { &theme.text } else { &theme.sub },
-                            if selected { 4.5 } else { 2.0 },
+                            if selected { &theme.main } else { &theme.sub },
+                            if selected { 3.0 } else { 2.0 },
                         ))
                         .add_modifier(if selected {
                             Modifier::BOLD
@@ -602,20 +603,8 @@ fn render_statistics_navigation(
                 Block::default()
                     .borders(Borders::ALL)
                     .border_type(BorderType::Rounded)
-                    .border_style(Style::default().fg(theme_color(
-                        theme,
-                        if selected {
-                            &theme.main
-                        } else {
-                            &theme.sub_alt
-                        },
-                        if selected { 3.0 } else { 1.5 },
-                    )))
-                    .style(Style::default().bg(if selected {
-                        color(&theme.sub_alt)
-                    } else {
-                        color(&theme.bg)
-                    })),
+                    .border_style(Style::default().fg(theme_color(theme, &theme.sub_alt, 1.5)))
+                    .style(Style::default().bg(color(&theme.bg))),
             ),
             tab,
         );
@@ -626,7 +615,7 @@ fn statistics_navigation_height(width: u16) -> u16 {
     if width < STATISTICS_WIDE_MIN_WIDTH {
         3
     } else {
-        4
+        5
     }
 }
 
@@ -657,24 +646,21 @@ fn render_statistics_progress(
             Constraint::Length(3),
             Constraint::Length(5),
             Constraint::Min(3),
-            Constraint::Length(1),
+            Constraint::Length(2),
         ])
         .split(area);
         render_statistics_summary_compact(frame, sections[0], statistics, theme);
         render_wpm_distribution(frame, sections[1], &statistics.distribution, theme);
         render_activity_summary(frame, sections[2], &statistics.daily_activity, theme);
-        frame.render_widget(
-            Paragraph::new("tab navegar   esc voltar")
-                .style(Style::default().fg(theme_color(theme, &theme.sub, 2.0))),
-            sections[3],
-        );
+        render_statistics_controls(frame, sections[3], "tab navegar   esc voltar", theme);
         return;
     }
+    let chart_height = if area.height >= 24 { 10 } else { 8 };
     let sections = Layout::vertical([
-        Constraint::Length(10),
+        Constraint::Length(chart_height),
         Constraint::Length(3),
         Constraint::Min(7),
-        Constraint::Length(1),
+        Constraint::Length(2),
     ])
     .split(area);
     render_statistics_chart(frame, sections[0], &statistics.trend_tests, theme);
@@ -684,10 +670,19 @@ fn render_statistics_progress(
         .split(sections[2]);
     render_wpm_distribution(frame, lower[0], &statistics.distribution, theme);
     render_daily_activity(frame, lower[1], &statistics.daily_activity, theme);
+    render_statistics_controls(frame, sections[3], "tab ou 1–3 navegar   esc voltar", theme);
+}
+
+fn render_statistics_controls(frame: &mut Frame, area: Rect, controls: &str, theme: &Theme) {
     frame.render_widget(
-        Paragraph::new("tab ou 1–3 navegar   esc voltar")
-            .style(Style::default().fg(theme_color(theme, &theme.sub, 2.0))),
-        sections[3],
+        Paragraph::new(controls)
+            .style(Style::default().fg(theme_color(theme, &theme.sub, 2.0)))
+            .block(
+                Block::default()
+                    .borders(Borders::TOP)
+                    .border_style(Style::default().fg(theme_color(theme, &theme.sub_alt, 1.5))),
+            ),
+        area,
     );
 }
 
@@ -746,83 +741,124 @@ fn render_statistics_summary_compact(
 }
 
 fn render_wpm_distribution(frame: &mut Frame, area: Rect, buckets: &[WpmBucket], theme: &Theme) {
-    let mut lines = vec![Line::styled(
-        "distribuição de wpm",
-        Style::default().fg(theme_color(theme, &theme.text, 4.5)),
-    )];
+    let total = buckets.iter().map(|bucket| bucket.count).sum::<u32>();
+    let mut lines = vec![Line::from(vec![
+        Span::styled(
+            "distribuição de wpm",
+            Style::default().fg(theme_color(theme, &theme.text, 4.5)),
+        ),
+        Span::styled(
+            format!("  ·  {total} testes"),
+            Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
+        ),
+    ])];
     if buckets.is_empty() {
         lines.push(Line::styled(
             "ainda sem testes na mesma configuração",
             Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
         ));
     } else {
-        let maximum = buckets.iter().map(|bucket| bucket.count).max().unwrap_or(1);
-        let visible = area.height.saturating_sub(1) as usize;
+        lines.push(Line::styled(
+            format!("{:<9}{:>7}{:>5}  distribuição", "faixa", "testes", "%"),
+            Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
+        ));
+        let visible = area.height.saturating_sub(2) as usize;
         let start = buckets.len().saturating_sub(visible);
-        let label_width = 9;
-        let bar_width = area.width.saturating_sub(label_width + 5).max(1) as usize;
+        let bar_width = area.width.saturating_sub(24).max(1) as usize;
         lines.extend(buckets[start..].iter().map(|bucket| {
-            let filled = if maximum == 0 {
+            let share = if total == 0 {
+                0.0
+            } else {
+                f64::from(bucket.count) / f64::from(total)
+            };
+            let filled = if bucket.count == 0 {
                 0
             } else {
-                (bucket.count as usize * bar_width).div_ceil(maximum as usize)
+                (share * bar_width as f64).round().max(1.0) as usize
             };
-            Line::from(vec![
+            let mut spans = vec![
                 Span::styled(
-                    format!("{:>3}–{:<3} ", bucket.start, bucket.end),
+                    format!("{:>3}–{:<3}  ", bucket.start, bucket.end),
                     Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
                 ),
                 Span::styled(
-                    "█".repeat(filled),
-                    Style::default().fg(theme_color(theme, &theme.main, 3.0)),
+                    format!("{:>7}", bucket.count),
+                    Style::default().fg(theme_color(theme, &theme.text, 4.5)),
                 ),
                 Span::styled(
-                    format!(" {}", bucket.count),
+                    format!("{:>5.0}%  ", share * 100.0),
                     Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
                 ),
-            ])
+            ];
+            spans.extend(statistics_bar_track(filled, bar_width, theme));
+            Line::from(spans)
         }));
     }
     frame.render_widget(Paragraph::new(lines), area);
 }
 
 fn render_daily_activity(frame: &mut Frame, area: Rect, days: &[ActivityDay], theme: &Theme) {
-    let mut lines = vec![Line::styled(
-        "atividade diária  ·  últimos 14 dias",
-        Style::default().fg(theme_color(theme, &theme.text, 4.5)),
-    )];
-    let visible = area.height.saturating_sub(1) as usize;
+    let visible = area.height.saturating_sub(2) as usize;
     let start = days.len().saturating_sub(visible);
-    let maximum = days.iter().map(|day| day.active_ms).max().unwrap_or(1);
-    let bar_width = area.width.saturating_sub(30).max(1) as usize;
-    lines.extend(days[start..].iter().map(|day| {
+    let visible_days = &days[start..];
+    let maximum = visible_days
+        .iter()
+        .map(|day| day.active_ms)
+        .max()
+        .unwrap_or(1);
+    let bar_width = area.width.saturating_sub(25).max(1) as usize;
+    let mut lines = vec![Line::from(vec![
+        Span::styled(
+            "atividade diária",
+            Style::default().fg(theme_color(theme, &theme.text, 4.5)),
+        ),
+        Span::styled(
+            format!("  ·  {} dias", visible_days.len()),
+            Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
+        ),
+    ])];
+    lines.push(Line::styled(
+        format!("{:<8}{:>7}{:>8}  atividade", "data", "min", "testes"),
+        Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
+    ));
+    lines.extend(visible_days.iter().map(|day| {
         let filled = if maximum == 0 || day.active_ms == 0 {
             0
         } else {
             (day.active_ms as usize * bar_width).div_ceil(maximum as usize)
         };
         let minutes = day.active_ms as f64 / 60_000.0;
-        let tests = if day.tests == 1 { "teste" } else { "testes" };
-        Line::from(vec![
+        let mut spans = vec![
             Span::styled(
-                format!("{}  ", day.date.format("%d/%m")),
+                format!("{:<8}", day.date.format("%d/%m")),
                 Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
             ),
             Span::styled(
-                if filled == 0 {
-                    "·".into()
-                } else {
-                    "█".repeat(filled)
-                },
-                Style::default().fg(theme_color(theme, &theme.main, 3.0)),
+                format!("{:>7.1}", minutes),
+                Style::default().fg(theme_color(theme, &theme.text, 4.5)),
             ),
             Span::styled(
-                format!("  {:>2} {tests}  {:>4.1} min", day.tests, minutes),
-                Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
+                format!("{:>8}  ", day.tests),
+                Style::default().fg(theme_color(theme, &theme.text, 4.5)),
             ),
-        ])
+        ];
+        spans.extend(statistics_bar_track(filled, bar_width, theme));
+        Line::from(spans)
     }));
     frame.render_widget(Paragraph::new(lines), area);
+}
+
+fn statistics_bar_track(filled: usize, width: usize, theme: &Theme) -> Vec<Span<'static>> {
+    vec![
+        Span::styled(
+            "█".repeat(filled.min(width)),
+            Style::default().fg(theme_color(theme, &theme.main, 3.0)),
+        ),
+        Span::styled(
+            "░".repeat(width.saturating_sub(filled)),
+            Style::default().fg(theme_color(theme, &theme.sub_alt, 1.5)),
+        ),
+    ]
 }
 
 fn filtered_history(
@@ -856,7 +892,7 @@ fn render_statistics_history(
     let sections = Layout::vertical([
         Constraint::Length(2),
         Constraint::Min(1),
-        Constraint::Length(1),
+        Constraint::Length(2),
     ])
     .split(area);
     frame.render_widget(
@@ -901,14 +937,15 @@ fn render_statistics_history(
             .collect::<Vec<_>>();
         frame.render_widget(Paragraph::new(lines), sections[1]);
     }
-    frame.render_widget(
-        Paragraph::new(if area.width < 72 {
+    render_statistics_controls(
+        frame,
+        sections[2],
+        if area.width < 72 {
             "↑↓ mover  enter abrir  f filtro  esc voltar"
         } else {
             "↑↓ selecionar   enter detalhes   f filtrar   tab navegar   esc voltar"
-        })
-        .style(Style::default().fg(theme_color(theme, &theme.sub, 2.0))),
-        sections[2],
+        },
+        theme,
     );
 }
 
@@ -1083,15 +1120,21 @@ fn render_session_detail(frame: &mut Frame, area: Rect, detail: &SessionDetail, 
             Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
         ));
     }
-    while lines.len() < area.height.saturating_sub(1) as usize {
+    let body_height = area.height.saturating_sub(2);
+    while lines.len() < body_height as usize {
         lines.push(Line::from(""));
     }
-    lines.truncate(area.height.saturating_sub(1) as usize);
-    lines.push(Line::styled(
+    lines.truncate(body_height as usize);
+    frame.render_widget(
+        Paragraph::new(lines).wrap(Wrap { trim: false }),
+        Rect::new(area.x, area.y, area.width, body_height),
+    );
+    render_statistics_controls(
+        frame,
+        Rect::new(area.x, area.bottom().saturating_sub(2), area.width, 2),
         "enter ou esc voltar",
-        Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
-    ));
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
+        theme,
+    );
 }
 
 fn metric_span(label: &str, value: String, theme: &Theme) -> Span<'static> {
@@ -1442,15 +1485,21 @@ fn render_word_detail(frame: &mut Frame, area: Rect, detail: &WordDetail, theme:
                 .take(area.height.saturating_sub(10) as usize)
                 .map(|attempt| word_attempt_line(attempt, theme)),
         );
-        while lines.len() < area.height.saturating_sub(1) as usize {
+        let body_height = area.height.saturating_sub(2);
+        while lines.len() < body_height as usize {
             lines.push(Line::from(""));
         }
-        lines.truncate(area.height.saturating_sub(1) as usize);
-        lines.push(Line::styled(
+        lines.truncate(body_height as usize);
+        frame.render_widget(
+            Paragraph::new(lines),
+            Rect::new(area.x, area.y, area.width, body_height),
+        );
+        render_statistics_controls(
+            frame,
+            Rect::new(area.x, area.bottom().saturating_sub(2), area.width, 2),
             "r zerar palavra   enter ou esc voltar",
-            Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
-        ));
-        frame.render_widget(Paragraph::new(lines), area);
+            theme,
+        );
         return;
     }
 
@@ -1460,7 +1509,7 @@ fn render_word_detail(frame: &mut Frame, area: Rect, detail: &WordDetail, theme:
         Constraint::Length(3),
         Constraint::Length(1),
         Constraint::Min(8),
-        Constraint::Length(1),
+        Constraint::Length(2),
     ])
     .split(area);
     frame.render_widget(
@@ -1572,10 +1621,11 @@ fn render_word_detail(frame: &mut Frame, area: Rect, detail: &WordDetail, theme:
             .map(|attempt| word_attempt_line(attempt, theme)),
     );
     frame.render_widget(Paragraph::new(recent), body[1]);
-    frame.render_widget(
-        Paragraph::new("r zerar palavra   enter ou esc voltar")
-            .style(Style::default().fg(theme_color(theme, &theme.sub, 2.0))),
+    render_statistics_controls(
+        frame,
         sections[5],
+        "r zerar palavra   enter ou esc voltar",
+        theme,
     );
 }
 
@@ -1854,19 +1904,25 @@ fn render_statistics_compact(
         );
     }
 
-    while lines.len() < area.height.saturating_sub(1) as usize {
+    let body_height = area.height.saturating_sub(2);
+    while lines.len() < body_height as usize {
         lines.push(Line::from(""));
     }
-    lines.truncate(area.height.saturating_sub(1) as usize);
-    lines.push(Line::styled(
+    lines.truncate(body_height as usize);
+    frame.render_widget(
+        Paragraph::new(lines),
+        Rect::new(area.x, area.y, area.width, body_height),
+    );
+    render_statistics_controls(
+        frame,
+        Rect::new(area.x, area.bottom().saturating_sub(2), area.width, 2),
         if area.width < 64 {
             "↑↓ mover  enter detalhes  R zerar  esc voltar"
         } else {
             "↑↓ selecionar   enter detalhes   R zerar modelo   esc voltar"
         },
-        Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
-    ));
-    frame.render_widget(Paragraph::new(lines), area);
+        theme,
+    );
 }
 
 fn compact_trend(sessions: &[SessionSummary], theme: &Theme) -> Line<'static> {
@@ -1987,31 +2043,24 @@ fn render_statistics_chart(
             }),
         canvas_area,
     );
-    if let (Some(first), Some(last)) = (sessions.first(), sessions.last()) {
-        let middle = sessions[sessions.len() / 2].id;
-        let labels = Layout::horizontal([
-            Constraint::Percentage(33),
-            Constraint::Percentage(34),
-            Constraint::Percentage(33),
-        ])
-        .split(Rect::new(
-            columns[1].x,
-            canvas_area.bottom(),
-            columns[1].width,
-            1,
-        ));
-        for (label, value, alignment) in [
-            (labels[0], format!("#{}", first.id), Alignment::Left),
-            (labels[1], format!("#{middle}"), Alignment::Center),
-            (labels[2], format!("#{}", last.id), Alignment::Right),
-        ] {
-            frame.render_widget(
-                Paragraph::new(value)
-                    .style(Style::default().fg(theme_color(theme, &theme.sub, 2.0)))
-                    .alignment(alignment),
-                label,
-            );
-        }
+    if !sessions.is_empty() {
+        let tick_count = chart_tick_count(columns[1].width, sessions.len());
+        let labels = (0..tick_count)
+            .map(|index| {
+                let session_index = if tick_count == 1 {
+                    0
+                } else {
+                    index * (sessions.len() - 1) / (tick_count - 1)
+                };
+                format!("#{}", sessions[session_index].id)
+            })
+            .collect::<Vec<_>>();
+        render_chart_tick_labels(
+            frame,
+            Rect::new(columns[1].x, canvas_area.bottom(), columns[1].width, 1),
+            &labels,
+            Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
+        );
     }
 }
 
@@ -4004,30 +4053,59 @@ fn render_chart_x_labels(
     theme: &Theme,
 ) {
     let style = Style::default().fg(theme_color(theme, &theme.main, 3.0));
-    let duration = format_chart_duration(metrics.duration_ms);
-    frame.render_widget(
-        Paragraph::new(Line::styled("1", style)),
-        Rect::new(plot.x, area.y, 4.min(plot.width), 1),
+    let duration = (metrics.duration_ms as f64 / 1_000.0).max(1.0);
+    let tick_count = chart_tick_count(plot.width, metrics.wpm_history.len());
+    let labels = (0..tick_count)
+        .map(|index| {
+            let seconds = if tick_count == 1 {
+                duration
+            } else {
+                1.0 + (duration - 1.0) * index as f64 / (tick_count - 1) as f64
+            };
+            format_chart_seconds(seconds)
+        })
+        .collect::<Vec<_>>();
+    render_chart_tick_labels(
+        frame,
+        Rect::new(plot.x, area.y, plot.width, 1),
+        &labels,
+        style,
     );
-    if metrics.wpm_history.len() >= 3 {
+}
+
+fn chart_tick_count(width: u16, samples: usize) -> usize {
+    let desired = match width {
+        72.. => 6,
+        48.. => 5,
+        32.. => 4,
+        _ => 3,
+    };
+    desired.min(samples.max(1))
+}
+
+fn render_chart_tick_labels(frame: &mut Frame, area: Rect, labels: &[String], style: Style) {
+    for (index, label) in labels.iter().enumerate() {
+        let width = (UnicodeWidthStr::width(label.as_str()) as u16).min(area.width);
+        let anchor = if labels.len() <= 1 {
+            area.width.saturating_sub(1) / 2
+        } else {
+            (index as u32 * u32::from(area.width.saturating_sub(1)) / (labels.len() - 1) as u32)
+                as u16
+        };
+        let x = if index == 0 {
+            area.x
+        } else if index + 1 == labels.len() {
+            area.right().saturating_sub(width)
+        } else {
+            area.x
+                .saturating_add(anchor.saturating_sub(width / 2))
+                .min(area.right().saturating_sub(width))
+        };
         frame.render_widget(
-            Paragraph::new(Line::styled(
-                format_chart_seconds((1.0 + metrics.duration_ms as f64 / 1_000.0) / 2.0),
-                style,
-            ))
-            .alignment(Alignment::Center),
-            Rect::new(plot.x, area.y, plot.width, 1),
+            Paragraph::new(Line::styled(label.clone(), style)),
+            Rect::new(x, area.y, width, 1),
         );
     }
-    frame.render_widget(
-        Paragraph::new(Line::styled(duration.clone(), style)).alignment(Alignment::Right),
-        Rect::new(
-            plot.right().saturating_sub(duration.len() as u16),
-            area.y,
-            duration.len() as u16,
-            1,
-        ),
-    );
 }
 
 fn format_chart_seconds(seconds: f64) -> String {
@@ -4036,10 +4114,6 @@ fn format_chart_seconds(seconds: f64) -> String {
     } else {
         format!("{seconds:.1}")
     }
-}
-
-fn format_chart_duration(duration_ms: u64) -> String {
-    format_chart_seconds((duration_ms as f64 / 1_000.0).max(1.0))
 }
 
 fn render_result_details(
@@ -6095,9 +6169,11 @@ mod tests {
     #[test]
     fn mouse_navega_as_paginas_e_o_historico() {
         let statistics = statistics_fixture();
+        let viewport = Rect::new(0, 0, 100, 28);
+        let content = statistics_content_area(viewport);
         assert_eq!(
             statistics_action_at(
-                Rect::new(0, 0, 100, 28),
+                viewport,
                 &statistics,
                 StatisticsPage::Overview,
                 0,
@@ -6108,12 +6184,15 @@ mod tests {
         );
         assert_eq!(
             statistics_action_at(
-                Rect::new(0, 0, 100, 28),
+                viewport,
                 &statistics,
                 StatisticsPage::History,
                 0,
                 HistoryFilter::All,
-                Position::new(6, 6),
+                Position::new(
+                    content.x + 1,
+                    content.y + statistics_navigation_height(content.width) + 2,
+                ),
             ),
             Some(StatisticsAction::Session(0))
         );
