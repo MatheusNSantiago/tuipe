@@ -1,6 +1,6 @@
 ---
 source: src/ui.rs
-expression: "render_engine_with_state(100, 28, &engine, true, SessionKind::Practice,\nPersistenceUiState::Saved, 4, false,)"
+expression: "render_engine_with_state(100, 28, &engine, TestRenderOptions\n{\n    settings_open: true, settings_focus: 4, session_kind:\n    SessionKind::Practice, persistence: PersistenceUiState::Saved,\n    focus_warning: false,\n},)"
 ---
 
 
@@ -16,9 +16,9 @@ expression: "render_engine_with_state(100, 28, &engine, true, SessionKind::Pract
        │ │  modo                 tempo │  │                                               │ │
        │ │  duração               30 s │  │                                               │ │
        │ │› dificuldade   especialista │  │       normal    especialista    mestre        │ │
-       │ │  treino          adaptativo │  │ normal       permite corrigir e continuar     │ │
-       │ │  idioma           português │  │ especialista palavra errada + espaço encerra  │ │
-       │ │  vocabulário          comum │  │ mestre       1º caractere errado encerra      │ │
+       │ │  treino          adaptativo │  │                                               │ │
+       │ │  idioma           português │  │                 especialista                  │ │
+       │ │  vocabulário          comum │  │  espaço após palavra errada encerra o teste   │ │
        │ │  tema                  arch │  │                                               │ │
        │ │                             │  │   ← ou → altera  ·  enter confirma e fecha    │ │
        │ ╰─────────────────────────────╯  ╰───────────────────────────────────────────────╯ │

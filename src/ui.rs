@@ -2981,52 +2981,31 @@ fn render_difficulty_explanation(
     difficulty: Difficulty,
     theme: &Theme,
 ) {
-    let lines = difficulty_explanations()
-        .into_iter()
-        .map(|(candidate, label, explanation)| {
-            let selected = difficulty == candidate;
-            Line::from(vec![
-                Span::styled(
-                    format!("{label:<13}"),
-                    Style::default()
-                        .fg(theme_color(
-                            theme,
-                            if selected { &theme.main } else { &theme.sub },
-                            if selected { 3.0 } else { 2.0 },
-                        ))
-                        .add_modifier(if selected {
-                            Modifier::BOLD
-                        } else {
-                            Modifier::empty()
-                        }),
-                ),
-                Span::styled(
-                    explanation,
-                    Style::default().fg(theme_color(
-                        theme,
-                        if selected { &theme.text } else { &theme.sub },
-                        if selected { 4.5 } else { 2.0 },
-                    )),
-                ),
-            ])
-        })
-        .collect::<Vec<_>>();
+    let (label, explanation) = difficulty_explanation(difficulty);
     frame.render_widget(
-        Paragraph::new(lines),
-        Rect::new(area.x, area.y.saturating_add(5), area.width, 3),
+        Paragraph::new(vec![
+            Line::styled(
+                label,
+                Style::default()
+                    .fg(theme_color(theme, &theme.main, 3.0))
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Line::styled(
+                explanation,
+                Style::default().fg(theme_color(theme, &theme.text, 4.5)),
+            ),
+        ])
+        .alignment(Alignment::Center),
+        Rect::new(area.x, area.y.saturating_add(6), area.width, 2),
     );
 }
 
-fn difficulty_explanations() -> [(Difficulty, &'static str, &'static str); 3] {
-    [
-        (Difficulty::Normal, "normal", "permite corrigir e continuar"),
-        (
-            Difficulty::Expert,
-            "especialista",
-            "palavra errada + espaço encerra",
-        ),
-        (Difficulty::Master, "mestre", "1º caractere errado encerra"),
-    ]
+fn difficulty_explanation(difficulty: Difficulty) -> (&'static str, &'static str) {
+    match difficulty {
+        Difficulty::Normal => ("normal", "você pode corrigir os erros e continuar"),
+        Difficulty::Expert => ("especialista", "espaço após palavra errada encerra o teste"),
+        Difficulty::Master => ("mestre", "o primeiro caractere incorreto encerra o teste"),
+    }
 }
 
 fn settings_current_values(config: &crate::typing::TestConfig, theme_name: &str) -> Vec<String> {
@@ -5936,16 +5915,16 @@ mod tests {
     #[test]
     fn dificuldades_explicam_exatamente_quando_o_teste_termina() {
         assert_eq!(
-            difficulty_explanations(),
-            [
-                (Difficulty::Normal, "normal", "permite corrigir e continuar"),
-                (
-                    Difficulty::Expert,
-                    "especialista",
-                    "palavra errada + espaço encerra"
-                ),
-                (Difficulty::Master, "mestre", "1º caractere errado encerra"),
-            ]
+            difficulty_explanation(Difficulty::Normal),
+            ("normal", "você pode corrigir os erros e continuar")
+        );
+        assert_eq!(
+            difficulty_explanation(Difficulty::Expert),
+            ("especialista", "espaço após palavra errada encerra o teste")
+        );
+        assert_eq!(
+            difficulty_explanation(Difficulty::Master),
+            ("mestre", "o primeiro caractere incorreto encerra o teste")
         );
     }
 
