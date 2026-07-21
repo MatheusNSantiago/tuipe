@@ -1,8 +1,8 @@
 # Registro de mudanças
 
-Este projeto segue versionamento semântico. Mudanças incompatíveis no banco ou
-nos eventos brutos exigem uma nova versão principal ou uma migração que preserve
-os dados existentes.
+O projeto ainda não possui uma versão pública. Até a primeira publicação, banco,
+eventos e modelo aceitam somente o formato atual. O contrato de compatibilidade
+começa na primeira versão distribuída.
 
 ## [Não lançado]
 
@@ -16,15 +16,13 @@ os dados existentes.
 - banco SQLite privado, eventos compactados, backup, diagnóstico e reconstrução;
 - rollback reversível da política adaptativa para um modo uniforme seguro;
 - shadow mode que registra decisões candidatas sem alterar o teste apresentado;
-- leitura retrocompatível dos estados adaptativos gravados antes da separação
-  explícita de lentidão;
 - atalhos configuráveis, mouse, terminais compactos e recuperação segura do
   terminal em saída, erro e sinais do sistema;
 - detecção de Nerd Font no Kitty através do tmux, configurações reorganizadas e
   áreas clicáveis compatíveis com o desenho completo dos controles;
 - navegação de configurações com foco explícito, setas direcionais simétricas,
   estados booleanos legíveis e legenda permanente dos comandos;
-- painel mestre–detalhe para configurações largas, com resumo alinhado,
+- painel mestre e detalhe para configurações largas, com resumo alinhado,
   descrição contextual, edição isolada e áreas de clique equivalentes;
 - confirmação das configurações sem alteração implícita e explicação visível
   das regras normal, especialista e mestre;
@@ -47,7 +45,7 @@ os dados existentes.
 ### Validado
 
 - paridade visual dos fluxos de 30 segundos, 50 palavras e citação;
-- 155 testes automatizados em unidade, integração e pseudo-terminal;
+- 148 testes automatizados em unidade, integração e pseudo-terminal;
 - pacote Cargo reproduzível e binário Linux otimizado para glibc 2.29 ou mais
   recente, distribuído com licença e proveniência dos conteúdos;
 - latência p99 abaixo de 1 ms para tecla e resize na máquina de validação.
