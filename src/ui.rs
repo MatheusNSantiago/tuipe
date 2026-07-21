@@ -2981,30 +2981,22 @@ fn render_difficulty_explanation(
     difficulty: Difficulty,
     theme: &Theme,
 ) {
-    let (label, explanation) = difficulty_explanation(difficulty);
+    let explanation = difficulty_explanation(difficulty);
     frame.render_widget(
-        Paragraph::new(vec![
-            Line::styled(
-                label,
-                Style::default()
-                    .fg(theme_color(theme, &theme.main, 3.0))
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Line::styled(
-                explanation,
-                Style::default().fg(theme_color(theme, &theme.text, 4.5)),
-            ),
-        ])
+        Paragraph::new(Line::styled(
+            explanation,
+            Style::default().fg(theme_color(theme, &theme.text, 4.5)),
+        ))
         .alignment(Alignment::Center),
-        Rect::new(area.x, area.y.saturating_add(6), area.width, 2),
+        Rect::new(area.x, area.y.saturating_add(7), area.width, 1),
     );
 }
 
-fn difficulty_explanation(difficulty: Difficulty) -> (&'static str, &'static str) {
+fn difficulty_explanation(difficulty: Difficulty) -> &'static str {
     match difficulty {
-        Difficulty::Normal => ("normal", "você pode corrigir os erros e continuar"),
-        Difficulty::Expert => ("especialista", "espaço após palavra errada encerra o teste"),
-        Difficulty::Master => ("mestre", "o primeiro caractere incorreto encerra o teste"),
+        Difficulty::Normal => "você pode corrigir os erros e continuar",
+        Difficulty::Expert => "espaço após palavra errada encerra o teste",
+        Difficulty::Master => "o primeiro caractere incorreto encerra o teste",
     }
 }
 
@@ -5932,15 +5924,15 @@ mod tests {
     fn dificuldades_explicam_exatamente_quando_o_teste_termina() {
         assert_eq!(
             difficulty_explanation(Difficulty::Normal),
-            ("normal", "você pode corrigir os erros e continuar")
+            "você pode corrigir os erros e continuar"
         );
         assert_eq!(
             difficulty_explanation(Difficulty::Expert),
-            ("especialista", "espaço após palavra errada encerra o teste")
+            "espaço após palavra errada encerra o teste"
         );
         assert_eq!(
             difficulty_explanation(Difficulty::Master),
-            ("mestre", "o primeiro caractere incorreto encerra o teste")
+            "o primeiro caractere incorreto encerra o teste"
         );
     }
 

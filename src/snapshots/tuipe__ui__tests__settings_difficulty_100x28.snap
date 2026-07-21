@@ -17,7 +17,7 @@ expression: "render_engine_with_state(100, 28, &engine, TestRenderOptions\n{\n  
        │ │  duração               30 s │  │                                               │ │
        │ │› dificuldade   especialista │  │       normal    especialista    mestre        │ │
        │ │  treino          adaptativo │  │                                               │ │
-       │ │  idioma           português │  │                 especialista                  │ │
+       │ │  idioma           português │  │                                               │ │
        │ │  vocabulário          comum │  │  espaço após palavra errada encerra o teste   │ │
        │ │  tema                  arch │  │                                               │ │
        │ │                             │  │   ← ou → altera  ·  enter confirma e fecha    │ │
