@@ -30,6 +30,8 @@ os dados existentes.
   das regras normal, especialista e mestre;
 - palavras prioritárias ordenadas pelo aumento adaptativo exibido, com a
   dificuldade interna usada apenas para desempate;
+- resultado sem repetir a causa do encerramento e com ícone explícito para o
+  idioma em Nerd Font e no fallback Unicode;
 - ações do resultado com ícone, tecla e descrição reunidos no mesmo controle;
 - navegação das estatísticas em abas delimitadas, responsivas e clicáveis, com
   estado ativo indicado sem preenchimento luminoso;
