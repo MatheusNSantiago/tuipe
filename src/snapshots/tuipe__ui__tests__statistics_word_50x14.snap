@@ -3,15 +3,15 @@ source: src/ui.rs
 expression: rendered
 ---
   palavra  através
-  aumento estimado no próximo treino: ≈18%
-  falhas 30%  ·  correções 20%  ·  10 exposições
+  chance na próxima sessão: 7% → 25%
+  falhou 3/10  ·  corrigiu 2/10  ·  5 caracteres
   ritmo 120 ms/caractere  ·  +33% vs base
   tendência ainda incerta
   última prática há 2 h
 
   tentativas recentes
-  #42    falhou    140 ms/caractere
-  #41    corrigiu  110 ms/caractere
+  #42    falhou · 140 ms/caractere
+  #41    corrigiu 2 · 240 ms
 
 
   ──────────────────────────────────────────────

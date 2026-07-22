@@ -16,7 +16,7 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, pa
 use crate::adaptive::{
     CURRENT_POLICY_VERSION, MechanicSkill, NgramSkill, Observation, PersonalBaseline,
     ReachObservation, ReachProfile, ReviewState, SelectionSource, UNIFORM_POLICY_VERSION,
-    WordSelection, WordSkill, lexical_ngrams,
+    WordSelection, WordSkill, correction_burden, lexical_ngrams,
 };
 use crate::gamification::{StreakState, XpState, award};
 use crate::persistence::{
@@ -201,6 +201,12 @@ pub struct PriorityWord {
     pub effective_exposures: f64,
     pub uncorrected_error_rate: f64,
     pub corrected_error_rate: f64,
+    pub correction_burden: f64,
+    pub corrected_graphemes: f64,
+    pub corrective_events: f64,
+    pub correction_ms: f64,
+    pub baseline_exposure_chance: f64,
+    pub adaptive_exposure_chance: f64,
     pub estimated_exposure_uplift: f64,
 }
 
@@ -210,6 +216,8 @@ pub struct WordAttemptSummary {
     pub observed_at_unix_s: i64,
     pub confirmed_error: bool,
     pub corrected: bool,
+    pub corrections: u32,
+    pub correction_ms: u64,
     pub milliseconds_per_grapheme: Option<f64>,
     pub latency_ratio: Option<f64>,
 }
@@ -268,6 +276,28 @@ pub struct WordObservationRecord {
     pub selection_source: Option<SelectionSource>,
     pub selection_propensity: Option<f64>,
     pub mechanics: Vec<MechanicObservationRecord>,
+    pub patterns: Vec<PatternObservationRecord>,
+}
+
+fn adaptive_observation(record: &WordObservationRecord) -> Observation {
+    Observation {
+        confirmed_error: record.confirmed_error,
+        corrected: record.corrections > 0,
+        corrections: record.corrections,
+        corrective_events: record.corrective_events,
+        correction_ms: record.correction_ms,
+        correction_burden: correction_burden(
+            record.corrections,
+            record.corrective_events,
+            record.correction_ms,
+            record.fluent_ms,
+            record.grapheme_count,
+        ),
+        fast_success: record.fast_success,
+        slow: record.slow,
+        latency_ratio: record.latency_ratio,
+        evidence_weight: record.evidence_weight,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -275,6 +305,20 @@ pub struct MechanicObservationRecord {
     pub mechanic: String,
     pub confirmed_error: bool,
     pub corrected: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct PatternObservationRecord {
+    pub pattern: String,
+    pub confirmed_error: bool,
+    pub corrected: bool,
+    pub correction_burden: f64,
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+struct SharedEvidenceRecord {
+    mechanics: Vec<MechanicObservationRecord>,
+    patterns: Vec<PatternObservationRecord>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -555,6 +599,34 @@ impl Repository {
             .map_err(Into::into)
     }
 
+    /// Recalcula projeções incompatíveis antes de abrir a interface. Como o
+    /// aplicativo ainda não foi publicado, a atualização substitui o modelo
+    /// derivado sem carregar formatos antigos; sessões e eventos permanecem.
+    pub fn upgrade_adaptive_model_if_needed(&self) -> Result<bool> {
+        let state = self.adaptive_policy_state()?;
+        let obsolete = state.active_version != UNIFORM_POLICY_VERSION
+            && state.active_version != CURRENT_POLICY_VERSION
+            || state.fallback_version != UNIFORM_POLICY_VERSION
+                && state.fallback_version != CURRENT_POLICY_VERSION;
+        if !obsolete {
+            return Ok(false);
+        }
+        let transaction =
+            rusqlite::Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
+        self.rebuild_adaptive_projections_in(&transaction, false)?;
+        transaction.commit()?;
+        self.connection.execute(
+            "UPDATE adaptive_policy_state
+             SET active_version = CASE WHEN active_version = 0 THEN 0 ELSE ?1 END,
+                 fallback_version = CASE WHEN active_version = 0 THEN ?1 ELSE 0 END,
+                 shadow_version = CASE WHEN active_version = 0 THEN ?1 ELSE NULL END,
+                 changed_at = CURRENT_TIMESTAMP
+             WHERE id = 1",
+            [CURRENT_POLICY_VERSION],
+        )?;
+        Ok(true)
+    }
+
     /// Troca atomicamente a política ativa pela última alternativa conhecida.
     /// A operação é reversível: uma segunda chamada restaura a versão anterior.
     pub fn rollback_adaptive_policy(&self) -> Result<AdaptivePolicyState> {
@@ -726,14 +798,7 @@ impl Repository {
                 .map(|bytes| WordSkill::decode(&bytes))
                 .transpose()?
                 .unwrap_or_default();
-            let observation = Observation {
-                confirmed_error: record.confirmed_error,
-                corrected: record.corrections > 0,
-                fast_success: record.fast_success,
-                slow: record.slow,
-                latency_ratio: record.latency_ratio,
-                evidence_weight: record.evidence_weight,
-            };
+            let observation = adaptive_observation(record);
             let mut skill = previous;
             skill.observe(observation);
             let state = postcard::to_allocvec(&skill)?;
@@ -742,22 +807,34 @@ impl Repository {
                  ON CONFLICT(language, word) DO UPDATE SET state = excluded.state",
                 params![record.language, record.word, state],
             )?;
-            for ngram in lexical_ngrams(&record.word) {
+            for pattern in &record.patterns {
                 let mut ngram_skill = transaction
                     .query_row(
                         "SELECT state FROM ngram_skill WHERE language = ?1 AND ngram = ?2",
-                        params![record.language, ngram],
+                        params![record.language, pattern.pattern],
                         |row| row.get::<_, Vec<u8>>(0),
                     )
                     .optional()?
                     .map(|bytes| postcard::from_bytes::<NgramSkill>(&bytes))
                     .transpose()?
                     .unwrap_or_default();
-                ngram_skill.observe(&record.word, observation);
+                ngram_skill.observe(
+                    &record.word,
+                    Observation {
+                        confirmed_error: pattern.confirmed_error,
+                        corrected: pattern.corrected,
+                        correction_burden: pattern.correction_burden,
+                        ..observation
+                    },
+                );
                 transaction.execute(
                     "INSERT INTO ngram_skill (language, ngram, state) VALUES (?1, ?2, ?3)
                      ON CONFLICT(language, ngram) DO UPDATE SET state = excluded.state",
-                    params![record.language, ngram, postcard::to_allocvec(&ngram_skill)?,],
+                    params![
+                        record.language,
+                        pattern.pattern,
+                        postcard::to_allocvec(&ngram_skill)?,
+                    ],
                 )?;
             }
             for mechanic in &record.mechanics {
@@ -947,7 +1024,8 @@ impl Repository {
         let mut statement = transaction.prepare(
             "SELECT wo.language, wo.word, wo.confirmed_error, wo.corrections,
                     wo.fast_success, wo.slow, wo.latency_ratio, wo.evidence_weight,
-                    wo.mechanics_json, wo.session_id, unixepoch(s.created_at), wo.censored
+                    wo.mechanics_json, wo.session_id, unixepoch(s.created_at), wo.censored,
+                    wo.corrective_events, wo.correction_ms, wo.fluent_ms, wo.grapheme_count
              FROM word_observations wo
              JOIN sessions s ON s.id = wo.session_id
              ORDER BY wo.session_id, wo.id",
@@ -960,6 +1038,16 @@ impl Repository {
             let observation = Observation {
                 confirmed_error: row.get(2)?,
                 corrected: corrections > 0,
+                corrections,
+                corrective_events: row.get(12)?,
+                correction_ms: row.get(13)?,
+                correction_burden: correction_burden(
+                    corrections,
+                    row.get(12)?,
+                    row.get(13)?,
+                    row.get(14)?,
+                    row.get(15)?,
+                ),
                 fast_success: row.get(4)?,
                 slow: row.get(5)?,
                 latency_ratio: row.get(6)?,
@@ -972,8 +1060,7 @@ impl Repository {
             {
                 continue;
             }
-            let stored_mechanics =
-                serde_json::from_str::<Vec<MechanicObservationRecord>>(&row.get::<_, String>(8)?)?;
+            let stored_evidence = decode_shared_evidence(&row.get::<_, String>(8)?)?;
             let observed_at = row.get::<_, i64>(10)?;
             let censored = row.get::<_, bool>(11)?;
             observation_count = observation_count.saturating_add(1);
@@ -982,13 +1069,21 @@ impl Repository {
                 .entry((language.clone(), word.clone()))
                 .or_default()
                 .observe(observation);
-            for ngram in lexical_ngrams(&word) {
+            for pattern in &stored_evidence.patterns {
                 ngrams
-                    .entry((language.clone(), ngram))
+                    .entry((language.clone(), pattern.pattern.clone()))
                     .or_default()
-                    .observe(&word, observation);
+                    .observe(
+                        &word,
+                        Observation {
+                            confirmed_error: pattern.confirmed_error,
+                            corrected: pattern.corrected,
+                            correction_burden: pattern.correction_burden,
+                            ..observation
+                        },
+                    );
             }
-            for mechanic in &stored_mechanics {
+            for mechanic in &stored_evidence.mechanics {
                 mechanics
                     .entry((language.clone(), mechanic.mechanic.clone()))
                     .or_default()
@@ -1223,9 +1318,9 @@ impl Repository {
 
     pub fn baseline_profile(&self, language: &str) -> Result<PersonalBaselineProfile> {
         let (exposures, uncorrected, corrected) = self.connection.query_row(
-            "SELECT COUNT(*),
-                    COALESCE(SUM(confirmed_error != 0), 0),
-                    COALESCE(SUM(confirmed_error = 0 AND corrections > 0), 0)
+            "SELECT COALESCE(SUM(evidence_weight), 0.0),
+                    COALESCE(SUM((confirmed_error != 0) * evidence_weight), 0.0),
+                    COALESCE(SUM((corrections > 0) * evidence_weight), 0.0)
              FROM word_observations
              WHERE language = ?1
                AND active_ms > 0
@@ -1235,9 +1330,9 @@ impl Repository {
             [language],
             |row| {
                 Ok((
-                    row.get::<_, u64>(0)?,
-                    row.get::<_, u64>(1)?,
-                    row.get::<_, u64>(2)?,
+                    row.get::<_, f64>(0)?,
+                    row.get::<_, f64>(1)?,
+                    row.get::<_, f64>(2)?,
                 ))
             },
         )?;
@@ -1259,10 +1354,7 @@ impl Repository {
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         let prior = PersonalBaseline::default();
-        let exposures = exposures as f64;
-        let prior_strength = 24.0;
-        let uncorrected = uncorrected as f64;
-        let corrected = corrected as f64;
+        let prior_strength = crate::adaptive::AdaptivePolicy::default().prior_strength;
         Ok(PersonalBaselineProfile {
             rates: PersonalBaseline {
                 uncorrected_error_rate: (prior.uncorrected_error_rate * prior_strength
@@ -1272,8 +1364,8 @@ impl Repository {
                     / (prior_strength + exposures),
             },
             latency_samples,
-            uncorrected_samples: uncorrected as u64,
-            corrected_samples: corrected as u64,
+            uncorrected_samples: uncorrected.round() as u64,
+            corrected_samples: corrected.round() as u64,
         })
     }
 
@@ -1841,7 +1933,7 @@ impl Repository {
             .filter_map(|(language, word, skill, difficulty)| {
                 let exposures = skill.effective_exposures;
                 if difficulty < crate::adaptive::MINIMUM_ACTIONABLE_DIFFICULTY
-                    || counts.get(&language).copied().unwrap_or(0) >= 8
+                    || counts.get(&language).copied().unwrap_or(0) >= 64
                 {
                     return None;
                 }
@@ -1864,6 +1956,12 @@ impl Repository {
                     } else {
                         0.0
                     },
+                    correction_burden: skill.correction_burden_mass,
+                    corrected_graphemes: skill.corrected_graphemes,
+                    corrective_events: skill.corrective_events,
+                    correction_ms: skill.correction_ms,
+                    baseline_exposure_chance: 0.0,
+                    adaptive_exposure_chance: 0.0,
                     estimated_exposure_uplift: 0.0,
                 })
             })
@@ -1898,12 +1996,18 @@ impl Repository {
             effective_exposures: exposures,
             uncorrected_error_rate: rate(skill.uncorrected_error_mass, exposures),
             corrected_error_rate: rate(skill.corrected_error_mass, exposures),
+            correction_burden: skill.correction_burden_mass,
+            corrected_graphemes: skill.corrected_graphemes,
+            corrective_events: skill.corrective_events,
+            correction_ms: skill.correction_ms,
+            baseline_exposure_chance: 0.0,
+            adaptive_exposure_chance: 0.0,
             estimated_exposure_uplift: 0.0,
         };
 
         let mut statement = self.connection.prepare(
             "SELECT wo.session_id, unixepoch(s.created_at), wo.confirmed_error,
-                    wo.corrections > 0,
+                    wo.corrections > 0, wo.corrections, wo.correction_ms,
                     CASE WHEN wo.active_ms > 0 AND wo.grapheme_count > 0
                          THEN wo.active_ms * 1.0 / wo.grapheme_count END,
                     wo.latency_ratio, wo.grapheme_count
@@ -1921,10 +2025,12 @@ impl Repository {
                         observed_at_unix_s: row.get(1)?,
                         confirmed_error: row.get(2)?,
                         corrected: row.get(3)?,
-                        milliseconds_per_grapheme: row.get(4)?,
-                        latency_ratio: row.get(5)?,
+                        corrections: row.get(4)?,
+                        correction_ms: row.get(5)?,
+                        milliseconds_per_grapheme: row.get(6)?,
+                        latency_ratio: row.get(7)?,
                     },
-                    row.get::<_, u16>(6)?,
+                    row.get::<_, u16>(8)?,
                 ))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -2075,7 +2181,10 @@ fn insert_word_observation(
                 .selection_source
                 .map(|source| format!("{source:?}").to_lowercase()),
             record.selection_propensity,
-            serde_json::to_string(&record.mechanics)?,
+            serde_json::to_string(&SharedEvidenceRecord {
+                mechanics: record.mechanics.clone(),
+                patterns: record.patterns.clone(),
+            })?,
             record.planning_ms as i64,
             record.fluent_ms as i64,
             record.correction_ms as i64,
@@ -2085,6 +2194,16 @@ fn insert_word_observation(
         ],
     )?;
     Ok(())
+}
+
+fn decode_shared_evidence(value: &str) -> Result<SharedEvidenceRecord> {
+    if let Ok(evidence) = serde_json::from_str(value) {
+        return Ok(evidence);
+    }
+    Ok(SharedEvidenceRecord {
+        mechanics: serde_json::from_str(value)?,
+        patterns: Vec::new(),
+    })
 }
 
 fn observe_stored_session_baseline(
@@ -2525,7 +2644,7 @@ fn initialize_schema(connection: &Connection) -> Result<()> {
            changed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
          );
          INSERT INTO adaptive_policy_state (id, active_version, fallback_version)
-           VALUES (1, 3, 0);
+           VALUES (1, 4, 0);
          CREATE TABLE raw_events (session_id INTEGER PRIMARY KEY REFERENCES sessions(id), codec_version INTEGER NOT NULL, uncompressed_size INTEGER NOT NULL, blob BLOB NOT NULL);",
     )?;
     transaction.execute_batch(
@@ -2684,6 +2803,7 @@ mod tests {
             selection_source: None,
             selection_propensity: None,
             mechanics: Vec::new(),
+            patterns: Vec::new(),
         }
     }
 
@@ -2850,6 +2970,26 @@ mod tests {
                 .active_version,
             CURRENT_POLICY_VERSION
         );
+    }
+
+    #[test]
+    fn modelo_de_desenvolvimento_antigo_e_recalculado_sem_apagar_historico() {
+        let temporary = tempfile::tempdir().unwrap();
+        let repository = Repository::open(&temporary.path().join("history.db")).unwrap();
+        repository
+            .connection
+            .execute(
+                "UPDATE adaptive_policy_state SET active_version = 3, fallback_version = 0",
+                [],
+            )
+            .unwrap();
+
+        assert!(repository.upgrade_adaptive_model_if_needed().unwrap());
+        assert_eq!(
+            repository.adaptive_policy_state().unwrap().active_version,
+            CURRENT_POLICY_VERSION
+        );
+        assert!(!repository.upgrade_adaptive_model_if_needed().unwrap());
     }
 
     #[test]
@@ -3508,6 +3648,7 @@ mod tests {
             selection_source: None,
             selection_propensity: None,
             mechanics: Vec::new(),
+            patterns: Vec::new(),
         };
         let id = repository
             .save_session_with_provenance(
@@ -3570,6 +3711,7 @@ mod tests {
                     selection_source: None,
                     selection_propensity: None,
                     mechanics: Vec::new(),
+                    patterns: Vec::new(),
                 }],
             )
             .unwrap();
@@ -3585,10 +3727,14 @@ mod tests {
                     fast_successes: 0.0,
                     slowdowns: 0.0,
                     observations: 1,
-                    model_version: 2,
+                    model_version: 3,
                     effective_exposures: 1.0,
                     uncorrected_error_mass: 1.0,
-                    corrected_error_mass: 0.0,
+                    corrected_error_mass: 1.0,
+                    correction_burden_mass: correction_burden(2, 0, 0, 320, 7),
+                    corrected_graphemes: 2.0,
+                    corrective_events: 0.0,
+                    correction_ms: 0.0,
                     latency_log_residual_sum: 0.0,
                     latency_weight: 0.0,
                 },
@@ -3759,6 +3905,7 @@ mod tests {
                         selection_source: None,
                         selection_propensity: None,
                         mechanics: Vec::new(),
+                        patterns: Vec::new(),
                     }],
                 )
                 .unwrap();
@@ -3841,6 +3988,7 @@ mod tests {
                         confirmed_error: false,
                         corrected: true,
                     }],
+                    patterns: Vec::new(),
                 }],
             )
             .unwrap();
@@ -3878,6 +4026,7 @@ mod tests {
             selection_source: None,
             selection_propensity: None,
             mechanics: Vec::new(),
+            patterns: Vec::new(),
         };
         for ended_at_ms in [500, 1_000] {
             repository

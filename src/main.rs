@@ -39,7 +39,7 @@ use termina::{
 use tuipe::{
     adaptive::{
         AdaptivePolicy, AdaptiveSampler, CURRENT_POLICY_VERSION, Observation, ReachProfile,
-        lexical_ngrams, mechanics_for_token,
+        correction_burden, lexical_ngrams, mechanics_for_token,
     },
     content::{ContentCatalog, Quote, WordGenerator},
     persistence::{
@@ -101,6 +101,9 @@ fn run_main() -> Result<()> {
         ));
     }
     let repository = opened.repository;
+    if repository.upgrade_adaptive_model_if_needed()? {
+        notices.push("modelo adaptativo atualizado a partir do histórico".into());
+    }
     let policy_state = repository.adaptive_policy_state()?;
     if preferences.test.adaptive && policy_state.active_version != CURRENT_POLICY_VERSION {
         notices.push(
@@ -866,18 +869,39 @@ impl App {
     fn apply_observations(&mut self, observations: &[WordObservationRecord]) {
         let mut reviewed_words = HashMap::<(String, String), bool>::new();
         for record in observations {
-            self.adaptive.observe(
-                &record.language,
-                &record.word,
-                Observation {
-                    confirmed_error: record.confirmed_error,
-                    corrected: record.corrections > 0,
-                    fast_success: record.fast_success,
-                    slow: record.slow,
-                    latency_ratio: record.latency_ratio,
-                    evidence_weight: record.evidence_weight,
-                },
-            );
+            let observation = Observation {
+                confirmed_error: record.confirmed_error,
+                corrected: record.corrections > 0,
+                corrections: record.corrections,
+                corrective_events: record.corrective_events,
+                correction_ms: record.correction_ms,
+                correction_burden: correction_burden(
+                    record.corrections,
+                    record.corrective_events,
+                    record.correction_ms,
+                    record.fluent_ms,
+                    record.grapheme_count,
+                ),
+                fast_success: record.fast_success,
+                slow: record.slow,
+                latency_ratio: record.latency_ratio,
+                evidence_weight: record.evidence_weight,
+            };
+            self.adaptive
+                .observe(&record.language, &record.word, observation);
+            for pattern in &record.patterns {
+                self.adaptive.observe_pattern(
+                    &record.language,
+                    &record.word,
+                    &pattern.pattern,
+                    Observation {
+                        confirmed_error: pattern.confirmed_error,
+                        corrected: pattern.corrected,
+                        correction_burden: pattern.correction_burden,
+                        ..observation
+                    },
+                );
+            }
             for mechanic in &record.mechanics {
                 self.adaptive.observe_mechanic(
                     &record.language,
@@ -922,8 +946,8 @@ impl App {
                 .iter()
                 .map(|word| word.word.clone())
                 .collect::<Vec<_>>();
-            let chances = if matches!(config.mode, TestMode::Quote) {
-                HashMap::new()
+            let (baseline_chances, adaptive_chances) = if matches!(config.mode, TestMode::Quote) {
+                (HashMap::new(), HashMap::new())
             } else if config.adaptive && self.policy_version == CURRENT_POLICY_VERSION {
                 let (candidates, _) = session_word_pool(
                     configured_words,
@@ -932,7 +956,7 @@ impl App {
                     SessionKind::Practice,
                 );
                 self.adaptive
-                    .estimated_reached_uplifts_with_number_probability(
+                    .estimated_reached_chances_with_number_probability(
                         &config.language,
                         &targets,
                         &candidates,
@@ -940,10 +964,17 @@ impl App {
                         if config.numbers { 0.1 } else { 0.0 },
                     )
             } else {
-                HashMap::new()
+                (HashMap::new(), HashMap::new())
             };
             for word in &mut statistics.priority_words {
-                word.estimated_exposure_uplift = chances.get(&word.word).copied().unwrap_or(0.0);
+                word.baseline_exposure_chance =
+                    baseline_chances.get(&word.word).copied().unwrap_or(0.0);
+                word.adaptive_exposure_chance = adaptive_chances
+                    .get(&word.word)
+                    .copied()
+                    .unwrap_or(word.baseline_exposure_chance);
+                word.estimated_exposure_uplift =
+                    (word.adaptive_exposure_chance - word.baseline_exposure_chance).max(0.0);
             }
 
             if config.adaptive && self.policy_version == CURRENT_POLICY_VERSION {
@@ -1029,6 +1060,8 @@ impl App {
             .word_detail(&priority.language, &priority.word)?
             .map(|mut detail| {
                 detail.priority.estimated_exposure_uplift = priority.estimated_exposure_uplift;
+                detail.priority.baseline_exposure_chance = priority.baseline_exposure_chance;
+                detail.priority.adaptive_exposure_chance = priority.adaptive_exposure_chance;
                 detail
             });
         Ok(())
@@ -2713,6 +2746,12 @@ mod tests {
             effective_exposures: 3.0,
             uncorrected_error_rate: 0.0,
             corrected_error_rate: 0.0,
+            correction_burden: 0.0,
+            corrected_graphemes: 0.0,
+            corrective_events: 0.0,
+            correction_ms: 0.0,
+            baseline_exposure_chance: 0.0,
+            adaptive_exposure_chance: uplift,
             estimated_exposure_uplift: uplift,
         };
         let mut words = vec![

@@ -11,6 +11,7 @@ use std::{
 
 use portable_pty::{Child, CommandBuilder, MasterPty, NativePtySystem, PtySize, PtySystem};
 use tuipe::{
+    adaptive::CURRENT_POLICY_VERSION,
     persistence::{RawEventCodec, RawEventKind, Repository},
     typing::RecordedInputKind,
 };
@@ -191,17 +192,22 @@ fn rollback_da_politica_funciona_pela_interface_operacional() {
 
     let status = command("status");
     assert!(status.status.success());
-    assert!(String::from_utf8_lossy(&status.stdout).contains("adaptativa v3"));
+    assert!(
+        String::from_utf8_lossy(&status.stdout)
+            .contains(&format!("adaptativa v{CURRENT_POLICY_VERSION}"))
+    );
 
     let rollback = command("rollback");
     assert!(rollback.status.success());
     let output = String::from_utf8_lossy(&rollback.stdout);
     assert!(output.contains("uniforme (modo seguro)"));
-    assert!(output.contains("shadow: adaptativa v3"));
+    assert!(output.contains(&format!("shadow: adaptativa v{CURRENT_POLICY_VERSION}")));
 
     let restore = command("rollback");
     assert!(restore.status.success());
-    assert!(String::from_utf8_lossy(&restore.stdout).contains("política ativa: adaptativa v3"));
+    assert!(String::from_utf8_lossy(&restore.stdout).contains(&format!(
+        "política ativa: adaptativa v{CURRENT_POLICY_VERSION}"
+    )));
 }
 
 #[test]

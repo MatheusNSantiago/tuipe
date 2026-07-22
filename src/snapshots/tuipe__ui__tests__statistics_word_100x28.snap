@@ -3,14 +3,14 @@ source: src/ui.rs
 expression: rendered
 ---
      detalhes da palavra  ·  através  ·  português
-     aumento estimado na chance de você digitar esta palavra: ≈18%
-     falhas                 correções              exposições             amostras
-     30%                    20%                    10                     12
+     chance de aparecer numa posição que você alcança: 7% → 25%
+     falhou ao confirmar    precisou corrigir      caracteres apagados    tempo em correções
+     3/10                   2/10                   5                      900 ms
 
 
      diagnóstico                                  tentativas recentes
-     ritmo 120 ms/caractere  ·  +33% vs base      #42    falhou    140 ms/caractere
-     tendência ainda incerta                      #41    corrigiu  110 ms/caractere
+     ritmo 120 ms/caractere  ·  +33% vs base      #42    falhou · 140 ms/caractere
+     tendência ainda incerta                      #41    corrigiu 2 · 240 ms
      última prática há 2 h
 
      sequências relacionadas

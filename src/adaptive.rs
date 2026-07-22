@@ -23,7 +23,7 @@ use unicode_segmentation::UnicodeSegmentation;
 mod simulation;
 
 pub const UNIFORM_POLICY_VERSION: u16 = 0;
-pub const CURRENT_POLICY_VERSION: u16 = 3;
+pub const CURRENT_POLICY_VERSION: u16 = 4;
 /// Sinal abaixo deste valor ainda é ruído e não deve ser apresentado como uma
 /// dificuldade acionável para o usuário.
 pub const MINIMUM_ACTIONABLE_DIFFICULTY: f64 = 0.01;
@@ -126,7 +126,7 @@ pub struct AdaptivePolicy {
     /// Excesso mínimo de taxa que precisa ser educacionalmente relevante.
     pub minimum_error_effect: f64,
     pub minimum_correction_effect: f64,
-    pub corrected_error_cost: f64,
+    pub correction_cost: f64,
     pub latency_cost: f64,
     pub maximum_boost: f64,
     pub representative_share: f64,
@@ -138,14 +138,14 @@ pub struct AdaptivePolicy {
 impl Default for AdaptivePolicy {
     fn default() -> Self {
         Self {
-            prior_strength: 24.0,
+            prior_strength: 16.0,
             minimum_error_effect: 0.02,
-            minimum_correction_effect: 0.03,
-            corrected_error_cost: 0.35,
-            latency_cost: 0.18,
-            maximum_boost: 3.0,
-            representative_share: 0.55,
-            targeted_share: 0.25,
+            minimum_correction_effect: 0.02,
+            correction_cost: 0.9,
+            latency_cost: 0.22,
+            maximum_boost: 5.0,
+            representative_share: 0.45,
+            targeted_share: 0.35,
             exploration_share: 0.10,
             transfer_share: 0.10,
         }
@@ -178,6 +178,10 @@ pub struct WordSkill {
     pub effective_exposures: f64,
     pub uncorrected_error_mass: f64,
     pub corrected_error_mass: f64,
+    pub correction_burden_mass: f64,
+    pub corrected_graphemes: f64,
+    pub corrective_events: f64,
+    pub correction_ms: f64,
     pub latency_log_residual_sum: f64,
     pub latency_weight: f64,
 }
@@ -187,6 +191,7 @@ pub struct NgramSkill {
     pub effective_exposures: f64,
     pub uncorrected_error_mass: f64,
     pub corrected_error_mass: f64,
+    pub correction_burden_mass: f64,
     /// Amostra limitada de palavras distintas que sustenta a generalização.
     pub distinct_words: Vec<String>,
 }
@@ -198,6 +203,7 @@ pub struct MechanicSkill {
     pub effective_exposures: f64,
     pub uncorrected_error_mass: f64,
     pub corrected_error_mass: f64,
+    pub correction_burden_mass: f64,
     pub distinct_words: Vec<String>,
 }
 
@@ -242,7 +248,8 @@ impl MechanicSkill {
         }
         self.effective_exposures += weight;
         self.uncorrected_error_mass += f64::from(confirmed_error) * weight;
-        self.corrected_error_mass += f64::from(corrected && !confirmed_error) * weight;
+        self.corrected_error_mass += f64::from(corrected) * weight;
+        self.correction_burden_mass += f64::from(corrected) * weight;
     }
 }
 
@@ -257,8 +264,8 @@ impl NgramSkill {
         }
         self.effective_exposures += weight;
         self.uncorrected_error_mass += f64::from(observation.confirmed_error) * weight;
-        self.corrected_error_mass +=
-            f64::from(observation.corrected && !observation.confirmed_error) * weight;
+        self.corrected_error_mass += f64::from(observation.corrected) * weight;
+        self.correction_burden_mass += observation.correction_burden * weight;
     }
 }
 
@@ -269,7 +276,7 @@ impl WordSkill {
 
     pub fn observe(&mut self, observation: Observation) {
         let weight = observation.evidence_weight.clamp(0.0, 1.0);
-        self.model_version = 2;
+        self.model_version = 3;
         self.observations = self.observations.saturating_add(1);
         self.confirmed_errors += f64::from(observation.confirmed_error) * weight;
         self.corrections += f64::from(observation.corrected) * weight;
@@ -277,8 +284,11 @@ impl WordSkill {
         self.slowdowns += f64::from(observation.slow) * weight;
         self.effective_exposures += weight;
         self.uncorrected_error_mass += f64::from(observation.confirmed_error) * weight;
-        self.corrected_error_mass +=
-            f64::from(observation.corrected && !observation.confirmed_error) * weight;
+        self.corrected_error_mass += f64::from(observation.corrected) * weight;
+        self.correction_burden_mass += observation.correction_burden * weight;
+        self.corrected_graphemes += f64::from(observation.corrections) * weight;
+        self.corrective_events += f64::from(observation.corrective_events) * weight;
+        self.correction_ms += observation.correction_ms as f64 * weight;
         if let Some(ratio) = observation.latency_ratio.filter(|ratio| ratio.is_finite()) {
             self.latency_log_residual_sum += ratio.clamp(0.25, 4.0).ln() * weight;
             self.latency_weight += weight;
@@ -290,6 +300,10 @@ impl WordSkill {
 pub struct Observation {
     pub confirmed_error: bool,
     pub corrected: bool,
+    pub corrections: u32,
+    pub corrective_events: u16,
+    pub correction_ms: u64,
+    pub correction_burden: f64,
     pub fast_success: bool,
     pub slow: bool,
     pub latency_ratio: Option<f64>,
@@ -302,6 +316,10 @@ impl Observation {
         Self {
             confirmed_error,
             corrected,
+            corrections: u32::from(corrected),
+            corrective_events: u16::from(corrected),
+            correction_ms: 0,
+            correction_burden: f64::from(corrected),
             fast_success,
             slow: false,
             latency_ratio: None,
@@ -310,13 +328,35 @@ impl Observation {
     }
 }
 
+/// Resume o trabalho gasto para recuperar uma palavra sem tratar nove
+/// backspaces como se fossem uma correção trivial. O resultado satura em um
+/// para que uma única tentativa difícil não finja ser várias exposições.
+pub fn correction_burden(
+    corrected_graphemes: u32,
+    corrective_events: u16,
+    correction_ms: u64,
+    fluent_ms: u64,
+    grapheme_count: u16,
+) -> f64 {
+    if corrected_graphemes == 0 && corrective_events == 0 {
+        return 0.0;
+    }
+    let length = f64::from(grapheme_count.max(1));
+    let grapheme_ratio = f64::from(corrected_graphemes) / length;
+    let event_ratio = f64::from(corrective_events) / length;
+    let execution_ms = correction_ms.saturating_add(fluent_ms).max(1);
+    let correction_share = correction_ms as f64 / execution_ms as f64;
+    (1.0 - (-(0.85 * grapheme_ratio + 0.35 * event_ratio + 0.75 * correction_share)).exp())
+        .clamp(0.0, 1.0)
+}
+
 impl AdaptivePolicy {
     pub fn difficulty(&self, skill: &WordSkill) -> f64 {
         self.difficulty_with_baseline(skill, PersonalBaseline::default())
     }
 
     pub fn difficulty_with_baseline(&self, skill: &WordSkill, baseline: PersonalBaseline) -> f64 {
-        if skill.model_version < 2 || skill.effective_exposures <= 0.0 {
+        if skill.model_version < 3 || skill.effective_exposures <= 0.0 {
             return 0.0;
         }
         let uncorrected = posterior_excess(
@@ -332,19 +372,32 @@ impl AdaptivePolicy {
             skill.corrected_error_mass,
             skill.effective_exposures,
             self.minimum_correction_effect,
-        ) * self.corrected_error_cost;
+        );
+        let mean_burden = if skill.corrected_error_mass > 0.0 {
+            skill.correction_burden_mass / skill.corrected_error_mass
+        } else {
+            0.0
+        };
+        let corrected = corrected * self.correction_cost * (0.5 + 1.5 * mean_burden);
         let latency = if skill.latency_weight > 0.0 {
             let mean = skill.latency_log_residual_sum / skill.latency_weight;
             mean.max(0.0) * (1.0 - (-skill.latency_weight / 8.0).exp()) * self.latency_cost
         } else {
             0.0
         };
-        // Uma observação isolada é muito fácil de explicar por distração,
-        // correção preventiva ou variação momentânea de ritmo. A confiança
-        // cresce de forma quadrática para exigir recorrência antes de alterar
-        // perceptivelmente o currículo.
-        let evidence_confidence = (1.0 - (-skill.effective_exposures / 8.0).exp()).powi(2);
-        1.0 - (-(uncorrected + corrected + latency) * evidence_confidence * 12.0).exp()
+        // Confiança exige repetição entre exposições, mas a severidade dentro
+        // de uma tentativa também conta. Muitas correções na mesma palavra
+        // deixam de ser reduzidas ao mesmo sinal de um único backspace.
+        // Uma ocorrência isolada é ruído, mesmo quando a recuperação foi
+        // trabalhosa. A recorrência transforma essa severidade em evidência.
+        let recurrence_confidence = 1.0 - (-(skill.effective_exposures - 1.0).max(0.0) / 2.5).exp();
+        let signal_mass = skill.uncorrected_error_mass + skill.correction_burden_mass;
+        let signal_confidence = 1.0 - (-signal_mass / 1.5).exp();
+        1.0 - (-(uncorrected + corrected + latency)
+            * recurrence_confidence
+            * signal_confidence
+            * 14.0)
+            .exp()
     }
 
     pub fn weight_with_baseline(
@@ -377,7 +430,8 @@ impl AdaptivePolicy {
             skill.corrected_error_mass,
             skill.effective_exposures,
             self.minimum_correction_effect,
-        ) * self.corrected_error_cost;
+        ) * self.correction_cost
+            * correction_severity(skill.corrected_error_mass, skill.correction_burden_mass);
         let confidence = 1.0 - (-skill.effective_exposures / 12.0).exp();
         1.0 - (-(uncorrected + corrected) * confidence * 10.0).exp()
     }
@@ -399,9 +453,18 @@ impl AdaptivePolicy {
             skill.corrected_error_mass,
             skill.effective_exposures,
             self.minimum_correction_effect,
-        ) * self.corrected_error_cost;
+        ) * self.correction_cost
+            * correction_severity(skill.corrected_error_mass, skill.correction_burden_mass);
         let confidence = 1.0 - (-skill.effective_exposures / 12.0).exp();
         1.0 - (-(uncorrected + corrected) * confidence * 8.0).exp()
+    }
+}
+
+fn correction_severity(corrected_exposures: f64, burden: f64) -> f64 {
+    if corrected_exposures > 0.0 {
+        0.5 + 1.5 * (burden / corrected_exposures).clamp(0.0, 1.0)
+    } else {
+        0.5
     }
 }
 
@@ -777,6 +840,42 @@ impl AdaptiveSampler {
         targets.iter().cloned().zip(uplifts).collect()
     }
 
+    /// Estima a chance absoluta de começar cada palavra com a distribuição
+    /// natural e com o treino adaptativo. Expor as duas medidas evita que a
+    /// interface apresente um aumento sem contexto.
+    pub fn estimated_reached_chances_with_number_probability(
+        &self,
+        language: &str,
+        targets: &[String],
+        candidates: &[String],
+        reach: &ReachProfile,
+        number_probability: f64,
+    ) -> (HashMap<String, f64>, HashMap<String, f64>) {
+        let groups = targets
+            .iter()
+            .map(|target| vec![target.clone()])
+            .collect::<Vec<_>>();
+        let adaptive = self.estimated_reached_group_chances_with_number_probability(
+            language,
+            &groups,
+            candidates,
+            reach,
+            number_probability,
+        );
+        let representative = Self::new(self.policy)
+            .estimated_reached_group_chances_with_number_probability(
+                language,
+                &groups,
+                candidates,
+                reach,
+                number_probability,
+            );
+        (
+            targets.iter().cloned().zip(representative).collect(),
+            targets.iter().cloned().zip(adaptive).collect(),
+        )
+    }
+
     /// Estima o aumento da exposição real a qualquer palavra de cada grupo.
     pub fn estimated_reached_group_uplifts_with_number_probability(
         &self,
@@ -893,16 +992,21 @@ impl AdaptiveSampler {
             .entry((language.into(), word.into()))
             .or_default()
             .observe(observation);
-        for ngram in lexical_ngrams(word) {
-            self.ngram_skills
-                .entry((language.into(), ngram))
-                .or_default()
-                .observe(word, observation);
-        }
         self.refresh_word_difficulty(language, word);
-        for ngram in lexical_ngrams(word) {
-            self.refresh_ngram_difficulty(language, &ngram);
-        }
+    }
+
+    pub fn observe_pattern(
+        &mut self,
+        language: &str,
+        word: &str,
+        pattern: &str,
+        observation: Observation,
+    ) {
+        self.ngram_skills
+            .entry((language.into(), pattern.into()))
+            .or_default()
+            .observe(word, observation);
+        self.refresh_ngram_difficulty(language, pattern);
     }
 
     pub fn observe_mechanic(
@@ -1247,6 +1351,10 @@ mod tests {
             skill.observe(Observation {
                 confirmed_error: index < errors,
                 corrected: (errors..errors + corrections).contains(&index),
+                corrections: u32::from((errors..errors + corrections).contains(&index)),
+                corrective_events: u16::from((errors..errors + corrections).contains(&index)),
+                correction_ms: 0,
+                correction_burden: f64::from((errors..errors + corrections).contains(&index)),
                 fast_success: false,
                 slow: false,
                 latency_ratio: None,
@@ -1303,6 +1411,55 @@ mod tests {
         });
 
         assert!(policy.difficulty(&skill) < MINIMUM_ACTIONABLE_DIFFICULTY);
+    }
+
+    #[test]
+    fn reconstrucao_da_palavra_pesa_mais_que_um_backspace() {
+        let policy = AdaptivePolicy::default();
+        let mut leve = WordSkill::default();
+        let mut intensa = WordSkill::default();
+        for _ in 0..5 {
+            leve.observe(Observation {
+                corrected: true,
+                corrections: 1,
+                corrective_events: 1,
+                correction_ms: 120,
+                correction_burden: correction_burden(1, 1, 120, 700, 8),
+                ..Observation::regular(false, false, false)
+            });
+            intensa.observe(Observation {
+                corrected: true,
+                corrections: 7,
+                corrective_events: 3,
+                correction_ms: 1_800,
+                correction_burden: correction_burden(7, 3, 1_800, 700, 8),
+                ..Observation::regular(false, false, false)
+            });
+        }
+
+        assert!(
+            policy.difficulty(&intensa) > policy.difficulty(&leve) * 1.25,
+            "a intensidade da recuperação precisa alterar o treino"
+        );
+    }
+
+    #[test]
+    fn correcao_e_falha_da_mesma_tentativa_contam_juntas() {
+        let mut skill = WordSkill::default();
+        skill.observe(Observation {
+            confirmed_error: true,
+            corrected: true,
+            corrections: 4,
+            corrective_events: 2,
+            correction_ms: 900,
+            correction_burden: correction_burden(4, 2, 900, 500, 7),
+            ..Observation::regular(false, false, false)
+        });
+
+        assert_eq!(skill.confirmed_errors, 1.0);
+        assert_eq!(skill.corrections, 1.0);
+        assert_eq!(skill.corrected_graphemes, 4.0);
+        assert!(skill.correction_burden_mass > 0.0);
     }
 
     #[test]
@@ -1523,6 +1680,10 @@ mod tests {
         let observation = Observation {
             confirmed_error: true,
             corrected: false,
+            corrections: 0,
+            corrective_events: 0,
+            correction_ms: 0,
+            correction_burden: 0.0,
             fast_success: false,
             slow: false,
             latency_ratio: None,
@@ -1546,6 +1707,10 @@ mod tests {
         let discarded = Observation {
             confirmed_error: true,
             corrected: false,
+            corrections: 0,
+            corrective_events: 0,
+            correction_ms: 0,
+            correction_burden: 0.0,
             fast_success: false,
             slow: true,
             latency_ratio: Some(4.0),

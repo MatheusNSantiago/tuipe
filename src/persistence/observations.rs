@@ -3,11 +3,14 @@ use std::collections::HashMap;
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::{
-    adaptive::{WordSelection, mechanics_for_token},
+    adaptive::{WordSelection, correction_burden, mechanics_for_token},
     typing::{RecordedInputKind, TestEngine, TestStatus},
 };
 
-use super::{MechanicObservationRecord, PersonalBaselineProfile, WordObservationRecord};
+use super::{
+    MechanicObservationRecord, PatternObservationRecord, PersonalBaselineProfile,
+    WordObservationRecord,
+};
 
 #[derive(Debug, Clone, Copy, Default)]
 struct WordTiming {
@@ -133,6 +136,13 @@ pub fn derive_word_observations(
                     }
                 })
                 .collect();
+            let burden = correction_burden(
+                attempt.corrections,
+                timing.corrective_events,
+                timing.correction_ms,
+                timing.fluent_ms,
+                grapheme_count,
+            );
             Some(WordObservationRecord {
                 language: engine.config().language.clone(),
                 word,
@@ -156,6 +166,7 @@ pub fn derive_word_observations(
                 selection_source: selection.as_ref().map(|selection| selection.source),
                 selection_propensity: selection.map(|selection| selection.propensity),
                 mechanics,
+                patterns: pattern_observations(engine, word_index, &target.text, burden),
             })
         })
         .collect()
@@ -263,4 +274,147 @@ fn lexical_word(value: &str) -> Option<String> {
         .trim_matches(|character: char| !character.is_alphabetic())
         .to_lowercase();
     (!lexical.is_empty()).then_some(lexical)
+}
+
+fn pattern_observations(
+    engine: &TestEngine,
+    word_index: usize,
+    target: &str,
+    correction_burden: f64,
+) -> Vec<PatternObservationRecord> {
+    #[derive(Clone, Copy)]
+    struct BufferedGrapheme {
+        target_index: usize,
+        correct: bool,
+    }
+
+    let mut buffer = Vec::<BufferedGrapheme>::new();
+    let mut corrected_positions = std::collections::HashSet::<usize>::new();
+    for event in engine
+        .recorded_events()
+        .iter()
+        .filter(|event| event.word_index == word_index)
+    {
+        match &event.kind {
+            RecordedInputKind::InsertDelta { correct, .. } => {
+                buffer.push(BufferedGrapheme {
+                    target_index: buffer.len(),
+                    correct: *correct,
+                });
+            }
+            RecordedInputKind::DeleteDelta {
+                deleted_graphemes, ..
+            } => {
+                for _ in 0..*deleted_graphemes {
+                    let Some(deleted) = buffer.pop() else {
+                        break;
+                    };
+                    if !deleted.correct {
+                        corrected_positions.insert(deleted.target_index);
+                    }
+                }
+            }
+            RecordedInputKind::Focus { .. } | RecordedInputKind::PasteRedacted { .. } => {}
+        }
+    }
+    let failed_positions = buffer
+        .iter()
+        .filter(|grapheme| !grapheme.correct)
+        .map(|grapheme| grapheme.target_index)
+        .collect::<std::collections::HashSet<_>>();
+
+    let target_graphemes = target.graphemes(true).collect::<Vec<_>>();
+    let lexical_start = target_graphemes
+        .iter()
+        .position(|grapheme| grapheme.chars().any(char::is_alphabetic))
+        .unwrap_or(0);
+    let lexical_end = target_graphemes
+        .iter()
+        .rposition(|grapheme| grapheme.chars().any(char::is_alphabetic))
+        .map_or(lexical_start, |index| index + 1);
+    let lexical = &target_graphemes[lexical_start..lexical_end];
+    let mut patterns = HashMap::<String, (bool, bool)>::new();
+    for size in 2..=3 {
+        for (offset, window) in lexical.windows(size).enumerate() {
+            let mut positions = lexical_start + offset..lexical_start + offset + size;
+            let confirmed_error = positions
+                .clone()
+                .any(|position| failed_positions.contains(&position));
+            let corrected = positions.any(|position| corrected_positions.contains(&position));
+            let pattern = window.concat().to_lowercase();
+            patterns
+                .entry(pattern)
+                .and_modify(|evidence| {
+                    evidence.0 |= confirmed_error;
+                    evidence.1 |= corrected;
+                })
+                .or_insert((confirmed_error, corrected));
+        }
+    }
+    let mut patterns = patterns
+        .into_iter()
+        .map(
+            |(pattern, (confirmed_error, corrected))| PatternObservationRecord {
+                pattern,
+                confirmed_error,
+                corrected,
+                correction_burden: if corrected { correction_burden } else { 0.0 },
+            },
+        )
+        .collect::<Vec<_>>();
+    patterns.sort_by(|left, right| left.pattern.cmp(&right.pattern));
+    patterns
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::typing::{Difficulty, InputEvent, KeyAction, TestConfig, TestMode};
+
+    #[test]
+    fn correcao_so_afeta_sequencias_que_cruzam_o_caractere_refeito() {
+        let config = TestConfig {
+            mode: TestMode::Words { count: 1 },
+            difficulty: Difficulty::Normal,
+            ..TestConfig::default()
+        };
+        let mut engine = TestEngine::new(config, ["criança ".into()]);
+        for (index, grapheme) in ["c", "r", "i", "a", "n", "x"].into_iter().enumerate() {
+            engine.update(InputEvent::Key {
+                action: KeyAction::Text(grapheme.into()),
+                at_ms: 100 + index as u64 * 100,
+            });
+        }
+        engine.update(InputEvent::Key {
+            action: KeyAction::Backspace,
+            at_ms: 750,
+        });
+        for (at_ms, grapheme) in [(850, "ç"), (950, "a"), (1_050, " ")] {
+            engine.update(InputEvent::Key {
+                action: KeyAction::Text(grapheme.into()),
+                at_ms,
+            });
+        }
+
+        let observation = derive_word_observations(
+            &engine,
+            &PersonalBaselineProfile::default(),
+            false,
+            false,
+            &[],
+        )
+        .remove(0);
+        let corrected = observation
+            .patterns
+            .iter()
+            .filter(|pattern| pattern.corrected)
+            .map(|pattern| pattern.pattern.as_str())
+            .collect::<Vec<_>>();
+
+        assert!(corrected.contains(&"nç"));
+        assert!(corrected.contains(&"nça"));
+        assert!(!corrected.contains(&"cri"));
+        assert!(!observation.confirmed_error);
+        assert_eq!(observation.corrections, 1);
+    }
 }

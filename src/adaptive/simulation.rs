@@ -49,6 +49,10 @@ fn duas_mil_sessoes_preservam_cobertura_e_encontram_dificuldade_real() {
                 Observation {
                     confirmed_error,
                     corrected: !confirmed_error && rng.random_bool(0.03),
+                    corrections: 0,
+                    corrective_events: 0,
+                    correction_ms: 0,
+                    correction_burden: 0.0,
                     fast_success: !confirmed_error,
                     slow: false,
                     latency_ratio: None,

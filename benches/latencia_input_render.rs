@@ -161,6 +161,10 @@ fn measure_adaptive_recomputation() -> Vec<Duration> {
                 Observation {
                     confirmed_error: (sample + word.len()).is_multiple_of(17),
                     corrected: (sample + word.len()).is_multiple_of(11),
+                    corrections: u32::from((sample + word.len()).is_multiple_of(11)),
+                    corrective_events: u16::from((sample + word.len()).is_multiple_of(11)),
+                    correction_ms: 0,
+                    correction_burden: f64::from((sample + word.len()).is_multiple_of(11)),
                     fast_success: false,
                     slow: false,
                     latency_ratio: Some(1.1),

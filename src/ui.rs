@@ -531,23 +531,94 @@ fn render_statistics_overview(
     .split(content);
     render_statistics_chart(frame, sections[0], &statistics.trend_tests, theme);
     render_statistics_summary(frame, sections[2], statistics, theme);
-    let details = Layout::horizontal([Constraint::Percentage(58), Constraint::Percentage(42)])
-        .spacing(1)
-        .split(sections[3]);
-    render_priority_words(
-        frame,
-        details[0],
-        &statistics.priority_words,
-        selected_word,
-        theme,
-    );
-    render_priority_patterns(frame, details[1], &statistics.priority_patterns, theme);
+    if content.width < 120 {
+        render_statistics_diagnostics_compact(frame, sections[3], statistics, selected_word, theme);
+    } else {
+        let details = Layout::horizontal([Constraint::Percentage(58), Constraint::Percentage(42)])
+            .spacing(1)
+            .split(sections[3]);
+        render_priority_words(
+            frame,
+            details[0],
+            &statistics.priority_words,
+            selected_word,
+            theme,
+        );
+        render_priority_patterns(frame, details[1], &statistics.priority_patterns, theme);
+    }
     render_statistics_controls(
         frame,
         sections[4],
         "↑↓ selecionar   enter detalhes   R zerar modelo   esc voltar",
         theme,
     );
+}
+
+fn render_statistics_diagnostics_compact(
+    frame: &mut Frame,
+    area: Rect,
+    statistics: &StatisticsOverview,
+    selected_word: usize,
+    theme: &Theme,
+) {
+    let mut lines = vec![Line::styled(
+        "palavras prioritárias",
+        Style::default().fg(theme_color(theme, &theme.text, 4.5)),
+    )];
+    if let Some(word) = statistics.priority_words.get(selected_word) {
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("› {}  ·  {}  ·  ", word.word, exposure_chance_label(word)),
+                Style::default().fg(theme_color(theme, &theme.main, 3.0)),
+            ),
+            Span::styled(
+                format!(
+                    "falhou {}  ·  corrigiu {}",
+                    evidence_fraction(word.confirmed_errors, word.effective_exposures),
+                    evidence_fraction(word.corrections, word.effective_exposures)
+                ),
+                Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
+            ),
+        ]));
+    } else {
+        lines.push(Line::styled(
+            "sem evidência suficiente",
+            Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
+        ));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::styled(
+        "padrões que pedem treino",
+        Style::default().fg(theme_color(theme, &theme.text, 4.5)),
+    ));
+    if let Some(pattern) = statistics.priority_patterns.first() {
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!(
+                    "{}  ·  reforço {}  ·  ",
+                    pattern.pattern,
+                    percentage_point_label(pattern.estimated_exposure_uplift)
+                ),
+                Style::default().fg(theme_color(theme, &theme.main, 3.0)),
+            ),
+            Span::styled(
+                format!(
+                    "falhou {}  ·  corrigiu {}  ·  {} palavras",
+                    evidence_fraction(
+                        pattern.uncorrected_error_rate * pattern.effective_exposures,
+                        pattern.effective_exposures
+                    ),
+                    evidence_fraction(
+                        pattern.corrected_error_rate * pattern.effective_exposures,
+                        pattern.effective_exposures
+                    ),
+                    pattern.distinct_words
+                ),
+                Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
+            ),
+        ]));
+    }
+    frame.render_widget(Paragraph::new(lines), area);
 }
 
 fn render_statistics_navigation(
@@ -1503,17 +1574,17 @@ fn render_word_detail(frame: &mut Frame, area: Rect, detail: &WordDetail, theme:
             ]),
             Line::styled(
                 format!(
-                    "aumento estimado no próximo treino: {}",
-                    estimated_uplift_label(priority.estimated_exposure_uplift)
+                    "chance na próxima sessão: {}",
+                    exposure_chance_label(priority)
                 ),
                 Style::default().fg(theme_color(theme, &theme.main, 3.0)),
             ),
             Line::styled(
                 format!(
-                    "falhas {:.0}%  ·  correções {:.0}%  ·  {:.0} exposições",
-                    priority.uncorrected_error_rate * 100.0,
-                    priority.corrected_error_rate * 100.0,
-                    priority.effective_exposures
+                    "falhou {}  ·  corrigiu {}  ·  {:.0} caracteres apagados",
+                    evidence_fraction(priority.confirmed_errors, priority.effective_exposures),
+                    evidence_fraction(priority.corrections, priority.effective_exposures),
+                    priority.corrected_graphemes
                 ),
                 Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
             ),
@@ -1587,23 +1658,29 @@ fn render_word_detail(frame: &mut Frame, area: Rect, detail: &WordDetail, theme:
     );
     frame.render_widget(
         Paragraph::new(format!(
-            "aumento estimado na chance de você digitar esta palavra: {}",
-            estimated_uplift_label(priority.estimated_exposure_uplift)
+            "chance de aparecer numa posição que você alcança: {}",
+            exposure_chance_label(priority)
         ))
         .style(Style::default().fg(theme_color(theme, &theme.main, 3.0))),
         sections[1],
     );
     let metrics = [
         (
-            "falhas",
-            format!("{:.0}%", priority.uncorrected_error_rate * 100.0),
+            "falhou ao confirmar",
+            evidence_fraction(priority.confirmed_errors, priority.effective_exposures),
         ),
         (
-            "correções",
-            format!("{:.0}%", priority.corrected_error_rate * 100.0),
+            "precisou corrigir",
+            evidence_fraction(priority.corrections, priority.effective_exposures),
         ),
-        ("exposições", format!("{:.0}", priority.effective_exposures)),
-        ("amostras", priority.observations.to_string()),
+        (
+            "caracteres apagados",
+            format!("{:.0}", priority.corrected_graphemes),
+        ),
+        (
+            "tempo em correções",
+            format_duration_ms(priority.correction_ms),
+        ),
     ];
     for (metric_area, (label, value)) in Layout::horizontal([
         Constraint::Ratio(1, 4),
@@ -1683,13 +1760,42 @@ fn render_word_detail(frame: &mut Frame, area: Rect, detail: &WordDetail, theme:
     );
 }
 
-fn estimated_uplift_label(chance: f64) -> String {
-    let chance = if chance.is_finite() {
-        chance.clamp(0.0, 1.0)
+fn percentage_point_label(chance: f64) -> String {
+    let points = chance.clamp(0.0, 1.0) * 100.0;
+    if points > 0.0 && points < 1.0 {
+        "+<1 pp".into()
     } else {
-        0.0
-    };
-    format!("≈{:.0}%", chance * 100.0)
+        format!("+{points:.0} pp")
+    }
+}
+
+fn exposure_chance_label(word: &PriorityWord) -> String {
+    format!(
+        "{} → {}",
+        probability_label(word.baseline_exposure_chance),
+        probability_label(word.adaptive_exposure_chance)
+    )
+}
+
+fn probability_label(chance: f64) -> String {
+    let percent = chance.clamp(0.0, 1.0) * 100.0;
+    if percent > 0.0 && percent < 1.0 {
+        "<1%".into()
+    } else {
+        format!("{percent:.0}%")
+    }
+}
+
+fn evidence_fraction(signal: f64, exposures: f64) -> String {
+    format!("{:.0}/{:.0}", signal.max(0.0), exposures.max(0.0))
+}
+
+fn format_duration_ms(milliseconds: f64) -> String {
+    if milliseconds >= 1_000.0 {
+        format!("{:.1} s", milliseconds / 1_000.0)
+    } else {
+        format!("{milliseconds:.0} ms")
+    }
 }
 
 fn word_speed_line(detail: &WordDetail, theme: &Theme) -> Line<'static> {
@@ -1758,28 +1864,34 @@ fn word_attempt_line(
     attempt: &crate::persistence::WordAttemptSummary,
     theme: &Theme,
 ) -> Line<'static> {
-    let (status, value) = if attempt.confirmed_error {
-        ("falhou", &theme.error)
+    let (status, value) = if attempt.confirmed_error && attempt.corrected {
+        (
+            format!("corrigiu {} e falhou", attempt.corrections),
+            &theme.error,
+        )
+    } else if attempt.confirmed_error {
+        ("falhou".into(), &theme.error)
     } else if attempt.corrected {
-        ("corrigiu", &theme.sub)
+        (format!("corrigiu {}", attempt.corrections), &theme.sub)
     } else {
-        ("limpa", &theme.main)
+        ("limpa".into(), &theme.main)
     };
-    let speed = attempt.milliseconds_per_grapheme.map_or_else(
-        || "sem ritmo".into(),
-        |milliseconds| format!("{milliseconds:.0} ms/caractere"),
-    );
+    let detail = if attempt.corrections > 0 {
+        format!(" · {}", format_duration_ms(attempt.correction_ms as f64))
+    } else {
+        attempt.milliseconds_per_grapheme.map_or_else(
+            || " · sem ritmo".into(),
+            |milliseconds| format!(" · {milliseconds:.0} ms/caractere"),
+        )
+    };
     Line::from(vec![
         Span::styled(
             format!("#{:<6}", attempt.session_id),
             Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
         ),
+        Span::styled(status, Style::default().fg(theme_color(theme, value, 3.0))),
         Span::styled(
-            format!("{status:<10}"),
-            Style::default().fg(theme_color(theme, value, 3.0)),
-        ),
-        Span::styled(
-            speed,
+            detail,
             Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
         ),
     ])
@@ -1874,15 +1986,9 @@ fn render_statistics_compact(
                 .take(visible)
                 .map(|(index, word)| {
                     let chance = if area.width < 60 {
-                        format!(
-                            "  chance {}  ",
-                            estimated_uplift_label(word.estimated_exposure_uplift)
-                        )
+                        format!("  {}  ", exposure_chance_label(word))
                     } else {
-                        format!(
-                            "  ·  {} na próxima sessão  ·  ",
-                            estimated_uplift_label(word.estimated_exposure_uplift)
-                        )
+                        format!("  ·  próxima sessão {}  ·  ", exposure_chance_label(word))
                     };
                     Line::from(vec![
                         Span::styled(
@@ -1898,7 +2004,11 @@ fn render_statistics_compact(
                             Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
                         ),
                         Span::styled(
-                            format!("falha {:.0}%", word.uncorrected_error_rate * 100.0),
+                            format!(
+                                "falhou {} · corrigiu {}",
+                                evidence_fraction(word.confirmed_errors, word.effective_exposures),
+                                evidence_fraction(word.corrections, word.effective_exposures)
+                            ),
                             Style::default().fg(theme_color(theme, &theme.error, 3.0)),
                         ),
                     ])
@@ -1937,15 +2047,13 @@ fn render_statistics_compact(
                     };
                     let contexts = if area.width < 60 {
                         format!(
-                            "  aumento {}  ·  {} palavras  ",
-                            estimated_uplift_label(pattern.estimated_exposure_uplift),
-                            pattern.distinct_words
+                            "  reforço {}  ·  ",
+                            percentage_point_label(pattern.estimated_exposure_uplift)
                         )
                     } else {
                         format!(
-                            "  ·  aumento {}  ·  {} palavras  ·  ",
-                            estimated_uplift_label(pattern.estimated_exposure_uplift),
-                            pattern.distinct_words
+                            "  ·  reforço {}  ·  ",
+                            percentage_point_label(pattern.estimated_exposure_uplift)
                         )
                     };
                     Line::from(vec![
@@ -1958,8 +2066,28 @@ fn render_statistics_compact(
                             Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
                         ),
                         Span::styled(
-                            format!("falha {:.0}%", pattern.uncorrected_error_rate * 100.0),
+                            format!(
+                                "falhou {}",
+                                evidence_fraction(
+                                    pattern.uncorrected_error_rate * pattern.effective_exposures,
+                                    pattern.effective_exposures
+                                )
+                            ),
                             Style::default().fg(theme_color(theme, &theme.error, 3.0)),
+                        ),
+                        Span::styled(
+                            format!(
+                                "  ·  corrigiu {}",
+                                evidence_fraction(
+                                    pattern.corrected_error_rate * pattern.effective_exposures,
+                                    pattern.effective_exposures
+                                )
+                            ),
+                            Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
+                        ),
+                        Span::styled(
+                            format!("  ·  {} palavras", pattern.distinct_words),
+                            Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
                         ),
                     ])
                 }),
@@ -2206,7 +2334,7 @@ fn render_priority_words(
         ));
     } else {
         lines.push(Line::styled(
-            "palavra      aumento  falha  correção  exposições",
+            "palavra       próxima sessão  falhou  corrigiu  apagou",
             Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
         ));
         let visible = area.height.saturating_sub(3) as usize;
@@ -2224,26 +2352,29 @@ fn render_priority_words(
                             Style::default().fg(theme_color(theme, &theme.main, 3.0)),
                         ),
                         Span::styled(
-                            format!("{:<13}", word.word),
+                            format!("{:<14}", word.word),
+                            Style::default().fg(theme_color(theme, &theme.main, 3.0)),
+                        ),
+                        Span::styled(
+                            format!("{:>14}  ", exposure_chance_label(word)),
                             Style::default().fg(theme_color(theme, &theme.main, 3.0)),
                         ),
                         Span::styled(
                             format!(
                                 "{:>6}  ",
-                                estimated_uplift_label(word.estimated_exposure_uplift)
+                                evidence_fraction(word.confirmed_errors, word.effective_exposures)
                             ),
-                            Style::default().fg(theme_color(theme, &theme.main, 3.0)),
-                        ),
-                        Span::styled(
-                            format!("{:>4.0}%  ", word.uncorrected_error_rate * 100.0),
                             Style::default().fg(theme_color(theme, &theme.error, 3.0)),
                         ),
                         Span::styled(
-                            format!("{:>4.0}%    ", word.corrected_error_rate * 100.0),
+                            format!(
+                                "{:>7}  ",
+                                evidence_fraction(word.corrections, word.effective_exposures)
+                            ),
                             Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
                         ),
                         Span::styled(
-                            format!("{:>3.0}", word.effective_exposures),
+                            format!("{:>5.0}", word.corrected_graphemes),
                             Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
                         ),
                     ])
@@ -2270,8 +2401,13 @@ fn render_priority_patterns(
             Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
         ));
     } else {
+        let label_width = if area.width >= 62 { 20 } else { 12 };
         lines.push(Line::styled(
-            "padrão        aumento falha palavras",
+            format!(
+                "{:<width$}  reforço  falhou  corrigiu  palavras",
+                "padrão",
+                width = label_width
+            ),
             Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
         ));
         lines.extend(
@@ -2280,25 +2416,41 @@ fn render_priority_patterns(
                 .take(area.height.saturating_sub(3) as usize)
                 .map(|pattern| {
                     let label = if pattern.kind == "mecânica" {
-                        quote_source_label(&format!("técnica {}", pattern.pattern), 12)
+                        quote_source_label(&format!("técnica {}", pattern.pattern), label_width)
                     } else {
-                        quote_source_label(&pattern.pattern, 12)
+                        quote_source_label(&pattern.pattern, label_width)
                     };
                     Line::from(vec![
                         Span::styled(
-                            format!("{label:<14}"),
+                            format!("{label:<width$}  ", width = label_width),
                             Style::default().fg(theme_color(theme, &theme.main, 3.0)),
                         ),
                         Span::styled(
                             format!(
                                 "{:>6} ",
-                                estimated_uplift_label(pattern.estimated_exposure_uplift)
+                                percentage_point_label(pattern.estimated_exposure_uplift)
                             ),
                             Style::default().fg(theme_color(theme, &theme.main, 3.0)),
                         ),
                         Span::styled(
-                            format!("{:>4.0}% ", pattern.uncorrected_error_rate * 100.0),
+                            format!(
+                                "{:>6}  ",
+                                evidence_fraction(
+                                    pattern.uncorrected_error_rate * pattern.effective_exposures,
+                                    pattern.effective_exposures
+                                )
+                            ),
                             Style::default().fg(theme_color(theme, &theme.error, 3.0)),
+                        ),
+                        Span::styled(
+                            format!(
+                                "{:>7}  ",
+                                evidence_fraction(
+                                    pattern.corrected_error_rate * pattern.effective_exposures,
+                                    pattern.effective_exposures
+                                )
+                            ),
+                            Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
                         ),
                         Span::styled(
                             format!("{} palavras", pattern.distinct_words),
@@ -5803,6 +5955,12 @@ mod tests {
                 effective_exposures: 10.0,
                 uncorrected_error_rate: 0.3,
                 corrected_error_rate: 0.2,
+                correction_burden: 1.4,
+                corrected_graphemes: 5.0,
+                corrective_events: 2.0,
+                correction_ms: 900.0,
+                baseline_exposure_chance: 0.07,
+                adaptive_exposure_chance: 0.25,
                 estimated_exposure_uplift: 0.18,
             }],
             priority_patterns: vec![PriorityPattern {
@@ -5881,6 +6039,8 @@ mod tests {
                     observed_at_unix_s: chrono::Utc::now().timestamp() - 7_200,
                     confirmed_error: true,
                     corrected: false,
+                    corrections: 0,
+                    correction_ms: 0,
                     milliseconds_per_grapheme: Some(140.0),
                     latency_ratio: Some(1.4),
                 },
@@ -5889,6 +6049,8 @@ mod tests {
                     observed_at_unix_s: chrono::Utc::now().timestamp() - 86_400,
                     confirmed_error: false,
                     corrected: true,
+                    corrections: 2,
+                    correction_ms: 240,
                     milliseconds_per_grapheme: Some(110.0),
                     latency_ratio: Some(1.1),
                 },
@@ -6437,6 +6599,7 @@ mod tests {
 
     #[test]
     fn statistics_overview_remains_readable() {
+        insta::assert_snapshot!("statistics_180x40", render_statistics_at(180, 40));
         insta::assert_snapshot!("statistics_100x28", render_statistics_at(100, 28));
         insta::assert_snapshot!("statistics_50x14", render_statistics_at(50, 14));
     }
@@ -6582,7 +6745,7 @@ mod tests {
         for (width, height) in [(50, 14), (100, 28)] {
             let rendered = render_word_detail_at(width, height);
             assert!(rendered.contains("através"));
-            assert!(rendered.contains("aumento"));
+            assert!(rendered.contains("chance"));
             assert!(rendered.contains("ritmo"));
             assert!(rendered.contains("tentativas recentes"));
             assert!(!rendered.contains("difficulty"));

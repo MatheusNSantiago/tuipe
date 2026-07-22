@@ -20,11 +20,11 @@ expression: "render_statistics_at(95, 28)"
     testes totais  testes válido  wpm médio      precisão      melhor         tempo ativo
     42             12             84             96%           112            1h 01m
 
-    palavras prioritárias                             padrões que pedem treino
+    palavras prioritárias
+    › através  ·  7% → 25%  ·  falhou 3/10  ·  corrigiu 2/10
 
-    palavra      aumento  falha  correção  exposições padrão        aumento falha palavras
-    ›através        ≈18%    30%    20%     10         técnica ace…    ≈12%   21% 5 palavras
-
+    padrões que pedem treino
+    acento agudo  ·  reforço +12 pp  ·  falhou 3/14  ·  corrigiu 2/14  ·  5 palavras
 
 
 
