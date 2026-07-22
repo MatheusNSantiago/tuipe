@@ -3119,7 +3119,7 @@ fn render_difficulty_explanation(
 fn difficulty_explanation(difficulty: Difficulty) -> &'static str {
     match difficulty {
         Difficulty::Normal => "você pode corrigir os erros e continuar",
-        Difficulty::Expert => "espaço após palavra errada encerra o teste",
+        Difficulty::Expert => "palavras erradas encerram o teste",
         Difficulty::Master => "o primeiro caractere incorreto encerra o teste",
     }
 }

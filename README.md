@@ -40,9 +40,9 @@ Estão disponíveis testes por tempo, quantidade de palavras e citações, com:
 
 ## Estatísticas
 
-Cada teste registra WPM, precisão, consistência, caracteres e tempo. A visão
-geral usa apenas testes válidos, evitando que sessões interrompidas ou períodos
-de AFK distorçam os resultados.
+Falhas nos modos especialista e mestre aparecem no histórico e continuam
+alimentando o treino adaptativo. A curva de WPM usa apenas testes concluídos,
+para não comparar uma sessão inteira com outra encerrada no primeiro erro.
 
 <p align="center">
   <img src="assets/readme/estatisticas.webp" alt="Visão geral das estatísticas do tuipe" width="1200">
@@ -84,17 +84,9 @@ resultado e as palavras que mais exigiram correção.
 Pressione `esc` para alterar modo, duração, dificuldade, idioma, vocabulário,
 pontuação, números, treino e tema.
 
-Cada opção explica o valor selecionado. As alterações são salvas automaticamente
-e toda a tela funciona tanto com teclado quanto com mouse.
-
 <p align="center">
   <img src="assets/readme/configuracoes.webp" alt="Configurações do tuipe" width="1200">
 </p>
-
-## Dados locais
-
-Configuração, histórico, estatísticas e o modelo adaptativo ficam na sua
-máquina. Nenhum dado é enviado para fora dela.
 
 ## Instalação
 
@@ -132,6 +124,23 @@ tuipe
 
 Os controles disponíveis em cada tela aparecem no rodapé. Os atalhos também
 podem ser alterados no `config.toml`.
+
+## Base técnica
+
+Algumas decisões do modelo vêm destes trabalhos:
+
+- Dhakal et al., [Observations on Typing from 136 Million Keystrokes](https://userinterfaces.aalto.fi/136Mkeystrokes/resources/chi-18-analysis.pdf):
+  intervalos entre teclas, bigramas, correções e sua relação com velocidade.
+- Crump e Logan, [Hierarchical Control and Skilled Typing](https://www.crumplab.com/publications/Crump/files/4704/Crump%20and%20Logan%20-%202010%20-%20Hierarchical%20control%20and%20skilled%20typing%20Evidence%20.pdf):
+  palavras e movimentos internos como partes diferentes da digitação.
+- Soukoreff e MacKenzie, [Metrics for Text Entry Research](https://www.yorku.ca/mack/chi03.pdf):
+  erros corrigidos e não corrigidos medidos separadamente.
+- Van Waes et al., [Modelling Typing Disfluencies as a Finite Mixture Process](https://link.springer.com/article/10.1007/s11145-021-10203-z):
+  pausas separadas do ritmo fluente.
+- Schmidt e Bjork, [New Conceptualizations of Practice](https://bjorklab.psych.ucla.edu/wp-content/uploads/sites/13/2016/07/Schmidt_RBjork_1992.pdf):
+  prática espaçada, variação, retenção e transferência.
+- Mettler, Massey e Kellman, [A Comparison of Adaptive and Fixed Schedules of Practice](https://pubmed.ncbi.nlm.nih.gov/27123574/):
+  prática adaptativa comparada a uma sequência fixa.
 
 ## Créditos
 
