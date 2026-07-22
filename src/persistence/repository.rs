@@ -253,6 +253,15 @@ struct PatternEvidence {
     distinct_words: usize,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+struct WordEvidenceSummary {
+    attempts: u32,
+    failures: u32,
+    corrected_attempts: u32,
+    corrected_graphemes: u64,
+    correction_ms: u64,
+}
+
 /// Evidência consultável de uma palavra observada durante uma sessão terminal.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WordObservationRecord {
@@ -1912,6 +1921,7 @@ impl Repository {
     fn priority_words(&self) -> Result<Vec<PriorityWord>> {
         let policy = crate::adaptive::AdaptivePolicy::default();
         let skills = self.load_all_word_skills()?;
+        let evidence = self.word_evidence_summaries()?;
         let mut baselines = HashMap::new();
         for (language, _, _) in &skills {
             if !baselines.contains_key(language) {
@@ -1938,34 +1948,67 @@ impl Repository {
                     return None;
                 }
                 *counts.entry(language.clone()).or_default() += 1;
+                let summary = evidence
+                    .get(&(language.clone(), word.clone()))
+                    .copied()
+                    .unwrap_or_default();
+                let attempts = f64::from(summary.attempts);
                 Some(PriorityWord {
                     language,
                     word,
                     difficulty,
-                    confirmed_errors: skill.confirmed_errors,
-                    corrections: skill.corrections,
-                    observations: skill.observations,
+                    confirmed_errors: f64::from(summary.failures),
+                    corrections: f64::from(summary.corrected_attempts),
+                    observations: summary.attempts,
                     effective_exposures: exposures,
-                    uncorrected_error_rate: if exposures > 0.0 {
-                        skill.uncorrected_error_mass / exposures
+                    uncorrected_error_rate: if attempts > 0.0 {
+                        f64::from(summary.failures) / attempts
                     } else {
                         0.0
                     },
-                    corrected_error_rate: if exposures > 0.0 {
-                        skill.corrected_error_mass / exposures
+                    corrected_error_rate: if attempts > 0.0 {
+                        f64::from(summary.corrected_attempts) / attempts
                     } else {
                         0.0
                     },
                     correction_burden: skill.correction_burden_mass,
-                    corrected_graphemes: skill.corrected_graphemes,
+                    corrected_graphemes: summary.corrected_graphemes as f64,
                     corrective_events: skill.corrective_events,
-                    correction_ms: skill.correction_ms,
+                    correction_ms: summary.correction_ms as f64,
                     baseline_exposure_chance: 0.0,
                     adaptive_exposure_chance: 0.0,
                     estimated_exposure_uplift: 0.0,
                 })
             })
             .collect())
+    }
+
+    fn word_evidence_summaries(&self) -> Result<HashMap<(String, String), WordEvidenceSummary>> {
+        let mut statement = self.connection.prepare(
+            "SELECT language, word, COUNT(*),
+                    COALESCE(SUM(confirmed_error != 0), 0),
+                    COALESCE(SUM(corrections > 0), 0),
+                    COALESCE(SUM(corrections), 0),
+                    COALESCE(SUM(correction_ms), 0)
+             FROM word_observations
+             WHERE censored = 0 AND evidence_weight > 0
+             GROUP BY language, word",
+        )?;
+        statement
+            .query_map([], |row| {
+                Ok((
+                    (row.get::<_, String>(0)?, row.get::<_, String>(1)?),
+                    WordEvidenceSummary {
+                        attempts: row.get(2)?,
+                        failures: row.get(3)?,
+                        corrected_attempts: row.get(4)?,
+                        corrected_graphemes: row.get(5)?,
+                        correction_ms: row.get(6)?,
+                    },
+                ))
+            })?
+            .collect::<rusqlite::Result<HashMap<_, _>>>()
+            .map_err(Into::into)
     }
 
     pub fn word_detail(&self, language: &str, word: &str) -> Result<Option<WordDetail>> {
@@ -1986,20 +2029,26 @@ impl Repository {
         let policy = crate::adaptive::AdaptivePolicy::default();
         let difficulty = policy.difficulty_with_baseline(&skill, baseline.rates);
         let exposures = skill.effective_exposures;
+        let summary = self
+            .word_evidence_summaries()?
+            .get(&(language.to_owned(), word.to_owned()))
+            .copied()
+            .unwrap_or_default();
+        let attempts = f64::from(summary.attempts);
         let priority = PriorityWord {
             language: language.to_owned(),
             word: word.to_owned(),
             difficulty,
-            confirmed_errors: skill.confirmed_errors,
-            corrections: skill.corrections,
-            observations: skill.observations,
+            confirmed_errors: f64::from(summary.failures),
+            corrections: f64::from(summary.corrected_attempts),
+            observations: summary.attempts,
             effective_exposures: exposures,
-            uncorrected_error_rate: rate(skill.uncorrected_error_mass, exposures),
-            corrected_error_rate: rate(skill.corrected_error_mass, exposures),
+            uncorrected_error_rate: rate(f64::from(summary.failures), attempts),
+            corrected_error_rate: rate(f64::from(summary.corrected_attempts), attempts),
             correction_burden: skill.correction_burden_mass,
-            corrected_graphemes: skill.corrected_graphemes,
+            corrected_graphemes: summary.corrected_graphemes as f64,
             corrective_events: skill.corrective_events,
-            correction_ms: skill.correction_ms,
+            correction_ms: summary.correction_ms as f64,
             baseline_exposure_chance: 0.0,
             adaptive_exposure_chance: 0.0,
             estimated_exposure_uplift: 0.0,

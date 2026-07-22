@@ -574,8 +574,8 @@ fn render_statistics_diagnostics_compact(
             Span::styled(
                 format!(
                     "falhou {}  ·  corrigiu {}",
-                    evidence_fraction(word.confirmed_errors, word.effective_exposures),
-                    evidence_fraction(word.corrections, word.effective_exposures)
+                    evidence_fraction(word.confirmed_errors, f64::from(word.observations)),
+                    evidence_fraction(word.corrections, f64::from(word.observations))
                 ),
                 Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
             ),
@@ -1582,8 +1582,8 @@ fn render_word_detail(frame: &mut Frame, area: Rect, detail: &WordDetail, theme:
             Line::styled(
                 format!(
                     "falhou {}  ·  corrigiu {}  ·  {:.0} caracteres apagados",
-                    evidence_fraction(priority.confirmed_errors, priority.effective_exposures),
-                    evidence_fraction(priority.corrections, priority.effective_exposures),
+                    evidence_fraction(priority.confirmed_errors, f64::from(priority.observations)),
+                    evidence_fraction(priority.corrections, f64::from(priority.observations)),
                     priority.corrected_graphemes
                 ),
                 Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
@@ -1667,11 +1667,11 @@ fn render_word_detail(frame: &mut Frame, area: Rect, detail: &WordDetail, theme:
     let metrics = [
         (
             "falhou ao confirmar",
-            evidence_fraction(priority.confirmed_errors, priority.effective_exposures),
+            evidence_fraction(priority.confirmed_errors, f64::from(priority.observations)),
         ),
         (
             "precisou corrigir",
-            evidence_fraction(priority.corrections, priority.effective_exposures),
+            evidence_fraction(priority.corrections, f64::from(priority.observations)),
         ),
         (
             "caracteres apagados",
@@ -2006,8 +2006,11 @@ fn render_statistics_compact(
                         Span::styled(
                             format!(
                                 "falhou {} · corrigiu {}",
-                                evidence_fraction(word.confirmed_errors, word.effective_exposures),
-                                evidence_fraction(word.corrections, word.effective_exposures)
+                                evidence_fraction(
+                                    word.confirmed_errors,
+                                    f64::from(word.observations)
+                                ),
+                                evidence_fraction(word.corrections, f64::from(word.observations))
                             ),
                             Style::default().fg(theme_color(theme, &theme.error, 3.0)),
                         ),
@@ -2362,14 +2365,17 @@ fn render_priority_words(
                         Span::styled(
                             format!(
                                 "{:>6}  ",
-                                evidence_fraction(word.confirmed_errors, word.effective_exposures)
+                                evidence_fraction(
+                                    word.confirmed_errors,
+                                    f64::from(word.observations)
+                                )
                             ),
                             Style::default().fg(theme_color(theme, &theme.error, 3.0)),
                         ),
                         Span::styled(
                             format!(
                                 "{:>7}  ",
-                                evidence_fraction(word.corrections, word.effective_exposures)
+                                evidence_fraction(word.corrections, f64::from(word.observations))
                             ),
                             Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
                         ),
