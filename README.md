@@ -1,20 +1,30 @@
 <h1 align="center">tuipe</h1>
 
 <p align="center">
-  O pedaço do Monkeytype que eu realmente uso, reconstruído como um aplicativo nativo de terminal.
+   O tuipe é um programa de treinamento de digitação inspirado no <a href="https://monkeytype.com/">Monkeytype</a> que roda inteiramente no terminal. É 100% local e não requer conta, servidor ou telemetria. O foco é treinar digitação em diferentes vocabulários, com estatísticas detalhadas e um modelo adaptativo que aprende com seus erros.
 </p>
 
 <p align="center">
   <img src="assets/readme/digitacao.gif" alt="Uma sessão de digitação no tuipe" width="1200">
 </p>
 
-O tuipe é um clone trimmed down do [Monkeytype](https://monkeytype.com/) feito
-para as minhas necessidades. Ele mantém o fluxo de abrir, digitar e tentar de
-novo, mas deixa de fora contas, recursos sociais e outras partes que não fazem
-diferença para o treino.
+## Treino adaptativo
 
-O resultado roda inteiramente no terminal, funciona offline e escolhe sozinho o
-que vale a pena praticar.
+Esse modo (ligado por default) é feito para que os testes foquem nas palavras que você mais precisa treinar.
+
+Para isso, são analisados vários aspectos do seu desempenho:
+
+- **Detecta palavras lentas:** uma palavra pode pedir treino mesmo quando você
+  consegue corrigi-la antes de confirmar.
+- **Detecta erros em sequências:** se você erra `criança` e `França`, o modelo reforça palavras com
+  `nça`, sem culpar todas as sequências das duas palavras.
+- **Correções também contam:** apagar uma letra pesa pouco; reconstruir quase
+  toda a palavra e gastar vários segundos corrigindo pesa muito mais.
+- **Identifica AFK:** o tempo detectado como ausência não entra no aprendizado.
+- **Percebe quando você volta a acertar:** a frequência extra da palavra diminui
+  gradualmente até níveis normais.
+
+Todos esses sinais são combinados em um modelo de prioridade que decide quais palavras aparecerão mais vezes nos testes.
 
 ## O teste
 
@@ -24,34 +34,11 @@ Estão disponíveis testes por tempo, quantidade de palavras e citações, com:
 - vocabulários comum, 1k e 5k;
 - pontuação e números;
 - modos normal, especialista e mestre;
-- dez temas embutidos e temas pessoais;
-- mouse, Nerd Font e fallback Unicode.
+   * modo normal: permite erros e correções
+   * modo especialista: a primeira palavra errada encerra o teste (pode corrigir sem problema)
+   * modo mestre: o primeiro caractere incorreto encerra o teste
 
-## Treino adaptativo
-
-O tuipe não monta uma lista das palavras erradas e começa a repeti-las. Cada
-sessão produz sinais mais específicos:
-
-- **Correções também contam:** apagar uma letra pesa pouco; reconstruir quase
-  toda a palavra e gastar vários segundos corrigindo pesa muito mais.
-- **Detecta palavras lentas:** uma palavra pode pedir treino mesmo quando você
-  consegue corrigi-la antes de confirmar.
-- **Identifica AFK:** o tempo detectado como ausência não entra no aprendizado.
-- **Localiza o trecho corrigido:** se o problema em `criança` e `França` está em
-  `nça`, o modelo reforça palavras com `nça`, sem culpar todas as sequências das
-  duas palavras.
-- **Percebe quando você volta a acertar:** a frequência extra da palavra diminui
-  gradualmente até níveis normais.
-- **Não confunde buffer com prática:** uma palavra gerada no fim do texto não é
-  tratada como prática se você normalmente termina antes dela.
-
-O modelo combina erros, correções, ritmo, recência e padrões encontrados em
-palavras diferentes. O texto final continua misturando vocabulário normal,
-dificuldades conhecidas, exploração e palavras novas relacionadas.
-
-Não existe uma tela para escolher exercícios. O próximo teste já vem pronto.
-
-## Estatísticas que chegam até a causa
+## Estatísticas
 
 A visão geral separa tentativas válidas de sessões interrompidas ou muito fora
 do seu ritmo. O gráfico usa todo o histórico comparável, mostra a tendência de
