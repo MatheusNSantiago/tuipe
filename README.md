@@ -1,7 +1,7 @@
 <h1 align="center">tuipe</h1>
 
 <p align="center">
-   O tuipe é um programa de treinamento de digitação inspirado no <a href="https://monkeytype.com/">Monkeytype</a> que roda inteiramente no terminal. É 100% local e não requer conta, servidor ou telemetria. O foco é treinar digitação em diferentes vocabulários, com estatísticas detalhadas e um modelo adaptativo que aprende com seus erros.
+   O tuipe é um programa de treinamento de digitação inspirado no <a href="https://monkeytype.com/">Monkeytype</a> que roda inteiramente no terminal. É 100% local e não requer conta, servidor ou telemetria. O foco é treinar digitação, com estatísticas detalhadas e um modelo adaptativo que aprende com seus erros.
 </p>
 
 <p align="center">
@@ -16,7 +16,7 @@ Para isso, são analisados vários aspectos do seu desempenho:
 
 - **Detecta palavras lentas:** uma palavra pode pedir treino mesmo quando você
   consegue corrigi-la antes de confirmar.
-- **Detecta erros em sequências:** se você erra `criança` e `França`, o modelo reforça palavras com
+- **Detecta erros em trigramas:** se você erra `criança` e `França`, o modelo reforça palavras com
   `nça`, sem culpar todas as sequências das duas palavras.
 - **Correções também contam:** apagar uma letra pesa pouco; reconstruir quase
   toda a palavra e gastar vários segundos corrigindo pesa muito mais.
