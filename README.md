@@ -32,13 +32,14 @@ Estão disponíveis testes por tempo, quantidade de palavras e citações, com:
 O tuipe não monta uma lista das palavras erradas e começa a repeti-las. Cada
 sessão produz sinais mais específicos:
 
-- **Correções também contam:** corrigir `crinaça` para `criança` registra uma
-  dificuldade, mas com menos peso que confirmar a palavra errada.
-- **Detecta trechos lentos:** se `nça` demora mais que o seu ritmo normal
-  em palavras diferentes, isso pode importar mesmo sem erro.
+- **Correções também contam:** apagar uma letra pesa pouco; reconstruir quase
+  toda a palavra e gastar vários segundos corrigindo pesa muito mais.
+- **Detecta palavras lentas:** uma palavra pode pedir treino mesmo quando você
+  consegue corrigi-la antes de confirmar.
 - **Identifica AFK:** o tempo detectado como ausência não entra no aprendizado.
-- **Encontra dificuldades compartilhadas entre palavras:** erros em `criança` e `França`
-  no trigrama `nça` aumentam levemente a presença de outras palavras com `nça`.
+- **Localiza o trecho corrigido:** se o problema em `criança` e `França` está em
+  `nça`, o modelo reforça palavras com `nça`, sem culpar todas as sequências das
+  duas palavras.
 - **Percebe quando você volta a acertar:** a frequência extra da palavra diminui
   gradualmente até níveis normais.
 - **Não confunde buffer com prática:** uma palavra gerada no fim do texto não é
@@ -56,9 +57,10 @@ A visão geral separa tentativas válidas de sessões interrompidas ou muito for
 do seu ritmo. O gráfico usa todo o histórico comparável, mostra a tendência de
 WPM e mantém erros individuais visíveis.
 
-Logo abaixo aparecem as palavras e os padrões que mais pedem treino. O aumento
-mostrado é a chance extra de realmente começar a digitar aquela palavra, não a
-chance de ela ter sido escondida em algum ponto distante do texto.
+Logo abaixo aparecem as palavras e os padrões que mais pedem treino. Para cada
+palavra, a tela mostra a chance natural e a chance adaptada, como `4% → 11%`.
+Também mostra contagens concretas, como `falhou 1/5`, `corrigiu 4/5` e quantos
+caracteres foram apagados durante essas recuperações.
 
 <p align="center">
   <img src="assets/readme/estatisticas.webp" alt="Visão geral das estatísticas do tuipe" width="1200">
