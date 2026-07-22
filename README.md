@@ -40,74 +40,65 @@ Estão disponíveis testes por tempo, quantidade de palavras e citações, com:
 
 ## Estatísticas
 
-A visão geral separa tentativas válidas de sessões interrompidas ou muito fora
-do seu ritmo. O gráfico usa todo o histórico comparável, mostra a tendência de
-WPM e mantém erros individuais visíveis.
-
-Logo abaixo aparecem as palavras e os padrões que mais pedem treino. A coluna
-de prioridade mostra diretamente quanto o modelo aumentou sua presença, como
-`+2%`. A tela também mostra contagens concretas, como `falhou 1/5`, `corrigiu
-4/5` e quantos caracteres foram apagados durante essas recuperações.
+Cada teste registra WPM, precisão, consistência, caracteres e tempo. A visão
+geral usa apenas testes válidos, evitando que sessões interrompidas ou períodos
+de AFK distorçam os resultados.
 
 <p align="center">
   <img src="assets/readme/estatisticas.webp" alt="Visão geral das estatísticas do tuipe" width="1200">
 </p>
 
-Cada palavra pode ser aberta para entender o diagnóstico. O tuipe mostra
-falhas, correções, exposições, ritmo contra a sua base, tentativas recentes e os
-padrões relacionados.
+A mesma tela mostra o que está direcionando o treino adaptativo:
+
+- palavras que estão recebendo prioridade;
+- n-gramas que causam dificuldade em palavras diferentes;
+- quantas vezes você falhou, corrigiu ou apagou parte de uma palavra.
+
+Se `criança` aparece com `prioridade +2%`, ela tem 2% a mais de chance de ser
+escolhida nos próximos testes.
+
+Cada palavra pode ser aberta para ver as tentativas que formaram o diagnóstico.
+Assim, é possível diferenciar uma falha isolada de uma palavra que exige
+correções repetidas ou fica consistentemente lenta.
 
 <p align="center">
   <img src="assets/readme/detalhe-palavra.webp" alt="Diagnóstico de uma palavra no tuipe" width="1200">
 </p>
 
-O progresso também pode ser visto como distribuição de WPM e atividade diária.
-Uma sessão individual preserva o texto praticado e aponta o que mais exigiu
-atenção.
+A aba de progresso mostra a distribuição do seu WPM e quantos testes foram
+feitos em cada dia.
 
 <p align="center">
   <img src="assets/readme/progresso.webp" alt="Distribuição de WPM e atividade diária" width="1200">
 </p>
 
+No histórico, qualquer sessão pode ser aberta para rever o texto digitado, o
+resultado e as palavras que mais exigiram correção.
+
 <p align="center">
   <img src="assets/readme/detalhe-sessao.webp" alt="Detalhe de uma sessão concluída" width="1200">
 </p>
 
-## Configuração sem sair do fluxo
+## Configuração
 
-`esc` abre um painel mestre e detalhe. As setas verticais escolhem a preferência,
-as horizontais alteram seu valor e `enter` confirma. Cada opção explica apenas o
-que está selecionado naquele momento.
+Pressione `esc` para alterar modo, duração, dificuldade, idioma, vocabulário,
+pontuação, números, treino e tema.
 
-As alterações são salvas automaticamente. A mesma tela funciona com teclado e
-mouse e se reorganiza em terminais menores.
+Cada opção explica o valor selecionado. As alterações são salvas automaticamente
+e toda a tela funciona tanto com teclado quanto com mouse.
 
 <p align="center">
   <img src="assets/readme/configuracoes.webp" alt="Configurações do tuipe" width="1200">
 </p>
 
-## Local de verdade
+## Dados locais
 
-O tuipe não possui conta, servidor ou telemetria. Configuração, histórico e
-modelo ficam na máquina do usuário seguindo os diretórios XDG.
-
-Os eventos de cada sessão são serializados com Postcard, comprimidos com Zstd e
-armazenados em SQLite. Métricas e habilidades são projeções reconstruíveis. Se
-uma fórmula mudar durante o desenvolvimento, `tuipe rebuild` pode recalcular o
-estado derivado a partir dos eventos brutos.
-
-Outros comandos úteis:
-
-```sh
-tuipe doctor                 # valida banco, eventos e configuração
-tuipe backup                 # cria uma cópia consistente do SQLite
-tuipe rebuild                # recalcula métricas e o modelo pelos eventos brutos
-```
+Configuração, histórico, estatísticas e o modelo adaptativo ficam na sua
+máquina. Nenhum dado é enviado para fora dela.
 
 ## Instalação
 
-O projeto ainda não teve sua primeira versão pública. Hoje, a forma mais simples
-de executar é pelo código fonte:
+Clone o repositório e execute pelo código fonte:
 
 ```sh
 git clone https://github.com/MatheusNSantiago/tuipe.git
@@ -122,7 +113,7 @@ Requisitos:
 - terminal UTF-8 com pelo menos 50 colunas por 14 linhas;
 - Nerd Font recomendada, mas não obrigatória.
 
-Para instalar o binário localmente:
+Para instalar o comando `tuipe` no sistema:
 
 ```sh
 cargo install --path . --locked
@@ -139,28 +130,14 @@ tuipe
 - `r`: repetir o mesmo teste na tela de resultado;
 - `q`: sair nas telas com esse controle visível.
 
-Os controles disponíveis sempre aparecem no rodapé da tela. Atalhos de
-aplicação podem ser alterados em `config.toml` usando a sintaxe da crate
-[Crokey](https://docs.rs/crokey/).
+Os controles disponíveis em cada tela aparecem no rodapé. Os atalhos também
+podem ser alterados no `config.toml`.
 
-## Origem e implementação
+## Créditos
 
-O commit `781dcd9fe66fb4d8fb3f5e408d1b057a2054b9d5` do Monkeytype é a
-referência congelada para comportamento, métricas, conteúdo e decisões visuais.
-O tuipe traduz esse fluxo para Rust, Ratatui e uma grade de células sem tentar
-portar o restante do produto.
-
-A origem e a licença dos conteúdos importados estão registradas em [NOTICE](NOTICE).
-
-Validação local completa:
-
-```sh
-cargo fmt --check
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test
-cargo build --release
-cargo bench --bench latencia_input_render
-```
+O tuipe é um projeto independente inspirado no
+[Monkeytype](https://monkeytype.com/). A origem e a licença dos conteúdos
+importados estão registradas em [NOTICE](NOTICE).
 
 ## Licença
 
