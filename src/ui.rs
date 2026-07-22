@@ -531,98 +531,23 @@ fn render_statistics_overview(
     .split(content);
     render_statistics_chart(frame, sections[0], &statistics.trend_tests, theme);
     render_statistics_summary(frame, sections[2], statistics, theme);
-    if content.width < 120 {
-        render_statistics_diagnostics_compact(frame, sections[3], statistics, selected_word, theme);
-    } else {
-        let details = Layout::horizontal([Constraint::Percentage(58), Constraint::Percentage(42)])
-            .spacing(1)
-            .split(sections[3]);
-        render_priority_words(
-            frame,
-            details[0],
-            &statistics.priority_words,
-            selected_word,
-            theme,
-        );
-        render_priority_patterns(frame, details[1], &statistics.priority_patterns, theme);
-    }
+    let details = Layout::horizontal([Constraint::Percentage(56), Constraint::Percentage(44)])
+        .spacing(2)
+        .split(sections[3]);
+    render_priority_words(
+        frame,
+        details[0],
+        &statistics.priority_words,
+        selected_word,
+        theme,
+    );
+    render_priority_patterns(frame, details[1], &statistics.priority_patterns, theme);
     render_statistics_controls(
         frame,
         sections[4],
         "↑↓ selecionar   enter detalhes   R zerar modelo   esc voltar",
         theme,
     );
-}
-
-fn render_statistics_diagnostics_compact(
-    frame: &mut Frame,
-    area: Rect,
-    statistics: &StatisticsOverview,
-    selected_word: usize,
-    theme: &Theme,
-) {
-    let mut lines = vec![Line::styled(
-        "palavras prioritárias",
-        Style::default().fg(theme_color(theme, &theme.text, 4.5)),
-    )];
-    if let Some(word) = statistics.priority_words.get(selected_word) {
-        lines.push(Line::from(vec![
-            Span::styled(
-                format!(
-                    "› {}  ·  prioridade {}  ·  ",
-                    word.word,
-                    priority_label(word.estimated_exposure_uplift)
-                ),
-                Style::default().fg(theme_color(theme, &theme.main, 3.0)),
-            ),
-            Span::styled(
-                format!(
-                    "falhou {}  ·  corrigiu {}",
-                    evidence_fraction(word.confirmed_errors, f64::from(word.observations)),
-                    evidence_fraction(word.corrections, f64::from(word.observations))
-                ),
-                Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
-            ),
-        ]));
-    } else {
-        lines.push(Line::styled(
-            "sem evidência suficiente",
-            Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
-        ));
-    }
-    lines.push(Line::from(""));
-    lines.push(Line::styled(
-        "padrões que pedem treino",
-        Style::default().fg(theme_color(theme, &theme.text, 4.5)),
-    ));
-    if let Some(pattern) = statistics.priority_patterns.first() {
-        lines.push(Line::from(vec![
-            Span::styled(
-                format!(
-                    "{}  ·  prioridade {}  ·  ",
-                    pattern.pattern,
-                    priority_label(pattern.estimated_exposure_uplift)
-                ),
-                Style::default().fg(theme_color(theme, &theme.main, 3.0)),
-            ),
-            Span::styled(
-                format!(
-                    "falhou {}  ·  corrigiu {}  ·  {} palavras",
-                    evidence_fraction(
-                        pattern.uncorrected_error_rate * pattern.effective_exposures,
-                        pattern.effective_exposures
-                    ),
-                    evidence_fraction(
-                        pattern.corrected_error_rate * pattern.effective_exposures,
-                        pattern.effective_exposures
-                    ),
-                    pattern.distinct_words
-                ),
-                Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
-            ),
-        ]));
-    }
-    frame.render_widget(Paragraph::new(lines), area);
 }
 
 fn render_statistics_navigation(
@@ -2022,17 +1947,14 @@ fn render_statistics_compact(
                 .take(compact_diagnostic_limit(area.height))
                 .map(|pattern| {
                     let kind = (pattern.kind == "mecânica").then_some("técnica");
-                    let label = if area.width < 60 {
-                        kind.map_or_else(
-                            || pattern.pattern.clone(),
-                            |kind| format!("{kind} {}", pattern.pattern),
-                        )
-                    } else {
-                        kind.map_or_else(
-                            || pattern.pattern.clone(),
-                            |kind| format!("{kind} {}", pattern.pattern),
-                        )
-                    };
+                    let label = kind.map_or_else(
+                        || pattern.pattern.clone(),
+                        |kind| format!("{kind} {}", pattern.pattern),
+                    );
+                    let label = quote_source_label(
+                        &label,
+                        usize::from(area.width.saturating_sub(55)).max(7),
+                    );
                     let contexts = if area.width < 60 {
                         format!(
                             "  prioridade {}  ·  ",
@@ -2044,7 +1966,7 @@ fn render_statistics_compact(
                             priority_label(pattern.estimated_exposure_uplift)
                         )
                     };
-                    Line::from(vec![
+                    let mut spans = vec![
                         Span::styled(
                             label,
                             Style::default().fg(theme_color(theme, &theme.main, 3.0)),
@@ -2073,11 +1995,14 @@ fn render_statistics_compact(
                             ),
                             Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
                         ),
-                        Span::styled(
+                    ];
+                    if area.width >= 90 {
+                        spans.push(Span::styled(
                             format!("  ·  {} palavras", pattern.distinct_words),
                             Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
-                        ),
-                    ])
+                        ));
+                    }
+                    Line::from(spans)
                 }),
         );
     }
@@ -2321,8 +2246,13 @@ fn render_priority_words(
             Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
         ));
     } else {
+        let show_erased = area.width >= 51;
         lines.push(Line::styled(
-            "palavra       prioridade  falhou  corrigiu  apagou",
+            if show_erased {
+                "palavra       prioridade  falhou  corrigiu  apagou"
+            } else {
+                "palavra       prioridade  falhou  corrigiu"
+            },
             Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
         ));
         let visible = area.height.saturating_sub(3) as usize;
@@ -2334,7 +2264,7 @@ fn render_priority_words(
                 .skip(offset)
                 .take(visible)
                 .map(|(index, word)| {
-                    Line::from(vec![
+                    let mut spans = vec![
                         Span::styled(
                             if index == selected_word { "›" } else { " " },
                             Style::default().fg(theme_color(theme, &theme.main, 3.0)),
@@ -2364,11 +2294,14 @@ fn render_priority_words(
                             ),
                             Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
                         ),
-                        Span::styled(
+                    ];
+                    if show_erased {
+                        spans.push(Span::styled(
                             format!("{:>5.0}", word.corrected_graphemes),
                             Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
-                        ),
-                    ])
+                        ));
+                    }
+                    Line::from(spans)
                 }),
         );
     }
@@ -2392,13 +2325,26 @@ fn render_priority_patterns(
             Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
         ));
     } else {
-        let label_width = if area.width >= 62 { 20 } else { 12 };
+        let show_word_count = area.width >= 53;
+        let label_width = if show_word_count {
+            if area.width >= 62 { 20 } else { 12 }
+        } else {
+            usize::from(area.width.saturating_sub(30)).clamp(6, 12)
+        };
         lines.push(Line::styled(
-            format!(
-                "{:<width$}  prioridade  falhou  corrigiu  palavras",
-                "padrão",
-                width = label_width
-            ),
+            if show_word_count {
+                format!(
+                    "{:<width$}  prioridade  falhou  corrigiu  palavras",
+                    "padrão",
+                    width = label_width
+                )
+            } else {
+                format!(
+                    "{:<width$}  prioridade  falhou  corrigiu",
+                    "padrão",
+                    width = label_width
+                )
+            },
             Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
         ));
         lines.extend(
@@ -2411,7 +2357,7 @@ fn render_priority_patterns(
                     } else {
                         quote_source_label(&pattern.pattern, label_width)
                     };
-                    Line::from(vec![
+                    let mut spans = vec![
                         Span::styled(
                             format!("{label:<width$}  ", width = label_width),
                             Style::default().fg(theme_color(theme, &theme.main, 3.0)),
@@ -2440,11 +2386,14 @@ fn render_priority_patterns(
                             ),
                             Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
                         ),
-                        Span::styled(
+                    ];
+                    if show_word_count {
+                        spans.push(Span::styled(
                             format!("{} palavras", pattern.distinct_words),
                             Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
-                        ),
-                    ])
+                        ));
+                    }
+                    Line::from(spans)
                 }),
         );
     }
@@ -5855,6 +5804,36 @@ mod tests {
     }
 
     fn statistics_fixture() -> StatisticsOverview {
+        let priority_word = PriorityWord {
+            language: "portuguese".into(),
+            word: "através".into(),
+            difficulty: 0.4,
+            confirmed_errors: 3.0,
+            corrections: 2.0,
+            observations: 12,
+            effective_exposures: 10.0,
+            uncorrected_error_rate: 0.3,
+            corrected_error_rate: 0.2,
+            correction_burden: 1.4,
+            corrected_graphemes: 5.0,
+            corrective_events: 2.0,
+            correction_ms: 900.0,
+            baseline_exposure_chance: 0.07,
+            adaptive_exposure_chance: 0.25,
+            estimated_exposure_uplift: 0.18,
+        };
+        let priority_pattern = PriorityPattern {
+            language: "portuguese".into(),
+            pattern: "acento agudo".into(),
+            model_pattern: "acute_accent".into(),
+            kind: "mecânica",
+            difficulty: 0.3,
+            estimated_exposure_uplift: 0.12,
+            effective_exposures: 14.0,
+            uncorrected_error_rate: 0.21,
+            corrected_error_rate: 0.14,
+            distinct_words: 5,
+        };
         StatisticsOverview {
             completed_tests: 42,
             comparable_tests: 12,
@@ -5933,36 +5912,45 @@ mod tests {
                     average_wpm: 70.0 + f64::from(day),
                 })
                 .collect(),
-            priority_words: vec![PriorityWord {
-                language: "portuguese".into(),
-                word: "através".into(),
-                difficulty: 0.4,
-                confirmed_errors: 3.0,
-                corrections: 2.0,
-                observations: 12,
-                effective_exposures: 10.0,
-                uncorrected_error_rate: 0.3,
-                corrected_error_rate: 0.2,
-                correction_burden: 1.4,
-                corrected_graphemes: 5.0,
-                corrective_events: 2.0,
-                correction_ms: 900.0,
-                baseline_exposure_chance: 0.07,
-                adaptive_exposure_chance: 0.25,
-                estimated_exposure_uplift: 0.18,
-            }],
-            priority_patterns: vec![PriorityPattern {
-                language: "portuguese".into(),
-                pattern: "acento agudo".into(),
-                model_pattern: "acute_accent".into(),
-                kind: "mecânica",
-                difficulty: 0.3,
-                estimated_exposure_uplift: 0.12,
-                effective_exposures: 14.0,
-                uncorrected_error_rate: 0.21,
-                corrected_error_rate: 0.14,
-                distinct_words: 5,
-            }],
+            priority_words: vec![
+                priority_word.clone(),
+                PriorityWord {
+                    word: "criança".into(),
+                    estimated_exposure_uplift: 0.12,
+                    ..priority_word.clone()
+                },
+                PriorityWord {
+                    word: "importante".into(),
+                    estimated_exposure_uplift: 0.08,
+                    ..priority_word.clone()
+                },
+                PriorityWord {
+                    word: "mostrar".into(),
+                    estimated_exposure_uplift: 0.05,
+                    ..priority_word
+                },
+            ],
+            priority_patterns: vec![
+                priority_pattern.clone(),
+                PriorityPattern {
+                    pattern: "nça".into(),
+                    kind: "sequência",
+                    estimated_exposure_uplift: 0.08,
+                    ..priority_pattern.clone()
+                },
+                PriorityPattern {
+                    pattern: "ant".into(),
+                    kind: "sequência",
+                    estimated_exposure_uplift: 0.06,
+                    ..priority_pattern.clone()
+                },
+                PriorityPattern {
+                    pattern: "str".into(),
+                    kind: "sequência",
+                    estimated_exposure_uplift: 0.04,
+                    ..priority_pattern
+                },
+            ],
             total_xp: 0,
             level: 0,
             streak: 0,

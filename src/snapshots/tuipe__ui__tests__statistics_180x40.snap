@@ -27,13 +27,13 @@ expression: "render_statistics_at(180, 40)"
           testes totais              testes válidos             wpm médio                  precisão                   melhor                     tempo ativo
           42                         12                         84                         96%                        112                        1h 01m
 
-          palavras prioritárias                                                                        padrões que pedem treino
+          palavras prioritárias                                                                     padrões que pedem treino
 
-          palavra       prioridade  falhou  corrigiu  apagou                                           padrão                prioridade  falhou  corrigiu  palavras
-          ›através             +18%    3/12     2/12      5                                            técnica acento agudo        +12%   3/14     2/14  5 palavras
-
-
-
+          palavra       prioridade  falhou  corrigiu  apagou                                        padrão                prioridade  falhou  corrigiu  palavras
+          ›através             +18%    3/12     2/12      5                                         técnica acento agudo        +12%   3/14     2/14  5 palavras
+           criança             +12%    3/12     2/12      5                                         nça                          +8%   3/14     2/14  5 palavras
+           importante           +8%    3/12     2/12      5                                         ant                          +6%   3/14     2/14  5 palavras
+           mostrar              +5%    3/12     2/12      5                                         str                          +4%   3/14     2/14  5 palavras
 
           ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
           ↑↓ selecionar   enter detalhes   R zerar modelo   esc voltar
