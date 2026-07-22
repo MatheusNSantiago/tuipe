@@ -3,7 +3,7 @@ source: src/ui.rs
 expression: rendered
 ---
      detalhes da palavra  ·  através  ·  português
-     chance de aparecer numa posição que você alcança: 7% → 25%
+     prioridade no treino: +18%
      falhou ao confirmar    precisou corrigir      caracteres apagados    tempo em correções
      3/12                   2/12                   5                      900 ms
 

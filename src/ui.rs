@@ -568,7 +568,11 @@ fn render_statistics_diagnostics_compact(
     if let Some(word) = statistics.priority_words.get(selected_word) {
         lines.push(Line::from(vec![
             Span::styled(
-                format!("› {}  ·  {}  ·  ", word.word, exposure_chance_label(word)),
+                format!(
+                    "› {}  ·  prioridade {}  ·  ",
+                    word.word,
+                    priority_label(word.estimated_exposure_uplift)
+                ),
                 Style::default().fg(theme_color(theme, &theme.main, 3.0)),
             ),
             Span::styled(
@@ -595,9 +599,9 @@ fn render_statistics_diagnostics_compact(
         lines.push(Line::from(vec![
             Span::styled(
                 format!(
-                    "{}  ·  reforço {}  ·  ",
+                    "{}  ·  prioridade {}  ·  ",
                     pattern.pattern,
-                    percentage_point_label(pattern.estimated_exposure_uplift)
+                    priority_label(pattern.estimated_exposure_uplift)
                 ),
                 Style::default().fg(theme_color(theme, &theme.main, 3.0)),
             ),
@@ -1574,8 +1578,8 @@ fn render_word_detail(frame: &mut Frame, area: Rect, detail: &WordDetail, theme:
             ]),
             Line::styled(
                 format!(
-                    "chance na próxima sessão: {}",
-                    exposure_chance_label(priority)
+                    "prioridade: {}",
+                    priority_label(priority.estimated_exposure_uplift)
                 ),
                 Style::default().fg(theme_color(theme, &theme.main, 3.0)),
             ),
@@ -1658,8 +1662,8 @@ fn render_word_detail(frame: &mut Frame, area: Rect, detail: &WordDetail, theme:
     );
     frame.render_widget(
         Paragraph::new(format!(
-            "chance de aparecer numa posição que você alcança: {}",
-            exposure_chance_label(priority)
+            "prioridade no treino: {}",
+            priority_label(priority.estimated_exposure_uplift)
         ))
         .style(Style::default().fg(theme_color(theme, &theme.main, 3.0))),
         sections[1],
@@ -1760,30 +1764,8 @@ fn render_word_detail(frame: &mut Frame, area: Rect, detail: &WordDetail, theme:
     );
 }
 
-fn percentage_point_label(chance: f64) -> String {
-    let points = chance.clamp(0.0, 1.0) * 100.0;
-    if points > 0.0 && points < 1.0 {
-        "+<1 pp".into()
-    } else {
-        format!("+{points:.0} pp")
-    }
-}
-
-fn exposure_chance_label(word: &PriorityWord) -> String {
-    format!(
-        "{} → {}",
-        probability_label(word.baseline_exposure_chance),
-        probability_label(word.adaptive_exposure_chance)
-    )
-}
-
-fn probability_label(chance: f64) -> String {
-    let percent = chance.clamp(0.0, 1.0) * 100.0;
-    if percent > 0.0 && percent < 1.0 {
-        "<1%".into()
-    } else {
-        format!("{percent:.0}%")
-    }
+fn priority_label(increase: f64) -> String {
+    format!("+{:.0}%", increase.clamp(0.0, 1.0) * 100.0)
 }
 
 fn evidence_fraction(signal: f64, exposures: f64) -> String {
@@ -1985,10 +1967,13 @@ fn render_statistics_compact(
                 .skip(offset)
                 .take(visible)
                 .map(|(index, word)| {
-                    let chance = if area.width < 60 {
-                        format!("  {}  ", exposure_chance_label(word))
+                    let priority = if area.width < 60 {
+                        format!("  {}  ", priority_label(word.estimated_exposure_uplift))
                     } else {
-                        format!("  ·  próxima sessão {}  ·  ", exposure_chance_label(word))
+                        format!(
+                            "  ·  prioridade {}  ·  ",
+                            priority_label(word.estimated_exposure_uplift)
+                        )
                     };
                     Line::from(vec![
                         Span::styled(
@@ -2000,7 +1985,7 @@ fn render_statistics_compact(
                             Style::default().fg(theme_color(theme, &theme.main, 3.0)),
                         ),
                         Span::styled(
-                            chance,
+                            priority,
                             Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
                         ),
                         Span::styled(
@@ -2050,13 +2035,13 @@ fn render_statistics_compact(
                     };
                     let contexts = if area.width < 60 {
                         format!(
-                            "  reforço {}  ·  ",
-                            percentage_point_label(pattern.estimated_exposure_uplift)
+                            "  prioridade {}  ·  ",
+                            priority_label(pattern.estimated_exposure_uplift)
                         )
                     } else {
                         format!(
-                            "  ·  reforço {}  ·  ",
-                            percentage_point_label(pattern.estimated_exposure_uplift)
+                            "  ·  prioridade {}  ·  ",
+                            priority_label(pattern.estimated_exposure_uplift)
                         )
                     };
                     Line::from(vec![
@@ -2337,7 +2322,7 @@ fn render_priority_words(
         ));
     } else {
         lines.push(Line::styled(
-            "palavra       próxima sessão  falhou  corrigiu  apagou",
+            "palavra       prioridade  falhou  corrigiu  apagou",
             Style::default().fg(theme_color(theme, &theme.sub, 2.0)),
         ));
         let visible = area.height.saturating_sub(3) as usize;
@@ -2359,7 +2344,7 @@ fn render_priority_words(
                             Style::default().fg(theme_color(theme, &theme.main, 3.0)),
                         ),
                         Span::styled(
-                            format!("{:>14}  ", exposure_chance_label(word)),
+                            format!("{:>10}  ", priority_label(word.estimated_exposure_uplift)),
                             Style::default().fg(theme_color(theme, &theme.main, 3.0)),
                         ),
                         Span::styled(
@@ -2410,7 +2395,7 @@ fn render_priority_patterns(
         let label_width = if area.width >= 62 { 20 } else { 12 };
         lines.push(Line::styled(
             format!(
-                "{:<width$}  reforço  falhou  corrigiu  palavras",
+                "{:<width$}  prioridade  falhou  corrigiu  palavras",
                 "padrão",
                 width = label_width
             ),
@@ -2432,10 +2417,7 @@ fn render_priority_patterns(
                             Style::default().fg(theme_color(theme, &theme.main, 3.0)),
                         ),
                         Span::styled(
-                            format!(
-                                "{:>6} ",
-                                percentage_point_label(pattern.estimated_exposure_uplift)
-                            ),
+                            format!("{:>10} ", priority_label(pattern.estimated_exposure_uplift)),
                             Style::default().fg(theme_color(theme, &theme.main, 3.0)),
                         ),
                         Span::styled(
@@ -6751,7 +6733,7 @@ mod tests {
         for (width, height) in [(50, 14), (100, 28)] {
             let rendered = render_word_detail_at(width, height);
             assert!(rendered.contains("através"));
-            assert!(rendered.contains("chance"));
+            assert!(rendered.contains("prioridade"));
             assert!(rendered.contains("ritmo"));
             assert!(rendered.contains("tentativas recentes"));
             assert!(!rendered.contains("difficulty"));

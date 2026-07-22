@@ -57,10 +57,10 @@ A visão geral separa tentativas válidas de sessões interrompidas ou muito for
 do seu ritmo. O gráfico usa todo o histórico comparável, mostra a tendência de
 WPM e mantém erros individuais visíveis.
 
-Logo abaixo aparecem as palavras e os padrões que mais pedem treino. Para cada
-palavra, a tela mostra a chance natural e a chance adaptada, como `4% → 11%`.
-Também mostra contagens concretas, como `falhou 1/5`, `corrigiu 4/5` e quantos
-caracteres foram apagados durante essas recuperações.
+Logo abaixo aparecem as palavras e os padrões que mais pedem treino. A coluna
+de prioridade mostra diretamente quanto o modelo aumentou sua presença, como
+`+2%`. A tela também mostra contagens concretas, como `falhou 1/5`, `corrigiu
+4/5` e quantos caracteres foram apagados durante essas recuperações.
 
 <p align="center">
   <img src="assets/readme/estatisticas.webp" alt="Visão geral das estatísticas do tuipe" width="1200">
