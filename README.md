@@ -16,8 +16,8 @@ Para isso, são analisados vários aspectos do seu desempenho:
 
 - **Detecta palavras lentas:** uma palavra pode pedir treino mesmo quando você
   consegue corrigi-la antes de confirmar.
-- **Detecta erros em trigramas:** se você erra `criança` e `França`, o modelo reforça palavras com
-  `nça`, sem culpar todas as sequências das duas palavras.
+- **Detecta dificuldades em n-gramas:** se você erra `criança` e `França` em
+  `nça`, o modelo reforça outras palavras com o mesmo padrão.
 - **Correções também contam:** apagar uma letra pesa pouco; reconstruir quase
   toda a palavra e gastar vários segundos corrigindo pesa muito mais.
 - **Identifica AFK:** o tempo detectado como ausência não entra no aprendizado.
