@@ -2692,9 +2692,11 @@ fn initialize_schema(connection: &Connection) -> Result<()> {
            shadow_version INTEGER,
            changed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
          );
-         INSERT INTO adaptive_policy_state (id, active_version, fallback_version)
-           VALUES (1, 4, 0);
          CREATE TABLE raw_events (session_id INTEGER PRIMARY KEY REFERENCES sessions(id), codec_version INTEGER NOT NULL, uncompressed_size INTEGER NOT NULL, blob BLOB NOT NULL);",
+    )?;
+    transaction.execute(
+        "INSERT INTO adaptive_policy_state (id, active_version, fallback_version) VALUES (1, ?1, 0)",
+        [CURRENT_POLICY_VERSION],
     )?;
     transaction.execute_batch(
         "CREATE INDEX idx_word_observations_session ON word_observations(session_id);
@@ -3028,8 +3030,8 @@ mod tests {
         repository
             .connection
             .execute(
-                "UPDATE adaptive_policy_state SET active_version = 3, fallback_version = 0",
-                [],
+                "UPDATE adaptive_policy_state SET active_version = ?1, fallback_version = 0",
+                [CURRENT_POLICY_VERSION - 1],
             )
             .unwrap();
 

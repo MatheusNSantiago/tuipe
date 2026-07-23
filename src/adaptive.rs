@@ -23,7 +23,7 @@ use unicode_segmentation::UnicodeSegmentation;
 mod simulation;
 
 pub const UNIFORM_POLICY_VERSION: u16 = 0;
-pub const CURRENT_POLICY_VERSION: u16 = 4;
+pub const CURRENT_POLICY_VERSION: u16 = 5;
 /// Sinal abaixo deste valor ainda é ruído e não deve ser apresentado como uma
 /// dificuldade acionável para o usuário.
 pub const MINIMUM_ACTIONABLE_DIFFICULTY: f64 = 0.01;
@@ -143,10 +143,10 @@ impl Default for AdaptivePolicy {
             minimum_correction_effect: 0.02,
             correction_cost: 0.9,
             latency_cost: 0.22,
-            maximum_boost: 5.0,
-            representative_share: 0.45,
-            targeted_share: 0.35,
-            exploration_share: 0.10,
+            maximum_boost: 12.0,
+            representative_share: 0.37,
+            targeted_share: 0.45,
+            exploration_share: 0.08,
             transfer_share: 0.10,
         }
     }
@@ -396,7 +396,7 @@ impl AdaptivePolicy {
         1.0 - (-(uncorrected + corrected + latency)
             * recurrence_confidence
             * signal_confidence
-            * 14.0)
+            * 6.0)
             .exp()
     }
 
@@ -433,7 +433,7 @@ impl AdaptivePolicy {
         ) * self.correction_cost
             * correction_severity(skill.corrected_error_mass, skill.correction_burden_mass);
         let confidence = 1.0 - (-skill.effective_exposures / 12.0).exp();
-        1.0 - (-(uncorrected + corrected) * confidence * 10.0).exp()
+        1.0 - (-(uncorrected + corrected) * confidence * 6.0).exp()
     }
 
     pub fn mechanic_difficulty(&self, skill: &MechanicSkill, baseline: PersonalBaseline) -> f64 {
@@ -456,7 +456,7 @@ impl AdaptivePolicy {
         ) * self.correction_cost
             * correction_severity(skill.corrected_error_mass, skill.correction_burden_mass);
         let confidence = 1.0 - (-skill.effective_exposures / 12.0).exp();
-        1.0 - (-(uncorrected + corrected) * confidence * 8.0).exp()
+        1.0 - (-(uncorrected + corrected) * confidence * 5.0).exp()
     }
 }
 
@@ -1184,7 +1184,11 @@ impl AdaptiveSampler {
             })
             .fold(0.0, f64::max);
         let review = self.review_value(language, word);
-        (lexical + motor * 0.45 + mechanics * 0.25 + review * 0.20).min(1.0)
+        // A parcela direcionada serve para repetir a dificuldade da própria
+        // palavra. Padrões compartilhados têm sua própria parcela de
+        // transferência; se os dois entrassem com a mesma força aqui,
+        // centenas de candidatas herdariam o mesmo peso e diluiriam a prática.
+        (lexical.powi(2) + motor * 0.12 + mechanics * 0.08 + review * 0.15).min(1.0)
     }
 
     fn review_value(&self, language: &str, word: &str) -> f64 {
@@ -1522,7 +1526,7 @@ mod tests {
         let selected = sampler.sample_with_provenance("english", &words, &["a", "b"], &mut rng);
         assert_eq!(selected.word, "c");
         assert_eq!(selected.source, SelectionSource::Representative);
-        assert_eq!(selected.propensity, 1.0);
+        assert!((selected.propensity - 1.0).abs() < f64::EPSILON);
     }
 
     #[test]
