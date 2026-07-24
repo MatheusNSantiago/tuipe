@@ -10,7 +10,7 @@
 
 ## Treino adaptativo
 
-Esse modo (ligado por default) é feito para que os testes foquem nas palavras que você mais precisa treinar.
+Esse modo (ligado por padrão) é feito para que os testes foquem nas palavras que você mais precisa treinar.
 
 Para isso, são analisados vários aspectos do seu desempenho:
 
@@ -26,6 +26,14 @@ Para isso, são analisados vários aspectos do seu desempenho:
 
 Todos esses sinais viram pesos em um único sorteio probabilístico. Palavras
 difíceis aparecem mais, sem sessões especiais ou repetições agendadas.
+
+O modelo também considera até onde você costuma chegar em cada teste. Uma
+palavra prioritária tende a aparecer na parte que você realmente digita, em vez
+de ficar no fim do texto.
+
+Não existe uma regra impedindo repetições. Se uma palavra tiver 40% de chance de
+aparecer em uma sessão, a chance de aparecer em duas seguidas é 16%:
+`0,4 × 0,4`.
 
 ## O teste
 
@@ -138,8 +146,6 @@ Algumas decisões do modelo vêm destes trabalhos:
   erros corrigidos e não corrigidos medidos separadamente.
 - Van Waes et al., [Modelling Typing Disfluencies as a Finite Mixture Process](https://link.springer.com/article/10.1007/s11145-021-10203-z):
   pausas separadas do ritmo fluente.
-- Schmidt e Bjork, [New Conceptualizations of Practice](https://bjorklab.psych.ucla.edu/wp-content/uploads/sites/13/2016/07/Schmidt_RBjork_1992.pdf):
-  prática espaçada, variação, retenção e transferência.
 - Mettler, Massey e Kellman, [A Comparison of Adaptive and Fixed Schedules of Practice](https://pubmed.ncbi.nlm.nih.gov/27123574/):
   prática adaptativa comparada a uma sequência fixa.
 
