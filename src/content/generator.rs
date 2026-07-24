@@ -1,5 +1,3 @@
-use std::collections::VecDeque;
-
 use rand::{Rng, seq::IndexedRandom};
 use unicode_normalization::UnicodeNormalization;
 use unicode_segmentation::UnicodeSegmentation;
@@ -15,13 +13,11 @@ pub struct GeneratedWord {
     pub selection: Option<WordSelection>,
 }
 
-/// Amostragem uniforme com a mesma proteção das duas palavras anteriores do Monkeytype.
+/// Amostragem uniforme do vocabulário configurado.
 #[derive(Debug, Clone)]
 pub struct UniformWordGenerator<R> {
     words: Vec<String>,
     rng: R,
-    previous: [Option<String>; 2],
-    anchor_position: usize,
 }
 
 impl<R: Rng> UniformWordGenerator<R> {
@@ -30,8 +26,6 @@ impl<R: Rng> UniformWordGenerator<R> {
         Self {
             words: words.to_vec(),
             rng,
-            previous: [None, None],
-            anchor_position: 0,
         }
     }
 
@@ -40,92 +34,13 @@ impl<R: Rng> UniformWordGenerator<R> {
     }
 
     pub fn next_lexical_with_provenance(&mut self) -> WordSelection {
-        let eligible = self
+        let candidate = self
             .words
-            .iter()
-            .filter(|word| {
-                !self
-                    .previous
-                    .iter()
-                    .flatten()
-                    .any(|previous| previous == *word)
-            })
-            .collect::<Vec<_>>();
-        let eligible = if eligible.is_empty() {
-            self.words.iter().collect::<Vec<_>>()
-        } else {
-            eligible
-        };
-        let candidate = eligible
             .choose(&mut self.rng)
             .expect("pacote não vazio")
             .nfc()
             .collect::<String>();
-        let propensity = 1.0 / eligible.len() as f64;
-        self.previous.rotate_right(1);
-        self.previous[0] = Some(candidate.clone());
-        WordSelection {
-            word: candidate,
-            source: SelectionSource::Representative,
-            propensity,
-        }
-    }
-
-    /// Forma âncora estratificada por faixa de frequência do pack e tamanho.
-    /// O ciclo cobre doze células antes de repetir e nunca consulta habilidade.
-    pub fn next_anchor(&mut self) -> WordSelection {
-        let rank_band = self.anchor_position % 4;
-        let length_band = (self.anchor_position * 2) % 3;
-        self.anchor_position = self.anchor_position.saturating_add(1);
-        let band_start = self.words.len() * rank_band / 4;
-        let band_end = self.words.len() * (rank_band + 1) / 4;
-        let matches_length = |word: &str| match length_band {
-            0 => word.graphemes(true).count() <= 4,
-            1 => (5..=7).contains(&word.graphemes(true).count()),
-            _ => word.graphemes(true).count() >= 8,
-        };
-        let mut eligible = self
-            .words
-            .iter()
-            .enumerate()
-            .filter(|(index, word)| {
-                (band_start..band_end).contains(index)
-                    && matches_length(word)
-                    && !self
-                        .previous
-                        .iter()
-                        .flatten()
-                        .any(|previous| previous == *word)
-            })
-            .map(|(_, word)| word)
-            .collect::<Vec<_>>();
-        if eligible.is_empty() {
-            eligible = self
-                .words
-                .iter()
-                .enumerate()
-                .filter(|(index, word)| {
-                    (band_start..band_end).contains(index)
-                        && !self
-                            .previous
-                            .iter()
-                            .flatten()
-                            .any(|previous| previous == *word)
-                })
-                .map(|(_, word)| word)
-                .collect();
-        }
-        if eligible.is_empty() {
-            return self.next_lexical_with_provenance();
-        }
-        let candidate = eligible
-            .choose(&mut self.rng)
-            .expect("estrato não vazio")
-            .nfc()
-            .collect::<String>();
-        let propensity = 1.0 / eligible.len() as f64;
-        self.previous.rotate_right(1);
-        self.previous[0] = Some(candidate.clone());
+        let propensity = 1.0 / self.words.len() as f64;
         WordSelection {
             word: candidate,
             source: SelectionSource::Representative,
@@ -139,22 +54,13 @@ impl<R: Rng> UniformWordGenerator<R> {
         language: &str,
         reach_probability: f64,
     ) -> WordSelection {
-        let previous = self
-            .previous
-            .iter()
-            .flatten()
-            .map(String::as_str)
-            .collect::<Vec<_>>();
         let selected = sampler.sample_with_provenance_at_reach(
             language,
             &self.words,
-            &previous,
             reach_probability,
             &mut self.rng,
         );
         let candidate = selected.word.nfc().collect::<String>();
-        self.previous.rotate_right(1);
-        self.previous[0] = Some(candidate.clone());
         WordSelection {
             word: candidate,
             source: selected.source,
@@ -164,13 +70,6 @@ impl<R: Rng> UniformWordGenerator<R> {
 
     pub fn rng_mut(&mut self) -> &mut R {
         &mut self.rng
-    }
-
-    fn force(&mut self, mut selection: WordSelection) -> WordSelection {
-        selection.word = selection.word.nfc().collect();
-        self.previous.rotate_right(1);
-        self.previous[0] = Some(selection.word.clone());
-        selection
     }
 }
 
@@ -184,8 +83,6 @@ pub struct WordGenerator<R> {
     sentence_start: bool,
     adaptive: Option<(String, AdaptiveSampler, ReachProfile)>,
     position: usize,
-    assessment: bool,
-    forced: VecDeque<WordSelection>,
 }
 
 impl<R: Rng> WordGenerator<R> {
@@ -197,8 +94,6 @@ impl<R: Rng> WordGenerator<R> {
             sentence_start: true,
             adaptive: None,
             position: 0,
-            assessment: false,
-            forced: VecDeque::new(),
         }
     }
 
@@ -212,23 +107,6 @@ impl<R: Rng> WordGenerator<R> {
         self
     }
 
-    pub fn with_assessment(mut self) -> Self {
-        self.assessment = true;
-        self
-    }
-
-    pub fn with_forced_words(mut self, words: Vec<String>) -> Self {
-        self.forced = words
-            .into_iter()
-            .map(|word| WordSelection {
-                word,
-                source: SelectionSource::Targeted,
-                propensity: 1.0,
-            })
-            .collect();
-        self
-    }
-
     pub fn next_word(&mut self) -> String {
         self.next_generated().text
     }
@@ -236,25 +114,20 @@ impl<R: Rng> WordGenerator<R> {
     pub fn next_generated(&mut self) -> GeneratedWord {
         let position = self.position;
         self.position = self.position.saturating_add(1);
-        if self.forced.is_empty() && self.numbers && self.uniform.rng_mut().random_bool(0.1) {
+        if self.numbers && self.uniform.rng_mut().random_bool(0.1) {
             return GeneratedWord {
                 text: self.random_number(),
                 selection: None,
             };
         }
 
-        let selection =
-            if let Some(selection) = self.forced.pop_front() {
-                self.uniform.force(selection)
-            } else {
-                match (&self.adaptive, self.assessment) {
-                    (_, true) => self.uniform.next_anchor(),
-                    (Some((language, sampler, reach)), false) => self
-                        .uniform
-                        .next_lexical_adaptive(sampler, language, reach.probability(position)),
-                    (None, false) => self.uniform.next_lexical_with_provenance(),
-                }
-            };
+        let selection = match &self.adaptive {
+            Some((language, sampler, reach)) => {
+                self.uniform
+                    .next_lexical_adaptive(sampler, language, reach.probability(position))
+            }
+            None => self.uniform.next_lexical_with_provenance(),
+        };
         let mut word = selection.word.clone();
         if !self.punctuation {
             return GeneratedWord {
@@ -331,24 +204,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn uniform_sampler_does_not_repeat_one_of_the_two_previous_words() {
-        let words = ["um", "dois", "três", "quatro"]
-            .into_iter()
-            .map(str::to_owned)
-            .collect::<Vec<_>>();
+    fn sampler_uniforme_pode_repetir_quando_o_sorteio_pedir() {
+        let words = vec!["um".to_owned()];
         let mut generator = UniformWordGenerator::new(&words, SmallRng::seed_from_u64(7));
-        let mut produced = Vec::new();
-        for _ in 0..100 {
-            let word = generator.next_lexical();
-            assert!(
-                !produced
-                    .iter()
-                    .rev()
-                    .take(2)
-                    .any(|previous| previous == &word)
-            );
-            produced.push(word);
-        }
+        assert_eq!(generator.next_lexical(), "um");
+        assert_eq!(generator.next_lexical(), "um");
     }
 
     #[test]
@@ -361,49 +221,6 @@ mod tests {
                 assert!((1..=4).contains(&word.len()));
                 assert_ne!(word.chars().next(), Some('0'));
             }
-        }
-    }
-
-    #[test]
-    fn palavras_de_revisao_aparecem_antes_do_fluxo_uniforme() {
-        let words = vec!["casa".into(), "tempo".into(), "mundo".into()];
-        let mut generator = WordGenerator::new(&words, SmallRng::seed_from_u64(3), false, true)
-            .with_forced_words(vec!["tempo".into(), "casa".into()]);
-
-        for expected in ["tempo", "casa"] {
-            let generated = generator.next_generated();
-            assert_eq!(generated.text, expected);
-            assert_eq!(
-                generated.selection.unwrap().source,
-                SelectionSource::Targeted
-            );
-        }
-    }
-
-    #[test]
-    fn avaliacao_ancora_cobre_frequencia_e_tamanho_sem_habilidade() {
-        let mut words = Vec::new();
-        for band in 0..4 {
-            words.extend((0..4).map(|index| format!("a{band}{index}")));
-            words.extend((0..4).map(|index| format!("medio{band}{index}")));
-            words.extend((0..4).map(|index| format!("comprida{band}{index}")));
-        }
-        let mut generator = UniformWordGenerator::new(&words, SmallRng::seed_from_u64(9));
-        for position in 0..12 {
-            let selected = generator.next_anchor();
-            let index = words
-                .iter()
-                .position(|word| word == &selected.word)
-                .unwrap();
-            assert_eq!(index / 12, position % 4);
-            let expected_length_band = (position * 2) % 3;
-            let length = selected.word.graphemes(true).count();
-            assert!(match expected_length_band {
-                0 => length <= 4,
-                1 => (5..=7).contains(&length),
-                _ => length >= 8,
-            });
-            assert_eq!(selected.source, SelectionSource::Representative);
         }
     }
 }

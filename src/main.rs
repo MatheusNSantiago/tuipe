@@ -13,9 +13,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-#[cfg(test)]
-use std::collections::HashSet;
-
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 
@@ -494,10 +491,6 @@ impl App {
         );
         adaptive.set_ngram_skills(repository.load_all_ngram_skills()?);
         adaptive.set_mechanic_skills(repository.load_all_mechanic_skills()?);
-        adaptive.set_review_states(
-            repository.load_all_review_states()?,
-            chrono::Utc::now().timestamp(),
-        );
         let mut session_baseline = tuipe::persistence::PersonalBaselineProfile::default();
         for language in ["portuguese", "english"] {
             let baseline = repository.baseline_profile(language)?;
@@ -506,12 +499,7 @@ impl App {
             }
             adaptive.set_baseline(language, baseline.rates);
         }
-        let session_kind = repository.next_session_kind(
-            &preferences.test,
-            catalog
-                .word_pack(&preferences.test.language, &preferences.test.word_pack)
-                .context("o pacote de palavras configurado não está disponível")?,
-        )?;
+        let session_kind = SessionKind::Practice;
         let policy_state = repository.adaptive_policy_state()?;
         let policy_version = policy_state.active_version;
         let reach_profile = repository.reach_profile_for(
@@ -615,15 +603,7 @@ impl App {
             self.session_baseline.rates,
         );
         self.seed = rand::random();
-        let session_kind = repository.next_session_kind(
-            &self.preferences.test,
-            self.catalog
-                .word_pack(
-                    &self.preferences.test.language,
-                    &self.preferences.test.word_pack,
-                )
-                .context("o pacote de palavras configurado não está disponível")?,
-        )?;
+        let session_kind = SessionKind::Practice;
         self.reach_profile = repository.reach_profile_for(
             &self.preferences.test,
             reach_profile_positions(&self.preferences.test),
@@ -867,7 +847,6 @@ impl App {
     }
 
     fn apply_observations(&mut self, observations: &[WordObservationRecord]) {
-        let mut reviewed_words = HashMap::<(String, String), bool>::new();
         for record in observations {
             let observation = Observation {
                 confirmed_error: record.confirmed_error,
@@ -912,19 +891,6 @@ impl App {
                     record.evidence_weight,
                 );
             }
-            if record.evidence_weight > 0.0 && !record.censored {
-                reviewed_words
-                    .entry((record.language.clone(), record.word.clone()))
-                    .and_modify(|clean| {
-                        *clean &= !record.confirmed_error && record.corrections == 0;
-                    })
-                    .or_insert(!record.confirmed_error && record.corrections == 0);
-            }
-        }
-        let observed_at = chrono::Utc::now().timestamp();
-        for ((language, word), clean) in reviewed_words {
-            self.adaptive
-                .record_review(&language, &word, clean, observed_at);
         }
     }
 
@@ -949,12 +915,7 @@ impl App {
             let (baseline_chances, adaptive_chances) = if matches!(config.mode, TestMode::Quote) {
                 (HashMap::new(), HashMap::new())
             } else if config.adaptive && self.policy_version == CURRENT_POLICY_VERSION {
-                let (candidates, _) = session_word_pool(
-                    configured_words,
-                    &config,
-                    &self.adaptive,
-                    SessionKind::Practice,
-                );
+                let candidates = session_word_pool(configured_words);
                 self.adaptive
                     .estimated_reached_chances_with_number_probability(
                         &config.language,
@@ -978,12 +939,7 @@ impl App {
             }
 
             if config.adaptive && self.policy_version == CURRENT_POLICY_VERSION {
-                let (candidates, _) = session_word_pool(
-                    configured_words,
-                    &config,
-                    &self.adaptive,
-                    SessionKind::Practice,
-                );
+                let candidates = session_word_pool(configured_words);
                 let groups = statistics
                     .priority_patterns
                     .iter()
@@ -1040,10 +996,6 @@ impl App {
         );
         adaptive.set_ngram_skills(repository.load_all_ngram_skills()?);
         adaptive.set_mechanic_skills(repository.load_all_mechanic_skills()?);
-        adaptive.set_review_states(
-            repository.load_all_review_states()?,
-            chrono::Utc::now().timestamp(),
-        );
         for language in ["portuguese", "english"] {
             adaptive.set_baseline(language, repository.baseline_profile(language)?.rates);
         }
@@ -2339,124 +2291,22 @@ fn word_generator(
     let configured_words = catalog
         .word_pack(&config.language, &config.word_pack)
         .context("o pacote de palavras configurado não está disponível")?;
-    let (words, retention_words) =
-        session_word_pool(configured_words, config, adaptive, session_kind);
+    let words = session_word_pool(configured_words);
     let generator = WordGenerator::new(&words, rng, config.punctuation, config.numbers);
     Ok(match session_kind {
-        SessionKind::Assessment => generator.with_assessment(),
         SessionKind::Practice if config.adaptive && policy_version == CURRENT_POLICY_VERSION => {
             generator.with_adaptive(&config.language, adaptive.clone(), reach_profile.clone())
         }
-        SessionKind::Retention => generator.with_forced_words(retention_words),
-        SessionKind::Practice | SessionKind::Transfer | SessionKind::Repeat => generator,
+        SessionKind::Assessment
+        | SessionKind::Transfer
+        | SessionKind::Retention
+        | SessionKind::Practice
+        | SessionKind::Repeat => generator,
     })
 }
 
-fn session_word_pool(
-    configured_words: &[String],
-    config: &tuipe::typing::TestConfig,
-    adaptive: &AdaptiveSampler,
-    session_kind: SessionKind,
-) -> (Vec<String>, Vec<String>) {
-    let retention_words = if session_kind == SessionKind::Retention {
-        adaptive.retention_candidates(&config.language, configured_words)
-    } else {
-        Vec::new()
-    };
-    let partitioned = match session_kind {
-        SessionKind::Transfer => configured_words
-            .iter()
-            .filter(|word| is_transfer_holdout(word))
-            .cloned()
-            .collect::<Vec<_>>(),
-        SessionKind::Retention => {
-            let mut pool = retention_words.clone();
-            for word in configured_words {
-                if pool.len() >= 3 {
-                    break;
-                }
-                if !pool.contains(word) {
-                    pool.push(word.clone());
-                }
-            }
-            pool
-        }
-        SessionKind::Practice if config.adaptive => configured_words
-            .iter()
-            .filter(|word| !is_transfer_holdout(word))
-            .cloned()
-            .collect(),
-        SessionKind::Assessment | SessionKind::Practice | SessionKind::Repeat => Vec::new(),
-    };
-    let words = if partitioned.is_empty() {
-        configured_words.to_vec()
-    } else {
-        partitioned
-    };
-    (words, retention_words)
-}
-
-#[cfg(test)]
-fn estimated_generator_chances(
-    catalog: &ContentCatalog,
-    config: &tuipe::typing::TestConfig,
-    adaptive: &AdaptiveSampler,
-    session_kind: SessionKind,
-    targets: &[String],
-    draws: usize,
-    policy_version: u16,
-) -> Result<HashMap<String, f64>> {
-    if targets.is_empty() || draws == 0 {
-        return Ok(HashMap::new());
-    }
-    const TRIALS: usize = 128;
-    let targets = targets.iter().map(String::as_str).collect::<HashSet<_>>();
-    let mut counts = HashMap::<String, usize>::new();
-    for trial in 0..TRIALS {
-        let seed = 0x7475_6970_652d_7374_u64.wrapping_add(trial as u64);
-        let mut generator = word_generator(
-            catalog,
-            config,
-            SmallRng::seed_from_u64(seed),
-            adaptive,
-            session_kind,
-            policy_version,
-            &ReachProfile::certain(draws),
-        )?;
-        let mut seen = HashSet::<String>::new();
-        for _ in 0..draws {
-            let generated = generator.next_generated();
-            if let Some(selection) = generated.selection
-                && targets.contains(selection.word.as_str())
-            {
-                seen.insert(selection.word);
-            }
-        }
-        for word in seen {
-            *counts.entry(word).or_default() += 1;
-        }
-    }
-    Ok(targets
-        .into_iter()
-        .map(|word| {
-            (
-                word.to_owned(),
-                counts.get(word).copied().unwrap_or(0) as f64 / TRIALS as f64,
-            )
-        })
-        .collect())
-}
-
-/// Partição FNV-1a estável: aproximadamente 10% do pack nunca entra na prática
-/// adaptativa e fica reservado para medir transferência.
-fn is_transfer_holdout(word: &str) -> bool {
-    let hash = word
-        .as_bytes()
-        .iter()
-        .fold(0xcbf29ce484222325_u64, |hash, byte| {
-            (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
-        });
-    hash % 10 == 0
+fn session_word_pool(configured_words: &[String]) -> Vec<String> {
+    configured_words.to_vec()
 }
 
 fn generate(
@@ -2964,70 +2814,6 @@ mod tests {
             .unwrap()
         );
         assert!(app.persistence_error.is_none());
-    }
-
-    #[test]
-    fn particao_de_transferencia_e_estavel() {
-        let first = (0..1_000)
-            .filter(|index| is_transfer_holdout(&format!("palavra{index}")))
-            .collect::<Vec<_>>();
-        let second = (0..1_000)
-            .filter(|index| is_transfer_holdout(&format!("palavra{index}")))
-            .collect::<Vec<_>>();
-        assert_eq!(first, second);
-        assert!((70..=130).contains(&first.len()));
-
-        let words = (0..100)
-            .map(|index| format!("palavra{index}"))
-            .collect::<Vec<_>>();
-        let config = tuipe::typing::TestConfig::default();
-        let adaptive = AdaptiveSampler::new(AdaptivePolicy::default());
-        let (practice, _) = session_word_pool(&words, &config, &adaptive, SessionKind::Practice);
-        let (transfer, _) = session_word_pool(&words, &config, &adaptive, SessionKind::Transfer);
-        assert!(practice.iter().all(|word| !is_transfer_holdout(word)));
-        assert!(transfer.iter().all(|word| is_transfer_holdout(word)));
-    }
-
-    #[test]
-    fn chance_de_retencao_respeita_o_limite_real_do_teste() {
-        let catalog = ContentCatalog::bundled().unwrap();
-        let config = tuipe::typing::TestConfig::default();
-        let mut adaptive = AdaptiveSampler::default();
-        adaptive.set_review_states(
-            [
-                (
-                    "portuguese".into(),
-                    "casa".into(),
-                    tuipe::adaptive::ReviewState {
-                        last_seen_unix_s: 1,
-                        consecutive_clean_sessions: 1,
-                    },
-                ),
-                (
-                    "portuguese".into(),
-                    "tempo".into(),
-                    tuipe::adaptive::ReviewState {
-                        last_seen_unix_s: 2,
-                        consecutive_clean_sessions: 1,
-                    },
-                ),
-            ],
-            4 * 86_400,
-        );
-        let chances = estimated_generator_chances(
-            &catalog,
-            &config,
-            &adaptive,
-            SessionKind::Retention,
-            &["casa".into(), "tempo".into()],
-            1,
-            CURRENT_POLICY_VERSION,
-        )
-        .unwrap();
-
-        let values = [chances["casa"], chances["tempo"]];
-        assert_eq!(values.iter().filter(|chance| **chance == 1.0).count(), 1);
-        assert_eq!(values.iter().filter(|chance| **chance == 0.0).count(), 1);
     }
 
     #[test]

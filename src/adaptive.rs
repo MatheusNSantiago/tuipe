@@ -23,7 +23,7 @@ use unicode_segmentation::UnicodeSegmentation;
 mod simulation;
 
 pub const UNIFORM_POLICY_VERSION: u16 = 0;
-pub const CURRENT_POLICY_VERSION: u16 = 5;
+pub const CURRENT_POLICY_VERSION: u16 = 6;
 /// Sinal abaixo deste valor ainda é ruído e não deve ser apresentado como uma
 /// dificuldade acionável para o usuário.
 pub const MINIMUM_ACTIONABLE_DIFFICULTY: f64 = 0.01;
@@ -129,25 +129,17 @@ pub struct AdaptivePolicy {
     pub correction_cost: f64,
     pub latency_cost: f64,
     pub maximum_boost: f64,
-    pub representative_share: f64,
-    pub targeted_share: f64,
-    pub exploration_share: f64,
-    pub transfer_share: f64,
 }
 
 impl Default for AdaptivePolicy {
     fn default() -> Self {
         Self {
             prior_strength: 16.0,
-            minimum_error_effect: 0.02,
-            minimum_correction_effect: 0.02,
+            minimum_error_effect: 0.0,
+            minimum_correction_effect: 0.0,
             correction_cost: 0.9,
             latency_cost: 0.22,
             maximum_boost: 12.0,
-            representative_share: 0.37,
-            targeted_share: 0.45,
-            exploration_share: 0.08,
-            transfer_share: 0.10,
         }
     }
 }
@@ -205,30 +197,6 @@ pub struct MechanicSkill {
     pub corrected_error_mass: f64,
     pub correction_burden_mass: f64,
     pub distinct_words: Vec<String>,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct ReviewState {
-    pub last_seen_unix_s: i64,
-    pub consecutive_clean_sessions: u16,
-}
-
-impl ReviewState {
-    pub fn value_at(self, as_of_unix_s: i64) -> f64 {
-        if self.consecutive_clean_sessions == 0 || as_of_unix_s <= self.last_seen_unix_s {
-            return 0.0;
-        }
-        let interval_days = 2_u64
-            .saturating_pow(u32::from(
-                self.consecutive_clean_sessions.saturating_sub(1).min(5),
-            ))
-            .min(32) as f64;
-        let age_days = (as_of_unix_s - self.last_seen_unix_s) as f64 / 86_400.0;
-        if age_days <= interval_days {
-            return 0.0;
-        }
-        1.0 - (-(age_days - interval_days) / interval_days.max(1.0)).exp()
-    }
 }
 
 impl MechanicSkill {
@@ -414,7 +382,7 @@ impl AdaptivePolicy {
     }
 
     pub fn ngram_difficulty(&self, skill: &NgramSkill, baseline: PersonalBaseline) -> f64 {
-        if skill.distinct_words.len() < 3 || skill.effective_exposures <= 0.0 {
+        if skill.effective_exposures <= 0.0 {
             return 0.0;
         }
         let uncorrected = posterior_excess(
@@ -437,7 +405,7 @@ impl AdaptivePolicy {
     }
 
     pub fn mechanic_difficulty(&self, skill: &MechanicSkill, baseline: PersonalBaseline) -> f64 {
-        if skill.distinct_words.len() < 3 || skill.effective_exposures <= 0.0 {
+        if skill.effective_exposures <= 0.0 {
             return 0.0;
         }
         let uncorrected = posterior_excess(
@@ -497,7 +465,7 @@ pub enum SelectionSource {
 pub struct SelectedWord<'a> {
     pub word: &'a str,
     pub source: SelectionSource,
-    /// Probabilidade marginal depois da exclusão das palavras anteriores.
+    /// Probabilidade marginal na distribuição usada para esta posição.
     pub propensity: f64,
 }
 
@@ -525,8 +493,6 @@ pub struct AdaptiveSampler {
     baselines: HashMap<String, PersonalBaseline>,
     ngram_skills: HashMap<(String, String), NgramSkill>,
     mechanic_skills: HashMap<(String, String), MechanicSkill>,
-    review_states: HashMap<(String, String), ReviewState>,
-    as_of_unix_s: i64,
     word_difficulties: HashMap<(String, String), f64>,
     ngram_difficulties: HashMap<(String, String), f64>,
     mechanic_difficulties: HashMap<(String, String), f64>,
@@ -540,8 +506,6 @@ impl AdaptiveSampler {
             baselines: HashMap::new(),
             ngram_skills: HashMap::new(),
             mechanic_skills: HashMap::new(),
-            review_states: HashMap::new(),
-            as_of_unix_s: 0,
             word_difficulties: HashMap::new(),
             ngram_difficulties: HashMap::new(),
             mechanic_difficulties: HashMap::new(),
@@ -561,8 +525,6 @@ impl AdaptiveSampler {
             baselines: HashMap::new(),
             ngram_skills: HashMap::new(),
             mechanic_skills: HashMap::new(),
-            review_states: HashMap::new(),
-            as_of_unix_s: 0,
             word_difficulties: HashMap::new(),
             ngram_difficulties: HashMap::new(),
             mechanic_difficulties: HashMap::new(),
@@ -591,50 +553,6 @@ impl AdaptiveSampler {
             .map(|(language, mechanic, skill)| ((language, mechanic), skill))
             .collect();
         self.rebuild_difficulty_cache();
-    }
-
-    pub fn set_review_states(
-        &mut self,
-        states: impl IntoIterator<Item = (String, String, ReviewState)>,
-        as_of_unix_s: i64,
-    ) {
-        self.review_states = states
-            .into_iter()
-            .map(|(language, word, state)| ((language, word), state))
-            .collect();
-        self.as_of_unix_s = as_of_unix_s;
-    }
-
-    pub fn record_review(
-        &mut self,
-        language: &str,
-        word: &str,
-        clean: bool,
-        observed_at_unix_s: i64,
-    ) {
-        let state = self
-            .review_states
-            .entry((language.into(), word.into()))
-            .or_default();
-        state.last_seen_unix_s = observed_at_unix_s;
-        state.consecutive_clean_sessions = if clean {
-            state.consecutive_clean_sessions.saturating_add(1)
-        } else {
-            0
-        };
-        self.as_of_unix_s = self.as_of_unix_s.max(observed_at_unix_s);
-    }
-
-    pub fn retention_candidates(&self, language: &str, candidates: &[String]) -> Vec<String> {
-        let mut due = candidates
-            .iter()
-            .filter_map(|word| {
-                let value = self.review_value(language, word);
-                (value > 0.0).then_some((word.clone(), value))
-            })
-            .collect::<Vec<_>>();
-        due.sort_by(|left, right| right.1.total_cmp(&left.1));
-        due.into_iter().map(|(word, _)| word).collect()
     }
 
     pub fn set_baseline(&mut self, language: impl Into<String>, baseline: PersonalBaseline) {
@@ -722,31 +640,6 @@ impl AdaptiveSampler {
             .iter()
             .map(|group| group.iter().map(String::as_str).collect::<HashSet<_>>())
             .collect::<Vec<_>>();
-        let targeted = candidates
-            .iter()
-            .map(|word| 1.0 + self.policy.maximum_boost * self.candidate_priority(language, word))
-            .collect::<Vec<_>>();
-        let exploration = candidates
-            .iter()
-            .map(|word| self.exploration_value(language, word))
-            .collect::<Vec<_>>();
-        let transfer_weights = self.transfer_weights(language);
-        let transfer = candidates
-            .iter()
-            .map(|word| {
-                1.0 + self.policy.maximum_boost * transfer_value(word, &transfer_weights).min(1.0)
-            })
-            .collect::<Vec<_>>();
-        let representative_distribution = WeightedIndex::new(vec![1.0; candidates.len()])
-            .expect("o corpus não vazio forma uma distribuição uniforme");
-        let targeted_distribution = WeightedIndex::new(&targeted)
-            .expect("as prioridades direcionadas são positivas e finitas");
-        let exploration_distribution = WeightedIndex::new(&exploration)
-            .expect("as prioridades de exploração são positivas e finitas");
-        let transfer_distribution = WeightedIndex::new(&transfer)
-            .expect("as prioridades de transferência são positivas e finitas");
-        let has_signal =
-            weights_vary(&targeted) || weights_vary(&exploration) || weights_vary(&transfer);
         let mut counts = vec![0_usize; target_groups.len()];
         let mut hasher = DefaultHasher::new();
         language.hash(&mut hasher);
@@ -757,54 +650,29 @@ impl AdaptiveSampler {
             .iter()
             .for_each(|probability| probability.to_bits().hash(&mut hasher));
         number_probability.to_bits().hash(&mut hasher);
+        let distributions = (0..reach.positions())
+            .map(|position| {
+                WeightedIndex::new(self.selection_weights(
+                    language,
+                    candidates,
+                    reach.probability(position),
+                ))
+                .expect("a distribuição contínua é finita e não vazia")
+            })
+            .collect::<Vec<_>>();
         let mut rng = SmallRng::seed_from_u64(hasher.finish());
         for _ in 0..TRIALS {
             let reached = reach.sample_reached(&mut rng);
-            let mut previous = Vec::<usize>::new();
             let mut seen = vec![false; target_groups.len()];
-            for position in 0..reached {
+            for distribution in distributions.iter().take(reached) {
                 if number_probability > 0.0 && rng.random_bool(number_probability) {
                     continue;
                 }
-                let reach_probability = reach.probability(position);
-                let targeted_share = self.policy.targeted_share * reach_probability;
-                let exploration_share = self.policy.exploration_share * reach_probability;
-                let transfer_share = self.policy.transfer_share * reach_probability;
-                let representative_share =
-                    1.0 - targeted_share - exploration_share - transfer_share;
-                let source = if !has_signal || reach_probability == 0.0 {
-                    SelectionSource::Representative
-                } else {
-                    let roll: f64 = rng.random();
-                    if roll < representative_share {
-                        SelectionSource::Representative
-                    } else if roll < representative_share + targeted_share {
-                        SelectionSource::Targeted
-                    } else if roll < representative_share + targeted_share + exploration_share {
-                        SelectionSource::Exploration
-                    } else {
-                        SelectionSource::Transfer
-                    }
-                };
-                let distribution = match source {
-                    SelectionSource::Representative => &representative_distribution,
-                    SelectionSource::Targeted => &targeted_distribution,
-                    SelectionSource::Exploration => &exploration_distribution,
-                    SelectionSource::Transfer => &transfer_distribution,
-                };
-                let exclude_previous = previous.len() < candidates.len();
-                let index = loop {
-                    let index = distribution.sample(&mut rng);
-                    if !exclude_previous || !previous.contains(&index) {
-                        break index;
-                    }
-                };
+                let index = distribution.sample(&mut rng);
                 let selected = &candidates[index];
                 for (group_index, target_set) in target_sets.iter().enumerate() {
                     seen[group_index] |= target_set.contains(selected.as_str());
                 }
-                previous.insert(0, index);
-                previous.truncate(2);
             }
             for (count, seen) in counts.iter_mut().zip(seen) {
                 *count += usize::from(seen);
@@ -1044,106 +912,45 @@ impl AdaptiveSampler {
         &self,
         language: &str,
         candidates: &'a [String],
-        previous: &[&str],
         rng: &mut R,
     ) -> &'a str {
-        self.sample_with_provenance(language, candidates, previous, rng)
-            .word
+        self.sample_with_provenance(language, candidates, rng).word
     }
 
     pub fn sample_with_provenance<'a, R: Rng>(
         &self,
         language: &str,
         candidates: &'a [String],
-        previous: &[&str],
         rng: &mut R,
     ) -> SelectedWord<'a> {
-        self.sample_with_provenance_at_reach(language, candidates, previous, 1.0, rng)
+        self.sample_with_provenance_at_reach(language, candidates, 1.0, rng)
     }
 
-    /// Sorteia uma palavra reduzindo suavemente apenas a parcela adaptativa
-    /// quando a posição provavelmente não será alcançada. O componente
-    /// representativo permanece intacto em todo o buffer.
+    /// Sorteia uma palavra com uma única distribuição contínua. A parcela de
+    /// treino diminui gradualmente nas posições que a pessoa tende a não
+    /// alcançar; não há categorias, calendário ou bloqueio de repetição.
     pub fn sample_with_provenance_at_reach<'a, R: Rng>(
         &self,
         language: &str,
         candidates: &'a [String],
-        previous: &[&str],
         reach_probability: f64,
         rng: &mut R,
     ) -> SelectedWord<'a> {
-        let eligible = candidates
-            .iter()
-            .filter(|word| !previous.contains(&word.as_str()))
-            .collect::<Vec<_>>();
-        let eligible = if eligible.is_empty() {
-            candidates.iter().collect::<Vec<_>>()
-        } else {
-            eligible
-        };
-        let uniform = vec![1.0 / eligible.len() as f64; eligible.len()];
-        let targeted = normalized_or_uniform(
-            eligible
-                .iter()
-                .map(|word| {
-                    1.0 + self.policy.maximum_boost * self.candidate_priority(language, word)
-                })
-                .collect(),
-            &uniform,
-        );
-        let exploration = normalized_or_uniform(
-            eligible
-                .iter()
-                .map(|word| self.exploration_value(language, word))
-                .collect(),
-            &uniform,
-        );
-        let transfer_weights = self.transfer_weights(language);
-        let transfer = normalized_or_uniform(
-            eligible
-                .iter()
-                .map(|word| {
-                    1.0 + self.policy.maximum_boost
-                        * transfer_value(word, &transfer_weights).min(1.0)
-                })
-                .collect(),
-            &uniform,
-        );
-        let has_signal = targeted != uniform || exploration != uniform || transfer != uniform;
-        let reach_probability = reach_probability.clamp(0.0, 1.0);
-        let targeted_share = self.policy.targeted_share * reach_probability;
-        let exploration_share = self.policy.exploration_share * reach_probability;
-        let transfer_share = self.policy.transfer_share * reach_probability;
-        let representative_share = 1.0 - targeted_share - exploration_share - transfer_share;
-        let source = if !has_signal || reach_probability == 0.0 {
-            SelectionSource::Representative
-        } else {
-            let roll: f64 = rng.random();
-            if roll < representative_share {
-                SelectionSource::Representative
-            } else if roll < representative_share + targeted_share {
-                SelectionSource::Targeted
-            } else if roll < representative_share + targeted_share + exploration_share {
-                SelectionSource::Exploration
-            } else {
-                SelectionSource::Transfer
-            }
-        };
-        let selected_distribution = match source {
-            SelectionSource::Representative => &uniform,
-            SelectionSource::Targeted => &targeted,
-            SelectionSource::Exploration => &exploration,
-            SelectionSource::Transfer => &transfer,
-        };
-        let index = WeightedIndex::new(selected_distribution)
+        let weights = self.selection_weights(language, candidates, reach_probability);
+        let sum = weights.iter().sum::<f64>();
+        let index = WeightedIndex::new(&weights)
             .expect("distribuição adaptativa é finita e não vazia")
             .sample(rng);
-        let propensity = representative_share * uniform[index]
-            + targeted_share * targeted[index]
-            + exploration_share * exploration[index]
-            + transfer_share * transfer[index];
+        let propensity = weights[index] / sum;
+        let source = if reach_probability > 0.0
+            && self.candidate_priority(language, &candidates[index]) > 0.0
+        {
+            SelectionSource::Targeted
+        } else {
+            SelectionSource::Representative
+        };
         SelectedWord {
-            word: eligible[index],
+            word: &candidates[index],
             source,
             propensity,
         }
@@ -1183,29 +990,30 @@ impl AdaptiveSampler {
                     .copied()
             })
             .fold(0.0, f64::max);
-        let review = self.review_value(language, word);
-        // A parcela direcionada serve para repetir a dificuldade da própria
-        // palavra. Padrões compartilhados têm sua própria parcela de
-        // transferência; se os dois entrassem com a mesma força aqui,
-        // centenas de candidatas herdariam o mesmo peso e diluiriam a prática.
-        (lexical.powi(2) + motor * 0.12 + mechanics * 0.08 + review * 0.15).min(1.0)
+        // A palavra observada domina o peso. Padrões compartilhados só
+        // inclinam candidatas vizinhas, evitando que um n-grama dilua a
+        // dificuldade concreta que o usuário acabou de demonstrar.
+        (lexical.powi(2) + motor.powi(2) * 0.24 + mechanics.powi(2) * 0.08).min(1.0)
     }
 
-    fn review_value(&self, language: &str, word: &str) -> f64 {
-        let Some(state) = self.review_states.get(&(language.into(), word.into())) else {
-            return 0.0;
-        };
-        state.value_at(self.as_of_unix_s)
-    }
-
-    fn transfer_weights(&self, language: &str) -> HashMap<String, f64> {
-        let mut weights = HashMap::new();
-        for ((skill_language, ngram), difficulty) in &self.ngram_difficulties {
-            if skill_language == language && *difficulty > 0.0 {
-                weights.insert(ngram.clone(), *difficulty);
-            }
-        }
-        weights
+    fn selection_weights(
+        &self,
+        language: &str,
+        candidates: &[String],
+        reach_probability: f64,
+    ) -> Vec<f64> {
+        let reach = reach_probability.clamp(0.0, 1.0);
+        candidates
+            .iter()
+            .map(|word| {
+                let difficulty = self.candidate_priority(language, word);
+                // A exploração apenas impede que poucas observações se tornem
+                // uma certeza. Ela é uma inclinação pequena na mesma
+                // distribuição, não um modo de teste separado.
+                let uncertainty = self.exploration_value(language, word) * 0.08;
+                1.0 + reach * (self.policy.maximum_boost * difficulty + uncertainty)
+            })
+            .collect()
     }
 
     fn rebuild_difficulty_cache(&mut self) {
@@ -1260,36 +1068,6 @@ impl AdaptiveSampler {
         self.mechanic_difficulties
             .insert((language.into(), mechanic.into()), difficulty);
     }
-}
-
-fn normalized_or_uniform(mut values: Vec<f64>, uniform: &[f64]) -> Vec<f64> {
-    let sum = values
-        .iter()
-        .copied()
-        .filter(|value| value.is_finite())
-        .sum::<f64>();
-    if sum <= f64::EPSILON {
-        return uniform.to_vec();
-    }
-    for value in &mut values {
-        *value = if value.is_finite() { *value / sum } else { 0.0 };
-    }
-    values
-}
-
-fn weights_vary(values: &[f64]) -> bool {
-    values.first().is_some_and(|first| {
-        values
-            .iter()
-            .any(|value| (value - first).abs() > f64::EPSILON)
-    })
-}
-
-fn transfer_value(word: &str, weights: &HashMap<String, f64>) -> f64 {
-    lexical_ngrams(word)
-        .into_iter()
-        .map(|ngram| weights.get(&ngram).copied().unwrap_or(0.0))
-        .sum()
 }
 
 pub fn lexical_ngrams(word: &str) -> Vec<String> {
@@ -1499,6 +1277,36 @@ mod tests {
     }
 
     #[test]
+    fn dificuldade_extrema_aparece_em_dezenas_de_porcento_das_sessoes_curtas() {
+        let words = (0..200)
+            .map(|index| format!("palavra{index}"))
+            .collect::<Vec<_>>();
+        let target = words[0].clone();
+        let mut sampler = AdaptiveSampler::default();
+        for _ in 0..24 {
+            sampler.observe(
+                "portuguese",
+                &target,
+                Observation::regular(true, false, false),
+            );
+        }
+
+        let (_, adaptive) = sampler.estimated_reached_chances_with_number_probability(
+            "portuguese",
+            std::slice::from_ref(&target),
+            &words,
+            &ReachProfile::certain(8),
+            0.0,
+        );
+        let chance = adaptive[&target];
+
+        assert!(
+            (0.30..=0.50).contains(&chance),
+            "prioridade extrema deveria aparecer em 30–50% das sessões curtas, recebeu {chance}"
+        );
+    }
+
+    #[test]
     fn bons_resultados_posteriores_reduzem_a_dificuldade_gradualmente() {
         let policy = AdaptivePolicy::default();
         let mut skill = WordSkill::default();
@@ -1516,15 +1324,12 @@ mod tests {
     }
 
     #[test]
-    fn sampler_respeita_as_duas_palavras_anteriores_e_registra_propensao() {
-        let words = ["a", "b", "c"]
-            .into_iter()
-            .map(str::to_owned)
-            .collect::<Vec<_>>();
+    fn sampler_nao_bloqueia_repeticao_e_registra_propensao() {
+        let words = vec!["a".to_owned()];
         let sampler = AdaptiveSampler::default();
         let mut rng = SmallRng::seed_from_u64(1);
-        let selected = sampler.sample_with_provenance("english", &words, &["a", "b"], &mut rng);
-        assert_eq!(selected.word, "c");
+        let selected = sampler.sample_with_provenance("english", &words, &mut rng);
+        assert_eq!(selected.word, "a");
         assert_eq!(selected.source, SelectionSource::Representative);
         assert!((selected.propensity - 1.0).abs() < f64::EPSILON);
     }
@@ -1562,7 +1367,7 @@ mod tests {
     }
 
     #[test]
-    fn posicao_inalcancavel_preserva_apenas_a_distribuicao_representativa() {
+    fn posicao_inalcancavel_preserva_a_distribuicao_base() {
         let words = ["alvo", "casa", "tempo", "mundo"]
             .into_iter()
             .map(str::to_owned)
@@ -1577,8 +1382,7 @@ mod tests {
         }
         let mut rng = SmallRng::seed_from_u64(7);
 
-        let selected =
-            sampler.sample_with_provenance_at_reach("portuguese", &words, &[], 0.0, &mut rng);
+        let selected = sampler.sample_with_provenance_at_reach("portuguese", &words, 0.0, &mut rng);
 
         assert_eq!(selected.source, SelectionSource::Representative);
         assert_eq!(selected.propensity, 0.25);
@@ -1679,7 +1483,7 @@ mod tests {
     }
 
     #[test]
-    fn ngrama_so_generaliza_depois_de_palavras_distintas() {
+    fn ngrama_acumula_evidencia_de_forma_continua() {
         let policy = AdaptivePolicy::default();
         let observation = Observation {
             confirmed_error: true,
@@ -1694,15 +1498,7 @@ mod tests {
             evidence_weight: 1.0,
         };
         let mut skill = NgramSkill::default();
-        for _ in 0..10 {
-            skill.observe("primeiro", observation);
-        }
-        assert_eq!(
-            policy.ngram_difficulty(&skill, PersonalBaseline::default()),
-            0.0
-        );
-        skill.observe("principal", observation);
-        skill.observe("privado", observation);
+        skill.observe("primeiro", observation);
         assert!(policy.ngram_difficulty(&skill, PersonalBaseline::default()) > 0.0);
     }
 
@@ -1754,54 +1550,6 @@ mod tests {
     }
 
     #[test]
-    fn revisao_so_fica_elegivel_depois_do_intervalo() {
-        let mut sampler = AdaptiveSampler::default();
-        sampler.set_review_states(
-            [(
-                "portuguese".into(),
-                "casa".into(),
-                ReviewState {
-                    last_seen_unix_s: 1_000,
-                    consecutive_clean_sessions: 1,
-                },
-            )],
-            1_000 + 12 * 60 * 60,
-        );
-        assert_eq!(sampler.review_value("portuguese", "casa"), 0.0);
-        sampler.as_of_unix_s = 1_000 + 3 * 86_400;
-        assert!(sampler.review_value("portuguese", "casa") > 0.0);
-        assert_eq!(
-            sampler.retention_candidates(
-                "portuguese",
-                &["casa".into(), "tempo".into(), "mundo".into()]
-            ),
-            vec!["casa"]
-        );
-    }
-
-    #[test]
-    fn passagem_do_tempo_nao_recria_dificuldade() {
-        let mut sampler = AdaptiveSampler::default();
-        sampler.set_review_states(
-            [(
-                "portuguese".into(),
-                "casa".into(),
-                ReviewState {
-                    last_seen_unix_s: 1,
-                    consecutive_clean_sessions: 5,
-                },
-            )],
-            90 * 86_400,
-        );
-        assert_eq!(
-            sampler.policy().difficulty(&WordSkill::default()),
-            0.0,
-            "recência controla revisão, não altera a posterior de erro"
-        );
-        assert!(sampler.review_value("portuguese", "casa") > 0.0);
-    }
-
-    #[test]
     fn posterior_beta_preserva_o_resultado_de_referencia() {
         let actual = posterior_excess(0.05, 8.0, 3.0, 12.0, 0.02);
         assert!((actual - 0.109_320_281_206_737_73).abs() < 1e-12);
@@ -1816,13 +1564,10 @@ mod tests {
             let selected = sampler.sample_with_provenance(
                 "portuguese",
                 &words,
-                &[words[0].as_str(), words[1].as_str()],
                 &mut rng,
             );
             prop_assert!(selected.propensity.is_finite());
             prop_assert!(selected.propensity > 0.0 && selected.propensity <= 1.0);
-            prop_assert_ne!(selected.word, words[0].as_str());
-            prop_assert_ne!(selected.word, words[1].as_str());
         }
     }
 }

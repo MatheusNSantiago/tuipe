@@ -15,8 +15,8 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, pa
 
 use crate::adaptive::{
     CURRENT_POLICY_VERSION, MechanicSkill, NgramSkill, Observation, PersonalBaseline,
-    ReachObservation, ReachProfile, ReviewState, SelectionSource, UNIFORM_POLICY_VERSION,
-    WordSelection, WordSkill, correction_burden, lexical_ngrams,
+    ReachObservation, ReachProfile, SelectionSource, UNIFORM_POLICY_VERSION, WordSelection,
+    WordSkill, correction_burden, lexical_ngrams,
 };
 use crate::gamification::{StreakState, XpState, award};
 use crate::persistence::{
@@ -771,7 +771,6 @@ impl Repository {
             ],
         )?;
         let session_id = transaction.last_insert_rowid();
-        let mut reviewed_words = HashMap::<(String, String), bool>::new();
         if !raw_events.is_empty() {
             let (uncompressed_size, blob) = RawEventCodec::encode(raw_events)?;
             transaction.execute(
@@ -787,14 +786,6 @@ impl Repository {
             )?;
         }
         for record in observations {
-            if record.evidence_weight > 0.0 && !record.censored {
-                reviewed_words
-                    .entry((record.language.clone(), record.word.clone()))
-                    .and_modify(|clean| {
-                        *clean &= !record.confirmed_error && record.corrections == 0;
-                    })
-                    .or_insert(!record.confirmed_error && record.corrections == 0);
-            }
             insert_word_observation(&transaction, session_id, record)?;
 
             let previous = transaction
@@ -873,22 +864,6 @@ impl Repository {
                     ],
                 )?;
             }
-        }
-        let observed_at = Local::now().timestamp();
-        for ((language, word), clean) in reviewed_words {
-            transaction.execute(
-                "INSERT INTO skill_review (
-                    language, word, last_seen_unix_s, last_session_id, consecutive_clean_sessions
-                 ) VALUES (?1, ?2, ?3, ?4, ?5)
-                 ON CONFLICT(language, word) DO UPDATE SET
-                    last_seen_unix_s = excluded.last_seen_unix_s,
-                    last_session_id = excluded.last_session_id,
-                    consecutive_clean_sessions = CASE
-                        WHEN excluded.consecutive_clean_sessions = 0 THEN 0
-                        ELSE skill_review.consecutive_clean_sessions + 1
-                    END",
-                params![language, word, observed_at, session_id, i64::from(clean),],
-            )?;
         }
         if matches!(status, TestStatus::Completed { .. }) {
             let mut xp = load_state_from(&transaction, "xp_state")?;
@@ -1028,7 +1003,6 @@ impl Repository {
         let mut words = HashMap::<(String, String), WordSkill>::new();
         let mut ngrams = HashMap::<(String, String), NgramSkill>::new();
         let mut mechanics = HashMap::<(String, String), MechanicSkill>::new();
-        let mut reviews = BTreeMap::<(i64, String, String), (bool, i64)>::new();
         let mut observation_count = 0_usize;
         let mut statement = transaction.prepare(
             "SELECT wo.language, wo.word, wo.confirmed_error, wo.corrections,
@@ -1070,8 +1044,8 @@ impl Repository {
                 continue;
             }
             let stored_evidence = decode_shared_evidence(&row.get::<_, String>(8)?)?;
-            let observed_at = row.get::<_, i64>(10)?;
-            let censored = row.get::<_, bool>(11)?;
+            let _observed_at = row.get::<_, i64>(10)?;
+            let _censored = row.get::<_, bool>(11)?;
             observation_count = observation_count.saturating_add(1);
 
             words
@@ -1103,17 +1077,6 @@ impl Repository {
                         observation.evidence_weight,
                     );
             }
-            if observation.evidence_weight > 0.0 && !censored {
-                reviews
-                    .entry((session_id, language, word))
-                    .and_modify(|(clean, _)| {
-                        *clean &= !observation.confirmed_error && corrections == 0;
-                    })
-                    .or_insert((
-                        !observation.confirmed_error && corrections == 0,
-                        observed_at,
-                    ));
-            }
         }
         drop(rows);
         drop(statement);
@@ -1127,8 +1090,7 @@ impl Repository {
         transaction.execute_batch(
             "DELETE FROM word_skill;
              DELETE FROM ngram_skill;
-             DELETE FROM mechanic_skill;
-             DELETE FROM skill_review;",
+             DELETE FROM mechanic_skill;",
         )?;
         for ((language, word), skill) in words {
             transaction.execute(
@@ -1146,34 +1108,6 @@ impl Repository {
             transaction.execute(
                 "INSERT INTO mechanic_skill (language, mechanic, state) VALUES (?1, ?2, ?3)",
                 params![language, mechanic, postcard::to_allocvec(&skill)?],
-            )?;
-        }
-        let mut review_states = HashMap::<(String, String), ReviewState>::new();
-        for ((session_id, language, word), (clean, observed_at)) in reviews {
-            let state = review_states
-                .entry((language.clone(), word.clone()))
-                .or_default();
-            state.last_seen_unix_s = observed_at;
-            state.consecutive_clean_sessions = if clean {
-                state.consecutive_clean_sessions.saturating_add(1)
-            } else {
-                0
-            };
-            transaction.execute(
-                "INSERT INTO skill_review (
-                    language, word, last_seen_unix_s, last_session_id, consecutive_clean_sessions
-                 ) VALUES (?1, ?2, ?3, ?4, ?5)
-                 ON CONFLICT(language, word) DO UPDATE SET
-                    last_seen_unix_s = excluded.last_seen_unix_s,
-                    last_session_id = excluded.last_session_id,
-                    consecutive_clean_sessions = excluded.consecutive_clean_sessions",
-                params![
-                    language,
-                    word,
-                    observed_at,
-                    session_id,
-                    state.consecutive_clean_sessions,
-                ],
             )?;
         }
         Ok(report)
@@ -1385,48 +1319,6 @@ impl Repository {
         ))
     }
 
-    /// Avaliações aparecem automaticamente e nunca dependem de uma escolha na
-    /// interface. A primeira só ocorre depois de sete sessões completas.
-    pub fn next_session_kind(
-        &self,
-        config: &TestConfig,
-        eligible_words: &[String],
-    ) -> Result<SessionKind> {
-        if matches!(config.mode, crate::typing::TestMode::Quote) {
-            return Ok(SessionKind::Practice);
-        }
-        if !config.adaptive {
-            return Ok(SessionKind::Practice);
-        }
-        let completed = self.connection.query_row(
-            "SELECT COUNT(*) FROM sessions WHERE terminal_state = 'completed'",
-            [],
-            |row| row.get::<_, u64>(0),
-        )?;
-        let next = completed + 1;
-        let eligible_words = eligible_words
-            .iter()
-            .map(String::as_str)
-            .collect::<HashSet<_>>();
-        let has_due_review =
-            self.load_all_review_states()?
-                .into_iter()
-                .any(|(language, word, state)| {
-                    language == config.language
-                        && eligible_words.contains(word.as_str())
-                        && state.value_at(Local::now().timestamp()) > 0.0
-                });
-        Ok(if completed > 0 && next.is_multiple_of(8) {
-            SessionKind::Assessment
-        } else if completed > 0 && next.is_multiple_of(12) && has_due_review {
-            SessionKind::Retention
-        } else if completed > 0 && next.is_multiple_of(4) {
-            SessionKind::Transfer
-        } else {
-            SessionKind::Practice
-        })
-    }
-
     fn load_state<T: serde::de::DeserializeOwned + Default>(&self, table: &str) -> Result<T> {
         load_state_from(&self.connection, table)
     }
@@ -1503,25 +1395,6 @@ impl Repository {
                     )
                 })?;
                 Ok((row.get(0)?, row.get(1)?, skill))
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?)
-    }
-
-    pub fn load_all_review_states(&self) -> Result<Vec<(String, String, ReviewState)>> {
-        let mut statement = self.connection.prepare(
-            "SELECT language, word, last_seen_unix_s, consecutive_clean_sessions
-             FROM skill_review",
-        )?;
-        Ok(statement
-            .query_map([], |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    ReviewState {
-                        last_seen_unix_s: row.get(2)?,
-                        consecutive_clean_sessions: row.get::<_, u16>(3)?,
-                    },
-                ))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?)
     }
@@ -2096,11 +1969,15 @@ impl Repository {
         let last_seen_unix_s = self
             .connection
             .query_row(
-                "SELECT last_seen_unix_s FROM skill_review WHERE language = ?1 AND word = ?2",
+                "SELECT unixepoch(MAX(s.created_at))
+                 FROM word_observations wo
+                 JOIN sessions s ON s.id = wo.session_id
+                 WHERE wo.language = ?1 AND wo.word = ?2",
                 params![language, word],
-                |row| row.get(0),
+                |row| row.get::<_, Option<i64>>(0),
             )
-            .optional()?;
+            .optional()?
+            .flatten();
 
         let word_ngrams = lexical_ngrams(word);
         let mut relevant_sequences = self
@@ -2856,10 +2733,6 @@ mod tests {
             mechanics: Vec::new(),
             patterns: Vec::new(),
         }
-    }
-
-    fn eligible_words() -> Vec<String> {
-        vec!["casa".into(), "tempo".into(), "ação".into()]
     }
 
     fn raw_reach(reached: usize, end: RawSessionEnd) -> Vec<RawEvent> {
@@ -4050,188 +3923,5 @@ mod tests {
         assert_eq!(skills[0].1, "til");
         assert_eq!(skills[0].2.corrected_error_mass, 1.0);
         assert_eq!(skills[0].2.distinct_words, vec!["ação"]);
-    }
-
-    #[test]
-    fn revisao_conta_sessoes_limpas_e_erro_reinicia_a_sequencia() {
-        let temporary = tempfile::tempdir().unwrap();
-        let repository = Repository::open(&temporary.path().join("history.db")).unwrap();
-        let mut record = WordObservationRecord {
-            language: "portuguese".into(),
-            word: "casa".into(),
-            confirmed_error: false,
-            corrections: 0,
-            active_ms: 500,
-            afk_ms: 0,
-            planning_ms: 0,
-            fluent_ms: 500,
-            correction_ms: 0,
-            input_events: 4,
-            corrective_events: 0,
-            censored: false,
-            grapheme_count: 4,
-            fast_success: false,
-            slow: false,
-            latency_ratio: None,
-            evidence_weight: 1.0,
-            selection_source: None,
-            selection_propensity: None,
-            mechanics: Vec::new(),
-            patterns: Vec::new(),
-        };
-        for ended_at_ms in [500, 1_000] {
-            repository
-                .save_session_with_observations(
-                    &TestConfig::default(),
-                    &TestStatus::Completed { ended_at_ms },
-                    Metrics::default(),
-                    &[record.clone()],
-                )
-                .unwrap();
-        }
-        assert_eq!(
-            repository.load_all_review_states().unwrap()[0]
-                .2
-                .consecutive_clean_sessions,
-            2
-        );
-        record.confirmed_error = true;
-        repository
-            .save_session_with_observations(
-                &TestConfig::default(),
-                &TestStatus::Failed {
-                    ended_at_ms: 1_500,
-                    word_index: 0,
-                },
-                Metrics::default(),
-                &[record],
-            )
-            .unwrap();
-        assert_eq!(
-            repository.load_all_review_states().unwrap()[0]
-                .2
-                .consecutive_clean_sessions,
-            0
-        );
-    }
-
-    #[test]
-    fn avaliacao_ancora_e_agendada_sem_escolha_do_usuario() {
-        let temporary = tempfile::tempdir().unwrap();
-        let repository = Repository::open(&temporary.path().join("history.db")).unwrap();
-        let config = TestConfig::default();
-        assert_eq!(
-            repository
-                .next_session_kind(&config, &eligible_words())
-                .unwrap(),
-            SessionKind::Practice
-        );
-        let quote = TestConfig {
-            mode: TestMode::Quote,
-            ..config.clone()
-        };
-        assert_eq!(
-            repository
-                .next_session_kind(&quote, &eligible_words())
-                .unwrap(),
-            SessionKind::Practice
-        );
-        for ended_at_ms in 1..=3 {
-            repository
-                .save_session(
-                    &config,
-                    &TestStatus::Completed { ended_at_ms },
-                    Metrics::default(),
-                )
-                .unwrap();
-        }
-        assert_eq!(
-            repository
-                .next_session_kind(&config, &eligible_words())
-                .unwrap(),
-            SessionKind::Transfer
-        );
-        for ended_at_ms in 4..=7 {
-            repository
-                .save_session(
-                    &config,
-                    &TestStatus::Completed { ended_at_ms },
-                    Metrics::default(),
-                )
-                .unwrap();
-        }
-        assert_eq!(
-            repository
-                .next_session_kind(&config, &eligible_words())
-                .unwrap(),
-            SessionKind::Assessment
-        );
-    }
-
-    #[test]
-    fn retencao_so_e_agendada_quando_existe_revisao_vencida() {
-        let temporary = tempfile::tempdir().unwrap();
-        let repository = Repository::open(&temporary.path().join("history.db")).unwrap();
-        let config = TestConfig::default();
-        for ended_at_ms in 1..=11 {
-            repository
-                .save_session(
-                    &config,
-                    &TestStatus::Completed { ended_at_ms },
-                    Metrics::default(),
-                )
-                .unwrap();
-        }
-        assert_eq!(
-            repository
-                .next_session_kind(&config, &eligible_words())
-                .unwrap(),
-            SessionKind::Transfer
-        );
-        repository
-            .connection
-            .execute(
-                "INSERT INTO skill_review (
-                    language, word, last_seen_unix_s, last_session_id, consecutive_clean_sessions
-                 ) VALUES ('english', 'house', ?1, 11, 1)",
-                [Local::now().timestamp() - 3 * 86_400],
-            )
-            .unwrap();
-        assert_eq!(
-            repository
-                .next_session_kind(&config, &eligible_words())
-                .unwrap(),
-            SessionKind::Transfer
-        );
-        repository
-            .connection
-            .execute(
-                "INSERT INTO skill_review (
-                    language, word, last_seen_unix_s, last_session_id, consecutive_clean_sessions
-                 ) VALUES ('portuguese', 'fora-do-pacote', ?1, 11, 1)",
-                [Local::now().timestamp() - 3 * 86_400],
-            )
-            .unwrap();
-        assert_eq!(
-            repository
-                .next_session_kind(&config, &eligible_words())
-                .unwrap(),
-            SessionKind::Transfer
-        );
-        repository
-            .connection
-            .execute(
-                "INSERT INTO skill_review (
-                    language, word, last_seen_unix_s, last_session_id, consecutive_clean_sessions
-                 ) VALUES ('portuguese', 'casa', ?1, 11, 1)",
-                [Local::now().timestamp() - 3 * 86_400],
-            )
-            .unwrap();
-        assert_eq!(
-            repository
-                .next_session_kind(&config, &eligible_words())
-                .unwrap(),
-            SessionKind::Retention
-        );
     }
 }

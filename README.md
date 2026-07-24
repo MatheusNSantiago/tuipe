@@ -24,7 +24,8 @@ Para isso, são analisados vários aspectos do seu desempenho:
 - **Percebe quando você volta a acertar:** a frequência extra da palavra diminui
   gradualmente até níveis normais.
 
-Todos esses sinais são combinados em um modelo de prioridade que decide quais palavras aparecerão mais vezes nos testes.
+Todos esses sinais viram pesos em um único sorteio probabilístico. Palavras
+difíceis aparecem mais, sem sessões especiais ou repetições agendadas.
 
 ## O teste
 
