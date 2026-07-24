@@ -27,10 +27,6 @@ Para isso, são analisados vários aspectos do seu desempenho:
 Todos esses sinais viram pesos em um único sorteio probabilístico. Palavras
 difíceis aparecem mais, sem sessões especiais ou repetições agendadas.
 
-O modelo também considera até onde você costuma chegar em cada teste. Uma
-palavra prioritária tende a aparecer na parte que você realmente digita, em vez
-de ficar no fim do texto.
-
 Não existe uma regra impedindo repetições. Se uma palavra tiver 40% de chance de
 aparecer em uma sessão, a chance de aparecer em duas seguidas é 16%:
 `0,4 × 0,4`.
