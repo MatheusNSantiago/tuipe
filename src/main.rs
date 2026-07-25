@@ -40,7 +40,7 @@ use tuipe::{
     },
     content::{ContentCatalog, Quote, WordGenerator},
     persistence::{
-        Preferences, PriorityWord, RawEvent, RawEventCodec, RawSessionEnd, Repository,
+        Keymap, Preferences, PriorityWord, RawEvent, RawEventCodec, RawSessionEnd, Repository,
         SessionDetail, SessionKind, SessionOutcome, SessionProvenance, StatisticsOverview,
         WordDetail, WordObservationRecord, paths, state_dir,
     },
@@ -1848,7 +1848,7 @@ fn handle_key(
     let action = typing_action(
         code,
         modifiers,
-        app.preferences.keymap.delete_word.contains(&pressed),
+        delete_word_pressed(&app.preferences.keymap, code, modifiers, pressed),
     );
     if let Some(action) = action {
         app.update(InputEvent::Key {
@@ -1875,6 +1875,23 @@ fn typing_action(code: KeyCode, modifiers: KeyModifiers, delete_word: bool) -> O
     }
 }
 
+fn delete_word_pressed(
+    keymap: &Keymap,
+    code: KeyCode,
+    modifiers: KeyModifiers,
+    pressed: crokey::KeyCombination,
+) -> bool {
+    if keymap.delete_word.contains(&pressed) {
+        return true;
+    }
+    if code != KeyCode::Char('h') || modifiers != KeyModifiers::CONTROL {
+        return false;
+    }
+    let ctrl_backspace =
+        crokey::KeyCombination::from(KeyEvent::new(KeyCode::Backspace, KeyModifiers::CONTROL));
+    keymap.delete_word.contains(&ctrl_backspace)
+}
+
 fn handle_typing_repeat(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> bool {
     if app.settings_open
         || app.statistics_open
@@ -1889,7 +1906,7 @@ fn handle_typing_repeat(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -
     let Some(action) = typing_action(
         code,
         modifiers,
-        app.preferences.keymap.delete_word.contains(&pressed),
+        delete_word_pressed(&app.preferences.keymap, code, modifiers, pressed),
     ) else {
         return false;
     };
@@ -2455,18 +2472,16 @@ mod tests {
 
     #[test]
     fn ctrl_w_and_ctrl_backspace_remove_the_active_word() {
-        assert_eq!(
-            typing_action(KeyCode::Char('w'), KeyModifiers::CONTROL, true),
-            Some(KeyAction::DeleteWordBackward)
-        );
-        assert_eq!(
-            typing_action(KeyCode::Backspace, KeyModifiers::CONTROL, true),
-            Some(KeyAction::DeleteWordBackward)
-        );
-        assert_eq!(
-            typing_action(KeyCode::Char('h'), KeyModifiers::CONTROL, false),
-            None
-        );
+        let keymap = Keymap::default();
+        for code in [KeyCode::Char('w'), KeyCode::Backspace, KeyCode::Char('h')] {
+            let pressed = KeyEvent::new(code, KeyModifiers::CONTROL).into();
+            assert!(delete_word_pressed(
+                &keymap,
+                code,
+                KeyModifiers::CONTROL,
+                pressed,
+            ));
+        }
     }
 
     #[test]
