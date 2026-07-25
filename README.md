@@ -14,22 +14,12 @@ Esse modo (ligado por padrão) é feito para que os testes foquem nas palavras q
 
 Para isso, são analisados vários aspectos do seu desempenho:
 
-- **Detecta palavras lentas:** uma palavra pode pedir treino mesmo quando você
-  consegue corrigi-la antes de confirmar.
 - **Detecta dificuldades em n-gramas:** se você erra `criança` e `França` em
-  `nça`, o modelo reforça outras palavras com o mesmo padrão.
-- **Correções também contam:** apagar uma letra pesa pouco; reconstruir quase
-  toda a palavra e gastar vários segundos corrigindo pesa muito mais.
-- **Identifica AFK:** o tempo detectado como ausência não entra no aprendizado.
-- **Percebe quando você volta a acertar:** a frequência extra da palavra diminui
-  gradualmente até níveis normais.
-
-Todos esses sinais viram pesos em um único sorteio probabilístico. Palavras
-difíceis aparecem mais, sem sessões especiais ou repetições agendadas.
-
-Não existe uma regra impedindo repetições. Se uma palavra tiver 40% de chance de
-aparecer em uma sessão, a chance de aparecer em duas seguidas é 16%:
-`0,4 × 0,4`.
+  `nça`, o modelo reforça outras palavras com o mesmo padrão `nça` (ex: `lança`).
+- **Detecta palavras lentas:** se vc demora mais tempo que o normal em uma palavra, ela vai tender a aparecer mais.
+- **Detecta correções:** se você erra e corrige, a palavra vai tender a aparecer mais.
+- **Percebe quando você volta a acertar:** a frequência extra da palavra diminui gradualmente até níveis normais.
+- **Identifica AFK:** Pode ficar tranquilo que o modelo não vai te punir por pausas não relacionadas à digitação.
 
 ## O teste
 
