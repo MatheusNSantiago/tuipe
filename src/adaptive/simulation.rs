@@ -25,17 +25,10 @@ fn duas_mil_sessoes_preservam_cobertura_e_encontram_dificuldade_real() {
 
     for _ in 0..SESSIONS {
         let reached = reach.sample_reached(&mut rng);
+        let mut distribution = sampler.session_word_sampler("portuguese", &words, &reach, 0.0);
         reached_total += reached;
-        for position in 0..reached {
-            let selected = sampler
-                .sample_with_provenance_at_reach(
-                    "portuguese",
-                    &words,
-                    reach.probability(position),
-                    &mut rng,
-                )
-                .word
-                .to_owned();
+        for _ in 0..reached {
+            let selected = distribution.sample(&words, &mut rng).word.to_owned();
             *counts.entry(selected.clone()).or_default() += 1;
             coverage.insert(selected.clone());
             let error_rate = if selected == hard { 0.24 } else { 0.02 };

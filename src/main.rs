@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     env,
     fs::{self, OpenOptions},
     io::Write,
@@ -35,8 +35,8 @@ use termina::{
 };
 use tuipe::{
     adaptive::{
-        AdaptivePolicy, AdaptiveSampler, CURRENT_POLICY_VERSION, Observation, ReachProfile,
-        correction_burden, lexical_ngrams, mechanics_for_token,
+        AdaptivePolicy, AdaptiveSampler, CURRENT_POLICY_VERSION, Observation, ReachForecast,
+        ReachProfile, correction_burden, lexical_ngrams, mechanics_for_token,
     },
     content::{ContentCatalog, Quote, WordGenerator},
     persistence::{
@@ -44,7 +44,10 @@ use tuipe::{
         SessionDetail, SessionKind, SessionOutcome, SessionProvenance, StatisticsOverview,
         WordDetail, WordObservationRecord, paths, state_dir,
     },
-    typing::{ExternalEvent, InputEvent, KeyAction, QuoteLength, TestEngine, TestMode, TestStatus},
+    typing::{
+        Difficulty, ExternalEvent, InputEvent, KeyAction, QuoteLength, TestEngine, TestMode,
+        TestStatus,
+    },
     ui,
 };
 
@@ -502,9 +505,12 @@ impl App {
         let session_kind = SessionKind::Practice;
         let policy_state = repository.adaptive_policy_state()?;
         let policy_version = policy_state.active_version;
-        let reach_profile = repository.reach_profile_for(
+        let reach_profile = predicted_reach_profile(
+            &catalog,
+            repository,
             &preferences.test,
-            reach_profile_positions(&preferences.test),
+            &adaptive,
+            policy_version,
         )?;
         let (engine, generator, selections, current_quote) = new_test(
             &catalog,
@@ -604,9 +610,12 @@ impl App {
         );
         self.seed = rand::random();
         let session_kind = SessionKind::Practice;
-        self.reach_profile = repository.reach_profile_for(
+        self.reach_profile = predicted_reach_profile(
+            &self.catalog,
+            repository,
             &self.preferences.test,
-            reach_profile_positions(&self.preferences.test),
+            &self.adaptive,
+            self.policy_version,
         )?;
         let (engine, generator, selections, current_quote) = new_test(
             &self.catalog,
@@ -896,8 +905,13 @@ impl App {
 
     fn load_statistics(&mut self, repository: &Repository) -> Result<()> {
         let config = self.engine.config().clone();
-        self.reach_profile =
-            repository.reach_profile_for(&config, reach_profile_positions(&config))?;
+        self.reach_profile = predicted_reach_profile(
+            &self.catalog,
+            repository,
+            &config,
+            &self.adaptive,
+            self.policy_version,
+        )?;
         let mut statistics = repository.statistics_overview_for(&config)?;
         statistics
             .priority_words
@@ -2185,6 +2199,79 @@ fn reach_profile_positions(config: &tuipe::typing::TestConfig) -> usize {
         TestMode::Time { .. } => TIMED_TEST_BUFFER_WORDS,
         TestMode::Quote => 0,
     }
+}
+
+fn extrapolation_sample(
+    catalog: &ContentCatalog,
+    language: &str,
+    word_pack: &str,
+    candidates: &[String],
+) -> Vec<String> {
+    let previous_pack = match word_pack {
+        "1k" => Some("common"),
+        "5k" => Some("1k"),
+        _ => None,
+    };
+    let Some(previous) = previous_pack.and_then(|pack| catalog.word_pack(language, pack)) else {
+        return candidates.to_vec();
+    };
+    let previous = previous.iter().map(String::as_str).collect::<HashSet<_>>();
+    candidates
+        .iter()
+        .filter(|word| !previous.contains(word.as_str()))
+        .cloned()
+        .collect()
+}
+
+fn predicted_reach_profile(
+    catalog: &ContentCatalog,
+    repository: &Repository,
+    config: &tuipe::typing::TestConfig,
+    adaptive: &AdaptiveSampler,
+    policy_version: u16,
+) -> Result<ReachProfile> {
+    let positions = reach_profile_positions(config);
+    if positions == 0
+        || matches!(config.mode, TestMode::Quote)
+        || matches!(config.difficulty, Difficulty::Master)
+        || config.punctuation
+        || config.numbers
+    {
+        return repository.reach_profile_for(config, positions);
+    }
+    let configured_words = catalog
+        .word_pack(&config.language, &config.word_pack)
+        .context("o pacote de palavras configurado não está disponível")?;
+    let candidates = session_word_pool(configured_words);
+    let reference_words =
+        extrapolation_sample(catalog, &config.language, &config.word_pack, &candidates);
+    let performances =
+        repository.word_performances(&config.language, &candidates, &reference_words)?;
+    let sampler = if config.adaptive && policy_version == CURRENT_POLICY_VERSION {
+        adaptive.clone()
+    } else {
+        AdaptiveSampler::new(AdaptivePolicy::default())
+    };
+    let forecast = ReachForecast {
+        positions,
+        duration_ms: match config.mode {
+            TestMode::Time { seconds } => Some(u64::from(seconds) * 1_000),
+            TestMode::Words { .. } | TestMode::Quote => None,
+        },
+        stops_on_error: matches!(config.difficulty, Difficulty::Expert),
+        trials: 8_192,
+    };
+    let mut reach = ReachProfile::certain(positions);
+    for _ in 0..3 {
+        reach = sampler.forecast_reach(
+            &config.language,
+            &candidates,
+            &performances,
+            &reach,
+            forecast,
+        );
+    }
+    Ok(reach)
 }
 
 fn new_test(

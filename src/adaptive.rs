@@ -8,11 +8,7 @@ use std::{
     hash::{Hash, Hasher},
 };
 
-use rand::{
-    Rng, SeedableRng,
-    distr::{Distribution, weighted::WeightedIndex},
-    rngs::SmallRng,
-};
+use rand::{Rng, SeedableRng, rngs::SmallRng};
 use serde::{Deserialize, Serialize};
 use special::Beta;
 use unicode_normalization::UnicodeNormalization;
@@ -23,7 +19,7 @@ use unicode_segmentation::UnicodeSegmentation;
 mod simulation;
 
 pub const UNIFORM_POLICY_VERSION: u16 = 0;
-pub const CURRENT_POLICY_VERSION: u16 = 6;
+pub const CURRENT_POLICY_VERSION: u16 = 7;
 /// Sinal abaixo deste valor ainda é ruído e não deve ser apresentado como uma
 /// dificuldade acionável para o usuário.
 pub const MINIMUM_ACTIONABLE_DIFFICULTY: f64 = 0.01;
@@ -42,6 +38,20 @@ pub struct ReachObservation {
     /// `true` quando a sessão realmente terminou nessa posição; `false`
     /// representa apenas censura porque o teste observado era mais curto.
     pub terminal: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct WordPerformance {
+    pub terminal_error_probability: f64,
+    pub expected_ms: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ReachForecast {
+    pub positions: usize,
+    pub duration_ms: Option<u64>,
+    pub stops_on_error: bool,
+    pub trials: usize,
 }
 
 impl ReachProfile {
@@ -128,7 +138,10 @@ pub struct AdaptivePolicy {
     pub minimum_correction_effect: f64,
     pub correction_cost: f64,
     pub latency_cost: f64,
-    pub maximum_boost: f64,
+    /// Maior chance desejada para uma palavra de dificuldade máxima aparecer
+    /// em uma sessão. A distribuição continua probabilística e preserva chance
+    /// positiva para todas as candidatas.
+    pub maximum_session_exposure: f64,
 }
 
 impl Default for AdaptivePolicy {
@@ -139,7 +152,7 @@ impl Default for AdaptivePolicy {
             minimum_correction_effect: 0.0,
             correction_cost: 0.9,
             latency_cost: 0.22,
-            maximum_boost: 12.0,
+            maximum_session_exposure: 0.40,
         }
     }
 }
@@ -368,19 +381,6 @@ impl AdaptivePolicy {
             .exp()
     }
 
-    pub fn weight_with_baseline(
-        &self,
-        skill: Option<&WordSkill>,
-        baseline: PersonalBaseline,
-    ) -> f64 {
-        1.0 + skill.map_or(0.0, |skill| self.difficulty_with_baseline(skill, baseline))
-            * self.maximum_boost
-    }
-
-    pub fn weight(&self, skill: Option<&WordSkill>) -> f64 {
-        self.weight_with_baseline(skill, PersonalBaseline::default())
-    }
-
     pub fn ngram_difficulty(&self, skill: &NgramSkill, baseline: PersonalBaseline) -> f64 {
         if skill.effective_exposures <= 0.0 {
             return 0.0;
@@ -452,6 +452,87 @@ fn posterior_excess(
     probability * (mean - baseline).max(0.0)
 }
 
+fn normalize(mut weights: Vec<f64>) -> Vec<f64> {
+    let total = weights.iter().sum::<f64>();
+    weights.iter_mut().for_each(|weight| *weight /= total);
+    weights
+}
+
+fn softmax(scores: &[f64], temperature: f64) -> Vec<f64> {
+    let maximum = scores.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    normalize(
+        scores
+            .iter()
+            .map(|score| ((score - maximum) * temperature).exp())
+            .collect(),
+    )
+}
+
+#[cfg(test)]
+fn estimated_inclusion_chance(
+    probabilities: &[f64],
+    target_index: usize,
+    reach: &ReachProfile,
+    lexical_probability: f64,
+    trials: usize,
+    seed: u64,
+) -> f64 {
+    let distribution = SessionWordSampler::new(
+        probabilities.to_vec(),
+        vec![SelectionSource::Representative; probabilities.len()],
+    );
+    let mut rng = SmallRng::seed_from_u64(seed);
+    let mut included = 0_usize;
+    for _ in 0..trials {
+        let mut distribution = distribution.clone();
+        let reached = reach.sample_reached(&mut rng);
+        let mut seen = false;
+        for _ in 0..reached {
+            if lexical_probability < 1.0 && !rng.random_bool(lexical_probability) {
+                continue;
+            }
+            seen |= distribution.sample_index(&mut rng).0 == target_index;
+        }
+        included += usize::from(seen);
+    }
+    included as f64 / trials as f64
+}
+
+fn approximate_inclusion_chance(
+    probabilities: &[f64],
+    target_index: usize,
+    reach: &ReachProfile,
+    lexical_probability: f64,
+) -> f64 {
+    let target_weight = probabilities[target_index];
+    let mut other_remaining = vec![1.0; probabilities.len()];
+    other_remaining[target_index] = 0.0;
+    let mut target_survival = 1.0;
+    let mut inclusion = 0.0;
+    for reached in &reach.survival {
+        if *reached <= f64::EPSILON || target_survival <= f64::EPSILON {
+            break;
+        }
+        let other_total = probabilities
+            .iter()
+            .zip(&other_remaining)
+            .map(|(weight, remaining)| weight * remaining)
+            .sum::<f64>();
+        let target_chance = target_weight / (target_weight + other_total);
+        inclusion += reached * target_survival * lexical_probability * target_chance;
+        target_survival *= 1.0 - lexical_probability * target_chance;
+        if other_total > 0.0 {
+            for (index, remaining) in other_remaining.iter_mut().enumerate() {
+                if index != target_index {
+                    *remaining *=
+                        (1.0 - lexical_probability * probabilities[index] / other_total).max(0.0);
+                }
+            }
+        }
+    }
+    inclusion.clamp(0.0, 1.0)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SelectionSource {
@@ -467,6 +548,90 @@ pub struct SelectedWord<'a> {
     pub source: SelectionSource,
     /// Probabilidade marginal na distribuição usada para esta posição.
     pub propensity: f64,
+}
+
+/// Distribuição lexical calibrada uma vez para toda a sessão.
+///
+/// O alcance previsto determina a intensidade do treino; o sorteio de cada
+/// palavra permanece independente e probabilístico.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SessionWordSampler {
+    probabilities: Vec<f64>,
+    remaining: Vec<f64>,
+    remaining_total: f64,
+    remaining_words: usize,
+    sources: Vec<SelectionSource>,
+}
+
+impl SessionWordSampler {
+    fn new(probabilities: Vec<f64>, sources: Vec<SelectionSource>) -> Self {
+        let remaining_total = probabilities.iter().sum();
+        let remaining_words = probabilities.len();
+        Self {
+            remaining: probabilities.clone(),
+            probabilities,
+            remaining_total,
+            remaining_words,
+            sources,
+        }
+    }
+
+    pub fn sample<'a, R: Rng>(
+        &mut self,
+        candidates: &'a [String],
+        rng: &mut R,
+    ) -> SelectedWord<'a> {
+        assert!(
+            !candidates.is_empty(),
+            "não é possível sortear sem candidatas"
+        );
+        assert_eq!(
+            candidates.len(),
+            self.probabilities.len(),
+            "a distribuição pertence a outro conjunto de candidatas"
+        );
+        let (index, propensity) = self.sample_index(rng);
+        SelectedWord {
+            word: &candidates[index],
+            source: self.sources[index],
+            propensity,
+        }
+    }
+
+    fn sample_index<R: Rng>(&mut self, rng: &mut R) -> (usize, f64) {
+        if self.remaining_words == 0 {
+            self.remaining.clone_from(&self.probabilities);
+            self.remaining_total = self.probabilities.iter().sum();
+            self.remaining_words = self.probabilities.len();
+        }
+        let roll = rng.random::<f64>() * self.remaining_total;
+        let mut cumulative = 0.0;
+        let index = self
+            .remaining
+            .iter()
+            .enumerate()
+            .filter(|(_, probability)| **probability > 0.0)
+            .find_map(|(index, probability)| {
+                cumulative += probability;
+                (roll < cumulative).then_some(index)
+            })
+            .or_else(|| {
+                self.remaining
+                    .iter()
+                    .rposition(|probability| *probability > 0.0)
+            })
+            .expect("a distribuição possui ao menos uma candidata restante");
+        let propensity = self.remaining[index] / self.remaining_total;
+        self.remaining_total -= self.remaining[index];
+        self.remaining[index] = 0.0;
+        self.remaining_words -= 1;
+        (index, propensity)
+    }
+
+    #[cfg(test)]
+    fn probability(&self, index: usize) -> f64 {
+        self.probabilities[index]
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -634,44 +799,36 @@ impl AdaptiveSampler {
         if target_groups.is_empty() || candidates.is_empty() || reach.positions() == 0 {
             return vec![0.0; target_groups.len()];
         }
-        const TRIALS: usize = 2_048;
+        const TRIALS: usize = 4_096;
         let number_probability = number_probability.clamp(0.0, 1.0);
+        let distribution =
+            self.session_word_sampler(language, candidates, reach, number_probability);
         let target_sets = target_groups
             .iter()
             .map(|group| group.iter().map(String::as_str).collect::<HashSet<_>>())
             .collect::<Vec<_>>();
-        let mut counts = vec![0_usize; target_groups.len()];
         let mut hasher = DefaultHasher::new();
         language.hash(&mut hasher);
         target_groups.hash(&mut hasher);
-        candidates.len().hash(&mut hasher);
+        candidates.hash(&mut hasher);
         reach
             .survival
             .iter()
             .for_each(|probability| probability.to_bits().hash(&mut hasher));
         number_probability.to_bits().hash(&mut hasher);
-        let distributions = (0..reach.positions())
-            .map(|position| {
-                WeightedIndex::new(self.selection_weights(
-                    language,
-                    candidates,
-                    reach.probability(position),
-                ))
-                .expect("a distribuição contínua é finita e não vazia")
-            })
-            .collect::<Vec<_>>();
         let mut rng = SmallRng::seed_from_u64(hasher.finish());
+        let mut counts = vec![0_usize; target_groups.len()];
         for _ in 0..TRIALS {
+            let mut distribution = distribution.clone();
             let reached = reach.sample_reached(&mut rng);
             let mut seen = vec![false; target_groups.len()];
-            for distribution in distributions.iter().take(reached) {
+            for _ in 0..reached {
                 if number_probability > 0.0 && rng.random_bool(number_probability) {
                     continue;
                 }
-                let index = distribution.sample(&mut rng);
-                let selected = &candidates[index];
-                for (group_index, target_set) in target_sets.iter().enumerate() {
-                    seen[group_index] |= target_set.contains(selected.as_str());
+                let selected = distribution.sample(candidates, &mut rng).word;
+                for (group_index, targets) in target_sets.iter().enumerate() {
+                    seen[group_index] |= targets.contains(selected);
                 }
             }
             for (count, seen) in counts.iter_mut().zip(seen) {
@@ -908,52 +1065,126 @@ impl AdaptiveSampler {
         self.skills.get(&(language.into(), word.into()))
     }
 
-    pub fn sample<'a, R: Rng>(
+    /// Calibra uma única distribuição contínua para a sessão. Uma palavra com
+    /// dificuldade máxima tende ao teto de exposição da política; sinais
+    /// menores interpolam entre a chance natural e esse teto.
+    pub fn session_word_sampler(
         &self,
         language: &str,
-        candidates: &'a [String],
-        rng: &mut R,
-    ) -> &'a str {
-        self.sample_with_provenance(language, candidates, rng).word
-    }
-
-    pub fn sample_with_provenance<'a, R: Rng>(
-        &self,
-        language: &str,
-        candidates: &'a [String],
-        rng: &mut R,
-    ) -> SelectedWord<'a> {
-        self.sample_with_provenance_at_reach(language, candidates, 1.0, rng)
-    }
-
-    /// Sorteia uma palavra com uma única distribuição contínua. A parcela de
-    /// treino diminui gradualmente nas posições que a pessoa tende a não
-    /// alcançar; não há categorias, calendário ou bloqueio de repetição.
-    pub fn sample_with_provenance_at_reach<'a, R: Rng>(
-        &self,
-        language: &str,
-        candidates: &'a [String],
-        reach_probability: f64,
-        rng: &mut R,
-    ) -> SelectedWord<'a> {
-        let weights = self.selection_weights(language, candidates, reach_probability);
-        let sum = weights.iter().sum::<f64>();
-        let index = WeightedIndex::new(&weights)
-            .expect("distribuição adaptativa é finita e não vazia")
-            .sample(rng);
-        let propensity = weights[index] / sum;
-        let source = if reach_probability > 0.0
-            && self.candidate_priority(language, &candidates[index]) > 0.0
-        {
-            SelectionSource::Targeted
-        } else {
-            SelectionSource::Representative
-        };
-        SelectedWord {
-            word: &candidates[index],
-            source,
-            propensity,
+        candidates: &[String],
+        reach: &ReachProfile,
+        number_probability: f64,
+    ) -> SessionWordSampler {
+        if candidates.is_empty() {
+            return SessionWordSampler::default();
         }
+        let priorities = candidates
+            .iter()
+            .map(|word| self.candidate_priority(language, word))
+            .collect::<Vec<_>>();
+        let (hardest_index, hardest_priority) = priorities
+            .iter()
+            .copied()
+            .enumerate()
+            .max_by(|(_, left), (_, right)| left.total_cmp(right))
+            .expect("a lista de candidatas não está vazia");
+        let uniform_probability = 1.0 / candidates.len() as f64;
+        let lexical_probability = 1.0 - number_probability.clamp(0.0, 1.0);
+        let expected_lexical_words = reach.survival.iter().sum::<f64>() * lexical_probability;
+        let natural_exposure = (expected_lexical_words * uniform_probability).clamp(0.0, 1.0);
+        if expected_lexical_words == 0.0 {
+            return SessionWordSampler::new(
+                vec![uniform_probability; candidates.len()],
+                vec![SelectionSource::Representative; candidates.len()],
+            );
+        }
+        let maximum_exposure = self
+            .policy
+            .maximum_session_exposure
+            .clamp(natural_exposure, 1.0);
+        let target_exposure =
+            natural_exposure + hardest_priority * (maximum_exposure - natural_exposure);
+
+        let probabilities = if hardest_priority < MINIMUM_ACTIONABLE_DIFFICULTY
+            || target_exposure <= natural_exposure
+        {
+            self.exploration_probabilities(language, candidates)
+        } else {
+            self.calibrated_probabilities(
+                &priorities,
+                hardest_index,
+                reach,
+                lexical_probability,
+                target_exposure,
+            )
+        };
+        let sources = priorities
+            .iter()
+            .zip(&probabilities)
+            .map(|(priority, probability)| {
+                if *priority >= MINIMUM_ACTIONABLE_DIFFICULTY {
+                    SelectionSource::Targeted
+                } else if *probability > uniform_probability {
+                    SelectionSource::Exploration
+                } else {
+                    SelectionSource::Representative
+                }
+            })
+            .collect();
+        SessionWordSampler::new(probabilities, sources)
+    }
+
+    /// Estima a curva de alcance usando a mesma distribuição lexical do
+    /// treino e o desempenho previsto de cada candidata.
+    pub fn forecast_reach(
+        &self,
+        language: &str,
+        candidates: &[String],
+        performances: &HashMap<String, WordPerformance>,
+        selection_reach: &ReachProfile,
+        forecast: ReachForecast,
+    ) -> ReachProfile {
+        if candidates.is_empty() || forecast.positions == 0 || forecast.trials == 0 {
+            return ReachProfile::default();
+        }
+        let distribution = self.session_word_sampler(language, candidates, selection_reach, 0.0);
+        let mut hasher = DefaultHasher::new();
+        language.hash(&mut hasher);
+        candidates.hash(&mut hasher);
+        forecast.hash(&mut hasher);
+        for candidate in candidates {
+            let performance = performances
+                .get(candidate)
+                .expect("toda candidata precisa de uma previsão");
+            performance
+                .terminal_error_probability
+                .to_bits()
+                .hash(&mut hasher);
+            performance.expected_ms.to_bits().hash(&mut hasher);
+        }
+        let mut rng = SmallRng::seed_from_u64(hasher.finish());
+        let mut reached_counts = Vec::with_capacity(forecast.trials);
+        for _ in 0..forecast.trials {
+            let mut distribution = distribution.clone();
+            let mut elapsed_ms = 0.0;
+            let mut reached = 0;
+            for _ in 0..forecast.positions {
+                let word = distribution.sample(candidates, &mut rng).word;
+                let performance = performances[word];
+                elapsed_ms += performance.expected_ms.max(0.0);
+                reached += 1;
+                let failed = forecast.stops_on_error
+                    && rng.random_bool(performance.terminal_error_probability.clamp(0.0, 1.0));
+                let timed_out = forecast
+                    .duration_ms
+                    .is_some_and(|limit| elapsed_ms >= limit as f64);
+                if failed || timed_out {
+                    break;
+                }
+            }
+            reached_counts.push(reached);
+        }
+        ReachProfile::from_reached_counts(reached_counts, forecast.positions)
     }
 
     fn baseline(&self, language: &str) -> PersonalBaseline {
@@ -996,24 +1227,48 @@ impl AdaptiveSampler {
         (lexical.powi(2) + motor.powi(2) * 0.24 + mechanics.powi(2) * 0.08).min(1.0)
     }
 
-    fn selection_weights(
-        &self,
-        language: &str,
-        candidates: &[String],
-        reach_probability: f64,
-    ) -> Vec<f64> {
-        let reach = reach_probability.clamp(0.0, 1.0);
-        candidates
+    fn exploration_probabilities(&self, language: &str, candidates: &[String]) -> Vec<f64> {
+        let weights = candidates
             .iter()
             .map(|word| {
-                let difficulty = self.candidate_priority(language, word);
                 // A exploração apenas impede que poucas observações se tornem
                 // uma certeza. Ela é uma inclinação pequena na mesma
                 // distribuição, não um modo de teste separado.
-                let uncertainty = self.exploration_value(language, word) * 0.08;
-                1.0 + reach * (self.policy.maximum_boost * difficulty + uncertainty)
+                1.0 + self.exploration_value(language, word) * 0.08
             })
-            .collect()
+            .collect::<Vec<_>>();
+        normalize(weights)
+    }
+
+    fn calibrated_probabilities(
+        &self,
+        priorities: &[f64],
+        target_index: usize,
+        reach: &ReachProfile,
+        lexical_probability: f64,
+        target_exposure: f64,
+    ) -> Vec<f64> {
+        const MAXIMUM_TEMPERATURE: f64 = 64.0;
+        const ITERATIONS: usize = 24;
+
+        let exposure_at = |temperature| {
+            let probabilities = softmax(priorities, temperature);
+            approximate_inclusion_chance(&probabilities, target_index, reach, lexical_probability)
+        };
+        if exposure_at(MAXIMUM_TEMPERATURE) < target_exposure {
+            return softmax(priorities, MAXIMUM_TEMPERATURE);
+        }
+        let mut lower = 0.0;
+        let mut upper = MAXIMUM_TEMPERATURE;
+        for _ in 0..ITERATIONS {
+            let midpoint = (lower + upper) / 2.0;
+            if exposure_at(midpoint) < target_exposure {
+                lower = midpoint;
+            } else {
+                upper = midpoint;
+            }
+        }
+        softmax(priorities, upper)
     }
 
     fn rebuild_difficulty_cache(&mut self) {
@@ -1147,9 +1402,17 @@ mod tests {
 
     #[test]
     fn inicio_frio_permanece_uniforme() {
-        let policy = AdaptivePolicy::default();
-        assert_eq!(policy.weight(None), 1.0);
-        assert_eq!(policy.weight(Some(&WordSkill::default())), 1.0);
+        let words = ["um", "dois", "três", "quatro"].map(str::to_owned).to_vec();
+        let distribution = AdaptiveSampler::default().session_word_sampler(
+            "portuguese",
+            &words,
+            &ReachProfile::certain(8),
+            0.0,
+        );
+
+        for index in 0..words.len() {
+            assert_eq!(distribution.probability(index), 0.25);
+        }
     }
 
     #[test]
@@ -1268,12 +1531,13 @@ mod tests {
     }
 
     #[test]
-    fn erro_recorrente_aumenta_prioridade_sem_explodir() {
+    fn erro_recorrente_aumenta_dificuldade_sem_explodir() {
         let policy = AdaptivePolicy::default();
         let mut skill = WordSkill::default();
         observe(&mut skill, 10, 0, 10);
-        assert!(policy.weight(Some(&skill)) > 1.0);
-        assert!(policy.weight(Some(&skill)) <= 1.0 + policy.maximum_boost);
+        let difficulty = policy.difficulty(&skill);
+        assert!(difficulty > 0.0);
+        assert!(difficulty <= 1.0);
     }
 
     #[test]
@@ -1290,19 +1554,23 @@ mod tests {
                 Observation::regular(true, false, false),
             );
         }
+        let reach = ReachProfile::certain(8);
 
         let (_, adaptive) = sampler.estimated_reached_chances_with_number_probability(
             "portuguese",
             std::slice::from_ref(&target),
             &words,
-            &ReachProfile::certain(8),
+            &reach,
             0.0,
         );
         let chance = adaptive[&target];
+        let natural = 8.0 / words.len() as f64;
+        let difficulty = sampler.candidate_priority("portuguese", &target);
+        let expected = natural + difficulty * (sampler.policy().maximum_session_exposure - natural);
 
         assert!(
-            (0.30..=0.50).contains(&chance),
-            "prioridade extrema deveria aparecer em 30–50% das sessões curtas, recebeu {chance}"
+            (chance - expected).abs() < 0.03,
+            "chance calibrada {chance} divergiu do alvo {expected}"
         );
     }
 
@@ -1324,14 +1592,33 @@ mod tests {
     }
 
     #[test]
-    fn sampler_nao_bloqueia_repeticao_e_registra_propensao() {
-        let words = vec!["a".to_owned()];
+    fn sampler_esgota_as_candidatas_antes_de_repetir_e_registra_propensao() {
+        let words = ["a", "b", "c"].map(str::to_owned).to_vec();
         let sampler = AdaptiveSampler::default();
         let mut rng = SmallRng::seed_from_u64(1);
-        let selected = sampler.sample_with_provenance("english", &words, &mut rng);
-        assert_eq!(selected.word, "a");
-        assert_eq!(selected.source, SelectionSource::Representative);
-        assert!((selected.propensity - 1.0).abs() < f64::EPSILON);
+        let mut distribution =
+            sampler.session_word_sampler("english", &words, &ReachProfile::certain(3), 0.0);
+        let selected = (0..words.len())
+            .map(|_| distribution.sample(&words, &mut rng))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            selected
+                .iter()
+                .map(|word| word.word)
+                .collect::<HashSet<_>>(),
+            words.iter().map(String::as_str).collect()
+        );
+        assert!(
+            selected
+                .iter()
+                .all(|word| word.source == SelectionSource::Representative)
+        );
+        assert!(
+            selected
+                .iter()
+                .all(|word| word.propensity > 0.0 && word.propensity <= 1.0)
+        );
     }
 
     #[test]
@@ -1343,6 +1630,60 @@ mod tests {
         assert_eq!(profile.probability(2), 0.5);
         assert_eq!(profile.probability(3), 0.5);
         assert_eq!(profile.probability(4), 0.0);
+    }
+
+    #[test]
+    fn previsao_de_alcance_aplica_o_desempenho_das_palavras() {
+        let words = vec!["uma".to_owned()];
+        let sampler = AdaptiveSampler::default();
+        let performance = HashMap::from([(
+            "uma".to_owned(),
+            WordPerformance {
+                terminal_error_probability: 0.0,
+                expected_ms: 100.0,
+            },
+        )]);
+        let forecast = ReachForecast {
+            positions: 20,
+            duration_ms: Some(1_000),
+            stops_on_error: true,
+            trials: 128,
+        };
+
+        let timed = sampler.forecast_reach(
+            "portuguese",
+            &words,
+            &performance,
+            &ReachProfile::certain(20),
+            forecast,
+        );
+        assert_eq!(
+            (0..20)
+                .map(|position| timed.probability(position))
+                .sum::<f64>(),
+            10.0
+        );
+
+        let failure = HashMap::from([(
+            "uma".to_owned(),
+            WordPerformance {
+                terminal_error_probability: 1.0,
+                expected_ms: 100.0,
+            },
+        )]);
+        let failed = sampler.forecast_reach(
+            "portuguese",
+            &words,
+            &failure,
+            &ReachProfile::certain(20),
+            forecast,
+        );
+        assert_eq!(
+            (0..20)
+                .map(|position| failed.probability(position))
+                .sum::<f64>(),
+            1.0
+        );
     }
 
     #[test]
@@ -1382,7 +1723,9 @@ mod tests {
         }
         let mut rng = SmallRng::seed_from_u64(7);
 
-        let selected = sampler.sample_with_provenance_at_reach("portuguese", &words, 0.0, &mut rng);
+        let mut distribution =
+            sampler.session_word_sampler("portuguese", &words, &ReachProfile::default(), 0.0);
+        let selected = distribution.sample(&words, &mut rng);
 
         assert_eq!(selected.source, SelectionSource::Representative);
         assert_eq!(selected.propensity, 0.25);
@@ -1403,21 +1746,17 @@ mod tests {
             );
         }
         let reach = ReachProfile::from_reached_counts([1], 20);
-
-        let reached = sampler.estimated_reached_uplifts_with_number_probability(
-            "portuguese",
-            std::slice::from_ref(&target),
-            &words,
-            &reach,
-            0.0,
-        )[&target];
-        let merely_generated = sampler.estimated_generated_uplifts_with_number_probability(
-            "portuguese",
-            std::slice::from_ref(&target),
-            &words,
-            20,
-            0.0,
-        )[&target];
+        let distribution = sampler.session_word_sampler("portuguese", &words, &reach, 0.0);
+        let reached =
+            estimated_inclusion_chance(&distribution.probabilities, 0, &reach, 1.0, 4_096, 7);
+        let merely_generated = estimated_inclusion_chance(
+            &distribution.probabilities,
+            0,
+            &ReachProfile::certain(20),
+            1.0,
+            4_096,
+            7,
+        );
 
         assert!(reached < merely_generated);
     }
@@ -1561,11 +1900,13 @@ mod tests {
             let words = (0..size).map(|index| format!("palavra{index}")).collect::<Vec<_>>();
             let sampler = AdaptiveSampler::default();
             let mut rng = SmallRng::seed_from_u64(seed);
-            let selected = sampler.sample_with_provenance(
+            let mut distribution = sampler.session_word_sampler(
                 "portuguese",
                 &words,
-                &mut rng,
+                &ReachProfile::certain(8),
+                0.0,
             );
+            let selected = distribution.sample(&words, &mut rng);
             prop_assert!(selected.propensity.is_finite());
             prop_assert!(selected.propensity > 0.0 && selected.propensity <= 1.0);
         }

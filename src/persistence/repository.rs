@@ -12,19 +12,20 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use anyhow::{Context, Result};
 use chrono::{Datelike, Duration, Local, NaiveDate};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
+use unicode_segmentation::UnicodeSegmentation;
 
 use crate::adaptive::{
     CURRENT_POLICY_VERSION, MechanicSkill, NgramSkill, Observation, PersonalBaseline,
-    ReachObservation, ReachProfile, SelectionSource, UNIFORM_POLICY_VERSION, WordSelection,
-    WordSkill, correction_burden, lexical_ngrams,
+    ReachObservation, ReachProfile, SelectionSource, UNIFORM_POLICY_VERSION, WordPerformance,
+    WordSelection, WordSkill, correction_burden, lexical_ngrams,
 };
 use crate::gamification::{StreakState, XpState, award};
 use crate::persistence::{
     RawEvent, RawEventCodec, RawEventKind, RawSessionEnd, derive_word_observations,
 };
 use crate::typing::{
-    ExternalEvent, InputEvent, KeyAction, Metrics, RecordedInputKind, TestConfig, TestEngine,
-    TestMode, TestStatus,
+    Difficulty, ExternalEvent, InputEvent, KeyAction, Metrics, RecordedInputKind, TestConfig,
+    TestEngine, TestMode, TestStatus,
 };
 
 pub struct Repository {
@@ -1310,6 +1311,122 @@ impl Repository {
             uncorrected_samples: uncorrected.round() as u64,
             corrected_samples: corrected.round() as u64,
         })
+    }
+
+    /// Prevê o desempenho das candidatas sem criar habilidade por pacote.
+    /// Palavras sem observação herdam a amostra representativa informada pelo
+    /// catálogo; a propensão corrige a superexposição do treino adaptativo.
+    pub fn word_performances(
+        &self,
+        language: &str,
+        candidates: &[String],
+        reference_words: &[String],
+    ) -> Result<HashMap<String, WordPerformance>> {
+        #[derive(Clone, Copy, Default)]
+        struct Evidence {
+            timing_exposures: f64,
+            error_exposures: f64,
+            errors: f64,
+            elapsed_ms: f64,
+        }
+
+        let candidate_set = candidates
+            .iter()
+            .map(String::as_str)
+            .collect::<HashSet<_>>();
+        let reference_set = reference_words
+            .iter()
+            .map(String::as_str)
+            .collect::<HashSet<_>>();
+        let uniform_propensity = 1.0 / reference_words.len().max(1) as f64;
+        let propensity_floor = uniform_propensity / 10.0;
+        let baseline = self.baseline_profile(language)?;
+        let mut individual = HashMap::<String, Evidence>::new();
+        let mut reference = Evidence::default();
+        let mut reference_graphemes = 0.0;
+        let mut statement = self.connection.prepare(
+            "SELECT word, confirmed_error, active_ms + planning_ms, grapheme_count,
+                    evidence_weight, selection_propensity, s.config_toml
+             FROM word_observations wo
+             JOIN sessions s ON s.id = wo.session_id
+             WHERE language = ?1
+               AND wo.censored = 0
+               AND wo.evidence_weight > 0
+               AND wo.active_ms + wo.planning_ms > 0
+               AND wo.grapheme_count > 0",
+        )?;
+        let rows = statement.query_map([language], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, bool>(1)?,
+                row.get::<_, f64>(2)?,
+                row.get::<_, f64>(3)?,
+                row.get::<_, f64>(4)?,
+                row.get::<_, Option<f64>>(5)?,
+                row.get::<_, String>(6)?,
+            ))
+        })?;
+        for row in rows {
+            let (word, error, elapsed_ms, graphemes, evidence_weight, propensity, config_toml) =
+                row?;
+            let config = toml::from_str::<TestConfig>(&config_toml)?;
+            let terminal_error_evidence = matches!(config.difficulty, Difficulty::Expert);
+            if candidate_set.contains(word.as_str()) {
+                let entry = individual.entry(word.clone()).or_default();
+                entry.timing_exposures += evidence_weight;
+                entry.elapsed_ms += elapsed_ms * evidence_weight;
+                if terminal_error_evidence {
+                    entry.error_exposures += evidence_weight;
+                    entry.errors += f64::from(error) * evidence_weight;
+                }
+            }
+            if reference_set.contains(word.as_str()) {
+                let sampling_weight = evidence_weight
+                    / propensity
+                        .unwrap_or(uniform_propensity)
+                        .max(propensity_floor);
+                reference.timing_exposures += sampling_weight;
+                reference.elapsed_ms += elapsed_ms * sampling_weight;
+                reference_graphemes += graphemes * sampling_weight;
+                if terminal_error_evidence {
+                    reference.error_exposures += sampling_weight;
+                    reference.errors += f64::from(error) * sampling_weight;
+                }
+            }
+        }
+        let reference_error = if reference.error_exposures > 0.0 {
+            reference.errors / reference.error_exposures
+        } else {
+            baseline.rates.uncorrected_error_rate
+        };
+        let reference_ms_per_grapheme = if reference_graphemes > 0.0 {
+            reference.elapsed_ms / reference_graphemes
+        } else {
+            baseline.latency_ms_per_grapheme(0).unwrap_or(250.0)
+        };
+        Ok(candidates
+            .iter()
+            .map(|word| {
+                let graphemes = word.graphemes(true).count().max(1) as f64;
+                let prior_ms = reference_ms_per_grapheme * graphemes;
+                let evidence = individual.get(word).copied().unwrap_or_default();
+                (
+                    word.clone(),
+                    WordPerformance {
+                        terminal_error_probability: if evidence.error_exposures > 0.0 {
+                            evidence.errors / evidence.error_exposures
+                        } else {
+                            reference_error
+                        },
+                        expected_ms: if evidence.timing_exposures > 0.0 {
+                            evidence.elapsed_ms / evidence.timing_exposures
+                        } else {
+                            prior_ms
+                        },
+                    },
+                )
+            })
+            .collect())
     }
 
     pub fn progress(&self) -> Result<(XpState, StreakState)> {
@@ -2815,6 +2932,56 @@ mod tests {
         assert_eq!(profile.probability(2), 1.0);
         assert_eq!(profile.probability(3), 0.5);
         assert_eq!(profile.probability(4), 0.0);
+    }
+
+    #[test]
+    fn palavras_sem_historico_herdam_amostra_corrigida_pela_propensao() {
+        let temporary = tempfile::tempdir().unwrap();
+        let repository = Repository::open(&temporary.path().join("history.db")).unwrap();
+        let config = TestConfig::default();
+        let mut comum = word_observation("comum", false);
+        comum.selection_propensity = Some(0.9);
+        let mut rara = word_observation("rara", true);
+        rara.selection_propensity = Some(0.1);
+        for (observation, status, end) in [
+            (
+                comum,
+                TestStatus::Completed { ended_at_ms: 300 },
+                RawSessionEnd::Completed,
+            ),
+            (
+                rara,
+                TestStatus::Failed {
+                    word_index: 0,
+                    ended_at_ms: 300,
+                },
+                RawSessionEnd::Failed,
+            ),
+        ] {
+            repository
+                .save_session_with_provenance(
+                    &config,
+                    &status,
+                    Metrics::default(),
+                    &[observation],
+                    &raw_reach(1, end),
+                    &SessionProvenance::default(),
+                )
+                .unwrap();
+        }
+
+        let candidates = ["comum", "rara", "nova"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        let performance = repository
+            .word_performances("portuguese", &candidates, &candidates[..2])
+            .unwrap();
+
+        assert!(
+            performance["nova"].terminal_error_probability > 0.8,
+            "a candidata superexposta não pode dominar a extrapolação"
+        );
     }
 
     #[test]

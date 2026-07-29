@@ -1,10 +1,10 @@
-use rand::{Rng, seq::IndexedRandom};
+use rand::Rng;
 use unicode_normalization::UnicodeNormalization;
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::adaptive::{
     AdaptiveSampler, MECHANIC_CAPITALIZATION, MECHANIC_COMMA, MECHANIC_FINAL_PUNCTUATION,
-    ReachProfile, SelectionSource, WordSelection,
+    ReachProfile, SelectionSource, SessionWordSampler, WordSelection,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -17,6 +17,7 @@ pub struct GeneratedWord {
 #[derive(Debug, Clone)]
 pub struct UniformWordGenerator<R> {
     words: Vec<String>,
+    remaining: Vec<usize>,
     rng: R,
 }
 
@@ -25,6 +26,7 @@ impl<R: Rng> UniformWordGenerator<R> {
         assert!(!words.is_empty(), "a word pack cannot be empty");
         Self {
             words: words.to_vec(),
+            remaining: (0..words.len()).collect(),
             rng,
         }
     }
@@ -34,13 +36,13 @@ impl<R: Rng> UniformWordGenerator<R> {
     }
 
     pub fn next_lexical_with_provenance(&mut self) -> WordSelection {
-        let candidate = self
-            .words
-            .choose(&mut self.rng)
-            .expect("pacote não vazio")
-            .nfc()
-            .collect::<String>();
-        let propensity = 1.0 / self.words.len() as f64;
+        if self.remaining.is_empty() {
+            self.remaining.extend(0..self.words.len());
+        }
+        let propensity = 1.0 / self.remaining.len() as f64;
+        let remaining_index = self.rng.random_range(0..self.remaining.len());
+        let word_index = self.remaining.swap_remove(remaining_index);
+        let candidate = self.words[word_index].nfc().collect::<String>();
         WordSelection {
             word: candidate,
             source: SelectionSource::Representative,
@@ -50,16 +52,9 @@ impl<R: Rng> UniformWordGenerator<R> {
 
     pub fn next_lexical_adaptive(
         &mut self,
-        sampler: &AdaptiveSampler,
-        language: &str,
-        reach_probability: f64,
+        distribution: &mut SessionWordSampler,
     ) -> WordSelection {
-        let selected = sampler.sample_with_provenance_at_reach(
-            language,
-            &self.words,
-            reach_probability,
-            &mut self.rng,
-        );
+        let selected = distribution.sample(&self.words, &mut self.rng);
         let candidate = selected.word.nfc().collect::<String>();
         WordSelection {
             word: candidate,
@@ -76,13 +71,19 @@ impl<R: Rng> UniformWordGenerator<R> {
 /// Aplica os modificadores do Monkeytype suportados pelo tuipe a um fluxo léxico
 /// uniforme ou adaptativo. A escolha léxica continua isolada dos modificadores.
 #[derive(Debug, Clone)]
+struct AdaptiveGeneration {
+    language: String,
+    sampler: AdaptiveSampler,
+    words: SessionWordSampler,
+}
+
+#[derive(Debug, Clone)]
 pub struct WordGenerator<R> {
     uniform: UniformWordGenerator<R>,
     punctuation: bool,
     numbers: bool,
     sentence_start: bool,
-    adaptive: Option<(String, AdaptiveSampler, ReachProfile)>,
-    position: usize,
+    adaptive: Option<AdaptiveGeneration>,
 }
 
 impl<R: Rng> WordGenerator<R> {
@@ -93,7 +94,6 @@ impl<R: Rng> WordGenerator<R> {
             numbers,
             sentence_start: true,
             adaptive: None,
-            position: 0,
         }
     }
 
@@ -103,7 +103,19 @@ impl<R: Rng> WordGenerator<R> {
         sampler: AdaptiveSampler,
         reach: ReachProfile,
     ) -> Self {
-        self.adaptive = Some((language.into(), sampler, reach));
+        let language = language.into();
+        let number_probability = if self.numbers { 0.1 } else { 0.0 };
+        let distribution = sampler.session_word_sampler(
+            &language,
+            &self.uniform.words,
+            &reach,
+            number_probability,
+        );
+        self.adaptive = Some(AdaptiveGeneration {
+            language,
+            sampler,
+            words: distribution,
+        });
         self
     }
 
@@ -112,8 +124,6 @@ impl<R: Rng> WordGenerator<R> {
     }
 
     pub fn next_generated(&mut self) -> GeneratedWord {
-        let position = self.position;
-        self.position = self.position.saturating_add(1);
         if self.numbers && self.uniform.rng_mut().random_bool(0.1) {
             return GeneratedWord {
                 text: self.random_number(),
@@ -121,11 +131,8 @@ impl<R: Rng> WordGenerator<R> {
             };
         }
 
-        let selection = match &self.adaptive {
-            Some((language, sampler, reach)) => {
-                self.uniform
-                    .next_lexical_adaptive(sampler, language, reach.probability(position))
-            }
+        let selection = match &mut self.adaptive {
+            Some(adaptive) => self.uniform.next_lexical_adaptive(&mut adaptive.words),
             None => self.uniform.next_lexical_with_provenance(),
         };
         let mut word = selection.word.clone();
@@ -140,17 +147,21 @@ impl<R: Rng> WordGenerator<R> {
             word = capitalize_first_grapheme(&word);
         }
 
-        let (final_boost, comma_boost) =
-            self.adaptive
-                .as_ref()
-                .map_or((1.0, 1.0), |(language, sampler, _)| {
-                    (
-                        sampler
-                            .mechanic_boost(language, MECHANIC_FINAL_PUNCTUATION)
-                            .max(sampler.mechanic_boost(language, MECHANIC_CAPITALIZATION)),
-                        sampler.mechanic_boost(language, MECHANIC_COMMA),
-                    )
-                });
+        let (final_boost, comma_boost) = self.adaptive.as_ref().map_or((1.0, 1.0), |adaptive| {
+            (
+                adaptive
+                    .sampler
+                    .mechanic_boost(&adaptive.language, MECHANIC_FINAL_PUNCTUATION)
+                    .max(
+                        adaptive
+                            .sampler
+                            .mechanic_boost(&adaptive.language, MECHANIC_CAPITALIZATION),
+                    ),
+                adaptive
+                    .sampler
+                    .mechanic_boost(&adaptive.language, MECHANIC_COMMA),
+            )
+        });
         let final_chance = (0.1 * final_boost).min(0.15);
         let comma_chance = (0.01 * comma_boost).min(0.015);
         let roll: f64 = self.uniform.rng_mut().random();
@@ -204,11 +215,37 @@ mod tests {
     use super::*;
 
     #[test]
-    fn sampler_uniforme_pode_repetir_quando_o_sorteio_pedir() {
-        let words = vec!["um".to_owned()];
+    fn sampler_uniforme_esgota_o_vocabulario_antes_de_reiniciar() {
+        let words = ["um", "dois", "três", "quatro"].map(str::to_owned).to_vec();
         let mut generator = UniformWordGenerator::new(&words, SmallRng::seed_from_u64(7));
-        assert_eq!(generator.next_lexical(), "um");
-        assert_eq!(generator.next_lexical(), "um");
+        let first_cycle = (0..words.len())
+            .map(|_| generator.next_lexical())
+            .collect::<std::collections::HashSet<_>>();
+
+        assert_eq!(first_cycle.len(), words.len());
+        assert!(words.contains(&generator.next_lexical()));
+    }
+
+    #[test]
+    fn gerador_adaptativo_nao_repete_antes_de_esgotar_o_vocabulario() {
+        let words = (0..200)
+            .map(|index| format!("palavra{index}"))
+            .collect::<Vec<_>>();
+        let mut sampler = AdaptiveSampler::default();
+        for _ in 0..24 {
+            sampler.observe(
+                "portuguese",
+                &words[0],
+                crate::adaptive::Observation::regular(true, false, false),
+            );
+        }
+        let mut generator = WordGenerator::new(&words, SmallRng::seed_from_u64(9), false, false)
+            .with_adaptive("portuguese", sampler, ReachProfile::certain(120));
+        let generated = (0..words.len())
+            .map(|_| generator.next_word())
+            .collect::<std::collections::HashSet<_>>();
+
+        assert_eq!(generated.len(), words.len());
     }
 
     #[test]
